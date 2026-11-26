@@ -40,23 +40,28 @@ func NewServer(reg *provider.Registry, a *auth.Manager) (*Server, error) {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 
-	// Auth endpoints
-	s.mux.HandleFunc("POST /api/v1/auth/login", s.handleLogin)
+	// Auth endpoints. Login is rate limited (429 + Retry-After) per IP and username.
+	s.mux.HandleFunc("POST /api/v1/auth/login", s.auth.LoginMiddleware(s.handleLogin))
 	s.mux.HandleFunc("POST /api/v1/auth/logout", s.handleLogout)
 	s.mux.HandleFunc("GET /api/v1/auth/me", s.handleMe)
 
-	// Protected multi-cluster API endpoints
+	// Protected read-only endpoints: any authenticated role (viewer included).
 	s.mux.HandleFunc("GET /api/v1/clusters", auth.RequireAuth(s.auth, s.handleClusters))
 	s.mux.HandleFunc("GET /api/v1/snapshot", auth.RequireAuth(s.auth, s.handleSnapshot))
-	s.mux.HandleFunc("POST /api/v1/pull", auth.RequireAuth(s.auth, s.handleManualPull))
-	s.mux.HandleFunc("POST /api/v1/workloads/pull", auth.RequireAuth(s.auth, s.handleWorkloadPull))
-	s.mux.HandleFunc("POST /api/v1/reconcile", auth.RequireAuth(s.auth, s.handleReconcile))
+
+	// State-changing endpoints: operator only (viewer gets 403).
+	s.mux.HandleFunc("POST /api/v1/pull", auth.RequireOperator(s.auth)(s.handleManualPull))
+	s.mux.HandleFunc("POST /api/v1/workloads/pull", auth.RequireOperator(s.auth)(s.handleWorkloadPull))
+	s.mux.HandleFunc("POST /api/v1/reconcile", auth.RequireOperator(s.auth)(s.handleReconcile))
 
 	// Contract v2 stubs consumed by WS-D (UI), WS-C (reconciler) and WS-H.
 	s.mux.HandleFunc("GET /api/v1/pull-tasks", auth.RequireAuth(s.auth, s.handlePullTasks))
-	s.mux.HandleFunc("POST /api/v1/pulls/{id}/cancel", auth.RequireAuth(s.auth, s.handleCancelPull))
+	s.mux.HandleFunc("POST /api/v1/pulls/{id}/cancel", auth.RequireOperator(s.auth)(s.handleCancelPull))
 	s.mux.HandleFunc("GET /api/v1/nodes/{node}/images", auth.RequireAuth(s.auth, s.handleNodeImages))
 	s.mux.HandleFunc("GET /api/v1/health", auth.RequireAuth(s.auth, s.handleHealth))
+
+	// Operator-only feed of the recent security audit events.
+	s.mux.HandleFunc("GET /api/v1/audit", auth.RequireOperator(s.auth)(s.handleAudit))
 
 	// Embedded static Web UI
 	sub, err := fs.Sub(staticFiles, "static")
@@ -81,26 +86,28 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
-	if !s.auth.ValidateCredentials(strings.TrimSpace(req.Username), req.Password) {
+	sess, ok := s.auth.Login(r, strings.TrimSpace(req.Username), req.Password)
+	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "неверный логин или пароль"})
 		return
 	}
-	s.auth.IssueCookie(w, r, strings.TrimSpace(req.Username))
-	writeJSON(w, http.StatusOK, map[string]any{"username": strings.TrimSpace(req.Username)})
+	s.auth.IssueCookie(w, r, sess.Username)
+	writeJSON(w, http.StatusOK, map[string]any{"username": sess.Username, "role": sess.Role})
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	s.auth.Audit(r, auth.ActionLogout, "", auth.ResultOK)
 	s.auth.ClearCookie(w, r)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	user, ok := s.auth.AuthenticateRequest(r)
+	sess, ok := s.auth.AuthenticateSession(r)
 	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"username": user})
+	writeJSON(w, http.StatusOK, map[string]string{"username": sess.Username, "role": string(sess.Role)})
 }
 
 func (s *Server) handleClusters(w http.ResponseWriter, r *http.Request, _ string) {
@@ -142,9 +149,11 @@ func (s *Server) handleManualPull(w http.ResponseWriter, r *http.Request, user s
 		Trigger: model.TriggerManual,
 	})
 	if err != nil {
+		s.auth.Audit(r, auth.ActionPull, req.Image+"@"+req.Node, auth.ResultError)
 		writeJSON(w, pullErrorStatus(err), map[string]string{"error": err.Error()})
 		return
 	}
+	s.auth.Audit(r, auth.ActionPull, req.Image+"@"+req.Node, auth.ResultOK)
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"status": "pulling",
 		"image":  req.Image,
@@ -172,9 +181,11 @@ func (s *Server) handleWorkloadPull(w http.ResponseWriter, r *http.Request, user
 		Trigger:   model.TriggerManual,
 	})
 	if err != nil {
+		s.auth.Audit(r, auth.ActionWorkloadPull, req.Namespace+"/"+req.Kind+"/"+req.Name, auth.ResultError)
 		writeJSON(w, pullErrorStatus(err), map[string]string{"error": err.Error()})
 		return
 	}
+	s.auth.Audit(r, auth.ActionWorkloadPull, req.Namespace+"/"+req.Kind+"/"+req.Name, auth.ResultOK)
 	writeJSON(w, http.StatusAccepted, map[string]any{"triggered": count})
 }
 
@@ -184,9 +195,11 @@ func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request, user st
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	if err := s.registry.SyncNow(r.Context(), req.Cluster, user); err != nil {
+		s.auth.Audit(r, auth.ActionReconcile, req.Cluster, auth.ResultError)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	s.auth.Audit(r, auth.ActionReconcile, req.Cluster, auth.ResultOK)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -220,9 +233,11 @@ func (s *Server) handleCancelPull(w http.ResponseWriter, r *http.Request, _ stri
 		cluster = req.Cluster
 	}
 	if err := s.registry.CancelPull(r.Context(), cluster, taskID); err != nil {
+		s.auth.Audit(r, auth.ActionCancelPull, taskID, auth.ResultError)
 		writeJSON(w, pullErrorStatus(err), map[string]string{"error": err.Error()})
 		return
 	}
+	s.auth.Audit(r, auth.ActionCancelPull, taskID, auth.ResultOK)
 	writeJSON(w, http.StatusAccepted, map[string]any{"taskId": taskID, "status": "canceled"})
 }
 
@@ -265,6 +280,15 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request, _ string) 
 		return
 	}
 	writeJSON(w, http.StatusOK, health)
+}
+
+// handleAudit returns the recent security audit events to operators.
+func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request, _ string) {
+	events := s.auth.RecentAudit()
+	if events == nil {
+		events = []auth.AuditEvent{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"events": events})
 }
 
 // pullErrorStatus maps errors from the pull layer onto HTTP statuses so the UI

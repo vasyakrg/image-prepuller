@@ -73,14 +73,28 @@ func runController(args []string) {
 	}
 
 	// Hub mode (Master cluster with Web UI + Auth + multi-cluster registry)
-	authMgr, err := auth.NewManager(auth.Config{
-		Username:      os.Getenv("PREPULLER_AUTH_USER"),
-		Password:      os.Getenv("PREPULLER_AUTH_PASS"),
-		SessionSecret: []byte(os.Getenv("PREPULLER_SESSION_SECRET")),
-	})
+	users, err := auth.UsersFromEnv()
 	if err != nil {
 		log.Fatalf("auth config error: %v", err)
 	}
+	rateLimitCfg, err := auth.RateLimitConfigFromEnv()
+	if err != nil {
+		log.Fatalf("auth config error: %v", err)
+	}
+	authMgr, err := auth.NewManagerFromConfig(
+		os.Getenv("PREPULLER_SESSION_SECRET"),
+		users,
+		auth.WithAuditor(auth.NewTeeAuditor(
+			auth.NewJSONAuditor(os.Stderr),
+			auth.NewMemoryAuditor(500),
+		)),
+		auth.WithRateLimit(rateLimitCfg),
+		auth.WithSecureCookie(strings.EqualFold(os.Getenv("PREPULLER_COOKIE_SECURE"), "true")),
+	)
+	if err != nil {
+		log.Fatalf("auth config error: %v", err)
+	}
+	defer func() { _ = authMgr.Close() }()
 
 	if *mockMode {
 		log.Printf("starting prepuller HUB in MOCK MODE (3 clusters)")

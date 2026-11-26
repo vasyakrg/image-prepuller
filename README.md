@@ -221,34 +221,54 @@ curl -s -b /tmp/pc 'localhost:8080/api/v1/snapshot?cluster=talos-prod-kz' | jq '
 
 | Переменная | Роль | Обязательна | Описание |
 | --- | --- | --- | --- |
-| `PREPULLER_AUTH_USER` | hub | да | Логин оператора (единственный статический пользователь) |
-| `PREPULLER_AUTH_PASS` | hub | да | Пароль оператора |
+| `PREPULLER_USERS` | hub | да* | Список пользователей `name:password:role,...`; роли `viewer` (чтение) и `operator` (чтение + pull/reconcile/cancel) |
+| `PREPULLER_AUTH_USER` | hub | да* | Legacy-логин оператора (роль `operator`); работает вместе с `_PASS` |
+| `PREPULLER_AUTH_PASS` | hub | да* | Legacy-пароль оператора |
 | `PREPULLER_SESSION_SECRET` | hub | нет | Ключ подписи cookie; без него генерируется случайный (сессии живут до рестарта) |
+| `PREPULLER_COOKIE_SECURE` | hub | нет | `true` — всегда ставить `Secure` на cookie (TLS терминируется перед hub) |
+| `PREPULLER_LOGIN_ATTEMPTS_PER_MINUTE` | hub | нет | Лимит попыток логина на IP и на username, по умолчанию `5` |
+| `PREPULLER_LOGIN_BLOCK` | hub | нет | Блокировка после исчерпания лимита, по умолчанию `5m` |
 | `PREPULLER_CLUSTER_TOKEN` | spoke | нет | Bearer-токен для `/internal/v1/*`; пустое значение = API без авторизации |
 | `PREPULLER_REMOTE_CLUSTERS` | hub | нет | Дополнительные spoke: `name=url=token,name2=url2=token2` |
-| `PREPULLER_AGENT_TOKEN` | agent | нет | Bearer-токен агентского API; пусто — без авторизации |
+| `PREPULLER_AGENT_TOKEN` | agent + hub + spoke | нет | Bearer-токен агентского API: его проверяет агент (`-token`) и им же hub/spoke ходят в `GET /agent/v1/snapshot` и `POST /agent/v1/pulls`; пусто — без авторизации |
+
+\* нужен либо `PREPULLER_USERS`, либо legacy-пара `PREPULLER_AUTH_USER`/`_PASS`.
 
 ## HTTP API
 
 Все защищённые ручки hub требуют cookie `prepuller_session` (HttpOnly, SameSite=Lax,
 `Secure` при TLS или `X-Forwarded-Proto: https`). Health-ручки открыты.
 
+### Пользователи и роли
+
+Пользователи задаются списком `PREPULLER_USERS="name:password:role,..."`, роли —
+`viewer` (только чтение) и `operator` (чтение + pull/workload-pull/reconcile/cancel).
+Старые `PREPULLER_AUTH_USER`/`PREPULLER_AUTH_PASS` продолжают работать и дают роль
+`operator`. Пароль может содержать `:` — роль берётся после последнего двоеточия.
+Cookie-сессии подписаны HMAC-SHA256 и несут роль; cookie старого формата (без роли)
+принимаются один релиз и трактуются как `operator`. Логин ограничен 5 попытками/мин
+на IP и на username, блок 5 мин, ответ `429` + `Retry-After`; успешный логин сбрасывает
+счётчики. Неудачные и запрещённые действия пишутся в аудит (JSON-строки в stderr,
+последние 500 событий доступны оператору через `GET /api/v1/audit`). Пароли и cookie
+в аудит не попадают.
+
 | Метод и путь | Доступ | Описание |
 | --- | --- | --- |
 | `GET /healthz` | открыт | Liveness, `ok` |
 | `GET /readyz` | открыт | Readiness, `ok` |
-| `POST /api/v1/auth/login` | открыт | `{username,password}` → ставит cookie |
+| `POST /api/v1/auth/login` | открыт | `{username,password}` → ставит cookie; `200 {username,role}`; `401` при неверной паре; `429` + `Retry-After` при превышении лимита |
 | `POST /api/v1/auth/logout` | открыт | Сбрасывает cookie |
-| `GET /api/v1/auth/me` | cookie | `{username}` или 401 |
+| `GET /api/v1/auth/me` | cookie | `{username,role}` или 401 |
 | `GET /api/v1/clusters` | cookie | `{defaultCluster, apiVersion, clusters[]}` |
 | `GET /api/v1/snapshot?cluster=ID` | cookie | Полный снимок кластера (`model.Snapshot`, contract v2) |
-| `POST /api/v1/pull` | cookie | `{cluster,image,node}` → 202 `{status,image,node,task}` |
-| `POST /api/v1/workloads/pull` | cookie | `{cluster,namespace,kind,name}` → 202 `{triggered}` |
-| `POST /api/v1/reconcile` | cookie | `{cluster}` → 200, принудительный синк |
+| `POST /api/v1/pull` | cookie, `operator` | `{cluster,image,node}` → 202 `{status,image,node,task}` |
+| `POST /api/v1/workloads/pull` | cookie, `operator` | `{cluster,namespace,kind,name}` → 202 `{triggered}` |
+| `POST /api/v1/reconcile` | cookie, `operator` | `{cluster}` → 200, принудительный синк |
 | `GET /api/v1/pull-tasks?cluster=ID` | cookie | `{cluster, tasks[]}` — асинхронные pull-задачи (v2) |
-| `POST /api/v1/pulls/{id}/cancel?cluster=ID` | cookie | Отмена queued/running задачи → 202; 404 — нет задачи (v2) |
+| `POST /api/v1/pulls/{id}/cancel?cluster=ID` | cookie, `operator` | Отмена queued/running задачи → 202; 404 — нет задачи (v2) |
 | `GET /api/v1/nodes/{node}/images?cluster=ID` | cookie | Кэш образов и ImageFS одной ноды (v2) |
 | `GET /api/v1/health?cluster=ID` | cookie | `model.Health` провайдера кластера (v2) |
+| `GET /api/v1/audit` | cookie, `operator` | Последние 500 событий аудита `{events:[{time,actor,role,action,target,result,remoteAddr}]}` |
 
 Spoke (только если задан `PREPULLER_CLUSTER_TOKEN` — Bearer):
 
@@ -353,17 +373,25 @@ go mod download && go test ./...
 | Stage 1 (готово) | Mock-провайдер, hub/spoke, Web UI, auth, multi-cluster, метрики |
 | contract-v2 (готово) | Provider v2 (PullTask/CancelPull/Health), counters+cancel на spoke, заглушки API, testutil, CI-каркас |
 | Stage 2 (готово) | node-agent: CRI containerd, инвентарь образов, disk-guard, HTTP/JSON API v1, pull через агент |
-| Stage 3 (в работе) | `K8sProvider` (client-go): workload'ы, слоты image×node, TTL-кэш снапшота; reconciler и `-auto-warm` |
-| Далее | RBAC/несколько пользователей, аудит-лог, Helm/Dockerfile, алерты по покрытию и ImageFS |
+| Stage 3 (готово) | `K8sProvider` (client-go): workload'ы, слоты image×node, TTL-кэш снапшота, reconciler и `-auto-warm`; транспорт к node-agent (HTTP/JSON v1, Bearer, таймауты), живой pull и present-слоты из CRI-инвентаря — включён в `main.go` через `provider.NewK8sProviderFromEnv` |
+| Далее | Helm/Dockerfile, алерты по покрытию и ImageFS, CSRF-токены, durable audit sink, argon2id |
 
 ## Известные ограничения
 
-- Один статический пользователь, без rate-limit и блокировки после неудачных попыток.
-- Автоматический prepull-цикл не реализован: `SyncNow` только обновляет `lastSeen`/`lastChecked`
-  в mock-провайдере; реальная сверка появится в Stage 3.
+- CSRF-токенов нет: state-changing ручки защищены `SameSite=Lax` и JSON-body.
+- Rate-limit логина in-memory и per-process: у нескольких реплик hub счётчики свои;
+  `ClientIP` берётся из `RemoteAddr`, поэтому за ingress все клиенты могут делить один IP.
+- Аудит не долговечен: JSON-строки в stderr без ротации + ring на 500 событий в памяти.
+- Пароли хранятся в памяти открытым текстом из env; argon2id/bcrypt — отдельный ADR.
+- Смена роли не инвалидирует активные сессии: роль берётся из подписанной cookie (TTL 24 ч).
+- В mock `SyncNow` только обновляет `lastSeen`/`lastChecked`; в live-режиме сверку выполняет
+  `K8sProvider` (list workload'ов и нод + инвентарь от агента, TTL-кэш 2 s), а авто-прогрев —
+  reconciler под флагом `-auto-warm`.
 - `Missing` в mock почти не возникает: все слоты инициализируются `present`/офлайн/паузой;
   `missing` появляется только после отмены pull-задачи (`POST /api/v1/pulls/{id}/cancel`).
 - `tasks` в mock ограничены 200 последними, `activity` — 100; пагинации пока нет.
 - Один экземпляр hub: состояние (сессии, реестр) in-memory, реплики не разделяют данные.
-- Hub при старте без `-mock` завершается с `live Kubernetes provider is Stage 3` — это
-  ожидаемое поведение, а не сломанная конфигурация.
+- Hub/spoke без `-mock` собирают live-провайдер из in-cluster конфига, иначе из
+  `$KUBECONFIG` / `~/.kube/config` (вне кластера) и падают на старте, если конфига нет.
+  Ноды без доступного агента дают `offline`-слоты, `syncStatus=degraded` и `partial=true`;
+  pull-задача при этом падает с `502`, а при диске выше порога — с `409`.

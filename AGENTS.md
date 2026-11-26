@@ -86,14 +86,14 @@ PREPULLER_CLUSTER_TOKEN=spoke-secret \
 | `internal/provider/registry.go` | потокобезопасный реестр кластеров, `DefaultID`, `AllIDs` |
 | `internal/provider/mock.go` | in-memory кластер: 4 ноды, 5 workload'ов, симуляция pull |
 | `internal/provider/remote.go` | hub → spoke по `/internal/v1/*` с Bearer |
-| `internal/auth/auth.go` | cookie-сессии: HMAC-SHA256, TTL, constant-time |
-| `internal/auth/middleware.go` | `RequireAuth` (hub cookie) и `RequireToken` (spoke Bearer) |
+| `internal/auth/**` | cookie-сессии с ролью (HMAC-SHA256), RBAC (`RequireAuth`/`RequireRole`/`RequireOperator`), rate-limit логина, аудит; `users.go`, `roles.go`, `audit.go`, `ratelimit.go` |
+| `internal/auth/middleware.go` | `RequireAuth` (hub cookie), `RequireToken` (spoke Bearer), `RequireRole`/`RequireOperator` |
 | `internal/web/server.go` | hub-роутер, hub-хендлеры, `writeJSON` |
 | `internal/web/server_spoke.go` | spoke-роутер `/internal/v1/*` (contract v2) |
 | `internal/web/static/` | UI: `index.html`, `app.js`, `styles.css` |
 | `internal/metrics/prometheus.go` | сборка `/metrics` по всем кластерам |
 | `internal/agent/` | node-agent: CRI-клиент (grpc+cri-api), инвентарь образов, disk-guard, HTTP/JSON API v1 |
-| `internal/provider/k8s_*.go` | `K8sProvider` на client-go: list Deployments/STS/DS и Node, слоты image×node, policy-warnings, TTL-кэш снапшота, `NodeInventorySource` (инвентарь от агента) |
+| `internal/provider/k8s_*.go` | `K8sProvider` на client-go: list Deployments/STS/DS и Node, слоты image×node, policy-warnings, TTL-кэш снапшота; транспорт к node-agent (snapshot + pull, HTTP/JSON v1, Bearer, таймауты) и `NewK8sProviderFromEnv` |
 | `internal/reconcile/` | политика авто-прогрева: очередь, приоритеты (failed > missing, prod > staging > infra), лимиты, backoff |
 | `internal/testutil/` | фейковый spoke/hub, golden-снапшот v2, контрактные тесты |
 | `cmd/prepuller/agent.go` | `runAgent()`: флаги агента, запуск HTTP/JSON сервера, graceful shutdown |
@@ -124,7 +124,7 @@ PREPULLER_CLUSTER_TOKEN=spoke-secret \
    `/readyz`, логин/логаут и статика. `/api/v1/auth/me` проверяет cookie сам.
 7. **Spoke-ручки идут через `requireToken`.** Пустой `PREPULLER_CLUSTER_TOKEN` отключает
    проверку — это осознанное поведение для локальной разработки, не «фича для прода».
-8. **Секреты и пароли не логируются** и не попадают в ответы API. Сравнения — constant-time
+8. **Секреты и пароли не логируются** и не попадают в ответы API; аудит пишется через `auth.Auditor`, `AuditEvent` не имеет свободных полей. Сравнения — constant-time
    (`crypto/subtle`), как в `auth.go` и spoke-middleware.
 9. **Состояние слотов вычисляется в одном месте** (сейчас `MockProvider`, позже
    `K8sProvider`). UI только отображает `PullState`, не выводит статусы сам.
@@ -154,10 +154,11 @@ PREPULLER_CLUSTER_TOKEN=spoke-secret \
 
 ## 7. Тесты
 
-- `internal/auth/auth_test.go` — cookie-flow: валидные/невалидные креды, подпись, подделка.
+- `internal/auth/*_test.go` — cookie-flow: валидные/невалидные креды, подпись, подделка; роли (401 vs 403), v1-cookie, rate-limit на фейковых часах, аудит без секретов, `-race`.
 - `internal/web/server_test.go` — 401 без cookie, логин, список кластеров, снапшот
   удалённого кластера, Bearer-защита spoke, counters/cancel/apiVersion, наличие
-  кластерных метрик.
+  кластерных метрик. `internal/web/rbac_test.go` — wiring RBAC: viewer 403 на
+  state-changing ручки, operator 202, `/api/v1/audit` и 429 при превышении лимита логина.
 - `internal/agent/*_test.go` — CRI-адаптер на фейках, инвентарь и disk-guard, HTTP-сервер
   агента (auth, коды 200/400/401/404/409/502), mock-бэкенд без containerd.
 - `internal/provider/k8s_test.go` — K8sProvider на fake clientset: workload'ы, слоты,
@@ -181,6 +182,13 @@ PREPULLER_CLUSTER_TOKEN=spoke-secret \
   снапшота живёт в провайдере (`K8sProvider` — TTL 2s), а не в метриках.
 - **`K8sProvider` без node-agent**: слоты `offline`, `syncStatus=degraded`, `partial=true` —
   это ожидаемо (агент не отдал инвентарь), а не баг. Pull в live-режиме идёт через агент.
+- **K8sProvider ходит в агент по HTTP на :9443** (`WithAgentPort/Token/Timeout/Scheme`, адрес —
+  `Node.status.addresses` InternalIP). Pull синхронный: `CancelPull` для выполняющегося →
+  `ErrCancelNotSupported` (409), для завершённого → «already finished», для неизвестного →
+  `ErrTaskNotFound` (404). 409 от агента = диск-пауза → failed-задача и
+  `errors.Is(err, provider.ErrAgentDiskPaused)`; недоступный агент — `502` (`ErrAgentUnavailable`).
+  `k8s_nodes.go` опрашивает ноды последовательно, поэтому при массовом недоступе агентов
+  снапшот тормозит до `WithAgentTimeout` (5 s) на ноду.
 - **`RemoteProvider.PullCounters()` ходит в `GET /internal/v1/counters`** (contract v2);
   при недоступном spoke возвращает `nil` — это по-прежнему значит «метрик нет», а не «ноль».
 - **`RemoteProvider.Snapshot` глотает ошибки**: при недоступном spoke возвращается пустой
@@ -194,12 +202,13 @@ PREPULLER_CLUSTER_TOKEN=spoke-secret \
 - **Модульные кэши**: в песочнице `$HOME` read-only — используйте
   `GOCACHE=$PWD/.gocache GOPATH=$PWD/.gopath GOMODCACHE=$PWD/.gopath/pkg/mod`.
   `.gopath/` в `.gitignore`, в историю не коммитится.
-- **`auth.NewManager` падает без логина/пароля** — hub без `PREPULLER_AUTH_USER`/`_PASS`
-  не стартует. Это ожидаемо.
+- **`auth.NewManager` падает без логина/пароля** — hub без `PREPULLER_USERS` или
+  `PREPULLER_AUTH_USER`/`_PASS` не стартует. Это ожидаемо.
 - **Случайный session secret** без `PREPULLER_SESSION_SECRET` означает разлогин после
   рестарта и несовместимость нескольких реплик.
-- **`-mock` обязателен**: без него оба режима завершаются `log.Fatalf`. Не «чините» это
-  заглушкой, пока не реализован живой провайдер.
+- **Без `-mock` запускается live-путь**: провайдер собирается `NewK8sProviderFromEnv`
+  (in-cluster конфиг → `$KUBECONFIG` → `~/.kube/config`) и падает на старте, если конфига
+  нет — это ожидаемо, а не баг. Для UI-разработки по-прежнему `-mock`.
 - **`.gocache/`, `bin/`, `.gomodcache/` в корне** — локальные кэши сборки и модулей,
   они в `.gitignore` и в историю не попадают; не коммитьте их принудительно и не удаляйте
   вслепую, если в них завязан прогон. `bin/prepuller` — артефакт сборки.
