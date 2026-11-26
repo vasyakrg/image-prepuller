@@ -99,6 +99,7 @@ PREPULLER_CLUSTER_TOKEN=spoke-secret \
 | `cmd/prepuller/agent.go` | `runAgent()`: флаги агента, запуск HTTP/JSON сервера, graceful shutdown |
 | `.gitea/workflows/ci.yaml` | CI: gofmt, vet, test, build linux/amd64+arm64, helm lint/template |
 | `.gitea/workflows/build-image.yaml` | Сборка и публикация образа (buildx, amd64+arm64) и Helm-чарта в реестр |
+| `.github/workflows/pr-agent.yml` | Ревью pull request'ов моделью (PR-Agent): `review` на открытие PR, `command` на комментарий со слэшем (только владелец), `doctor` вручную. Секреты — `OPENAI_API_BASE`/`OPENAI_KEY`; подробности в `docs/pr-agent.md` |
 | `Dockerfile` | multi-stage образ: golang:1.24 builder → distroless nonroot (65532) |
 | `deploy/helm/image-prepuller/` | Helm-чарт: hub, spoke, agent DaemonSet, RBAC, NetworkPolicy, ingress |
 | `docs/DEPLOY.md` | чеклист деплоя: секреты, k3d-стенд, e2e-сценарий |

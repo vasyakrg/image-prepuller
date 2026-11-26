@@ -1,0 +1,289 @@
+name: PR-Agent
+
+# Ревью pull request'ов моделью без отдельного сервиса: Actions поднимает
+# контейнер PR-Agent, тот забирает дифф по API GitHub и публикует ревью
+# комментарием. Ни домена, ни webhook'а, ни постоянного процесса.
+#
+# Режимы:
+#   * review  — на открытие/переоткрытие PR и готовность к ревью (synchronize
+#               выключен: PR из десяти коммитов — десять платных ревью);
+#   * command — на комментарий вида "/review", "/describe", "/ask ...";
+#   * doctor  — ручной запуск: проверяет модель, ключ и доступность шлюза.
+#
+# Настройки приходят ТОЛЬКО переменными окружения, без .pr_agent.toml в
+# репозитории: PR-Agent читает этот файл из ПРОВЕРЯЕМОЙ ветки, то есть из кода
+# самого PR, а в job'е лежат ключи. Checkout не делается по той же причине —
+# дифф PR-Agent забирает по API.
+#
+# Секреты репозитория (Settings -> Secrets and variables -> Actions):
+#   OPENAI_API_BASE  OpenAI-совместимый адрес шлюза ВМЕСТЕ с /v1
+#   OPENAI_KEY       ключ шлюза
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+env:
+  # id модели в шлюзе сам содержит слэш, поэтому префикс openai/ обязателен:
+  # LiteLLM отрезает префикс и отправляет остаток как есть. С префиксом
+  # deepseek/ уходило бы "deepseek-v4.1-flash-1017" без сегмента "deepseek/".
+  CONFIG__MODEL: openai/deepseek/deepseek-v4.1-flash-1017
+  # Рассуждения выключены: с ними модель выжигает бюджет ответа и возвращает
+  # пустой content с finish_reason=length.
+  CONFIG__REASONING_EFFORT: none
+  CONFIG__ADDITIONAL_REASONING_EFFORT_MODELS: '["deepseek/deepseek-v4.1-flash-1017"]'
+  CONFIG__MAX_OUTPUT_TOKENS: "8000"
+  CONFIG__CUSTOM_MODEL_MAX_TOKENS: "128000"
+  # Запасных моделей нет: умолчание подставляет посторонние id, чьи запросы
+  # уходят в чужой адрес и только удлиняют лог.
+  CONFIG__FALLBACK_MODELS: "[]"
+  CONFIG__GIT_PROVIDER: github
+  CONFIG__RESPONSE_LANGUAGE: ru-RU
+  PR_AGENT_IMAGE: pragent/pr-agent:0.50.0
+
+jobs:
+  review:
+    name: Review on pull request
+    # Только PR из этого же репозитория: форки не поддерживаются — job получает
+    # секреты и отправляет дифф на внешний шлюз, а ветку из чужого репозитория
+    # контролирует автор PR.
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Preflight — доступность шлюза
+        # Диагностика, а не проверка: печатает производные строки (длина, схема,
+        # хост, DNS, TCP, код ответа /models) и никогда не валит job. Сам ключ и
+        # адрес целиком в лог не попадают.
+        if: always()
+        shell: bash
+        env:
+          OPENAI__API_BASE: ${{ secrets.OPENAI_API_BASE }}
+          OPENAI__KEY: ${{ secrets.OPENAI_KEY }}
+        run: |
+          set -u
+          base="${OPENAI__API_BASE:-}"
+          if [ -z "$base" ]; then echo "OPENAI__API_BASE пуст — секрет не доехал до job'а"; exit 0; fi
+          py=python3; command -v "$py" >/dev/null 2>&1 || py=python
+          "$py" - "$base" <<'PY'
+          import os, socket, sys, urllib.error, urllib.request
+
+          base = sys.argv[1]
+          print("длина значения:", len(base), "| отличается от обрезанного:", base != base.strip())
+          if base and (base[0] in "\"'" or base[-1] in "\"'"):
+              print("ВНИМАНИЕ: в значении кавычки")
+          print("схема:", base.split(":", 1)[0] if "://" in base else "нет схемы")
+          host = base.split("://", 1)[-1].split("/", 1)[0]
+          print("хост:", host)
+          name, _, port = host.partition(":")
+          port = int(port or (443 if base.startswith("https") else 80))
+          try:
+              infos = socket.getaddrinfo(name, port, proto=socket.IPPROTO_TCP)
+              print("DNS:", ", ".join(sorted({i[4][0] for i in infos})))
+          except Exception as exc:
+              print("DNS error:", type(exc).__name__, exc); sys.exit(0)
+          try:
+              sock = socket.create_connection((name, port), timeout=10)
+              sock.close()
+              print("TCP: соединение установлено")
+          except Exception as exc:
+              print("TCP error:", type(exc).__name__, exc); sys.exit(0)
+          req = urllib.request.Request(
+              base.rstrip("/") + "/models",
+              headers={"Authorization": "Bearer " + os.environ.get("OPENAI__KEY", "")},
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=20) as resp:
+                  print("HTTP:", resp.status)
+          except urllib.error.HTTPError as exc:
+              print("HTTP:", exc.code)
+          except Exception as exc:
+              print("HTTP error:", type(exc).__name__, exc)
+          PY
+
+      - name: Review pull request
+        shell: bash
+        env:
+          OPENAI__API_BASE: ${{ secrets.OPENAI_API_BASE }}
+          OPENAI__KEY: ${{ secrets.OPENAI_KEY }}
+          GITHUB__USER_TOKEN: ${{ secrets.PR_AGENT_TOKEN || secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          # Номер PR. Основной источник — событие; резервный — ref вида
+          # refs/pull/<N>/head, который Actions выставляет на PR-событиях.
+          num="${PR_NUMBER:-}"
+          [ -n "$num" ] || num=$(printf '%s' "${GITHUB_REF:-}" | sed -n 's#^refs/pull/\([0-9][0-9]*\)/.*#\1#p')
+          [ -n "$num" ] || { echo "не удалось определить номер PR" >&2; exit 1; }
+
+          url="https://github.com/${REPO}/pull/${num}"
+          echo "PR-Agent: $url"
+          # Переменные передаются в контейнер по имени: значения не попадают в
+          # командную строку (а значит и в лог).
+          docker run --rm \
+            --env OPENAI__API_BASE --env OPENAI__KEY --env GITHUB__USER_TOKEN \
+            --env CONFIG__MODEL --env CONFIG__REASONING_EFFORT \
+            --env CONFIG__ADDITIONAL_REASONING_EFFORT_MODELS \
+            --env CONFIG__MAX_OUTPUT_TOKENS --env CONFIG__CUSTOM_MODEL_MAX_TOKENS \
+            --env CONFIG__FALLBACK_MODELS --env CONFIG__GIT_PROVIDER \
+            --env CONFIG__RESPONSE_LANGUAGE \
+            "$PR_AGENT_IMAGE" \
+            --pr_url "$url" review
+
+  command:
+    name: Command from comment
+    # Только комментарии в pull request'ах, только начинающиеся со слэша и
+    # только от владельца репозитория. Право комментировать PR не должно давать
+    # право запускать команды: тело комментария становится аргументами
+    # pr-agent, а job держит ключ шлюза и токен GitHub.
+    if: >-
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request != null &&
+      startsWith(github.event.comment.body, '/') &&
+      github.event.comment.user.login == github.repository_owner
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run requested command
+        shell: bash
+        env:
+          OPENAI__API_BASE: ${{ secrets.OPENAI_API_BASE }}
+          OPENAI__KEY: ${{ secrets.OPENAI_KEY }}
+          GITHUB__USER_TOKEN: ${{ secrets.PR_AGENT_TOKEN || secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          set -eu
+
+          # Первая строка комментария: "/команда аргументы".
+          first=$(printf '%s' "${COMMENT_BODY:-}" | head -n1)
+          case "$first" in
+            /*) ;;
+            *) echo "комментарий не команда — пропускаю"; exit 0 ;;
+          esac
+          body="${first#/}"
+          cmd="${body%%[[:space:]]*}"
+          args="${body#"${cmd}"}"
+          args="${args#"${args%%[![:space:]]*}"}"   # срезать ведущие пробелы
+          args=$(printf '%s' "$args" | head -c 2000)  # потолок на свободный текст
+
+          # Номер PR берём только из события: на issue_comment GITHUB_REF
+          # указывает на основную ветку, refs/pull/N/head там не появляется.
+          num="${PR_NUMBER:-}"
+          [ -n "$num" ] || { echo "не удалось определить номер PR из события issue_comment" >&2; exit 1; }
+          url="https://github.com/${REPO}/pull/${num}"
+
+          # Аргументы НИКОГДА не проходят через shell: они собираются в массив
+          # и уходят pr-agent отдельными словами. Иначе "/ask $(...)" выполнил бы
+          # подстановку команд в job'е с секретами.
+          argv=(--pr_url "$url" "$cmd")
+          case "$cmd" in
+            ask|ask_question)
+              [ -n "$args" ] || { echo "нужен текст: /$cmd вопрос" >&2; exit 1; }
+              argv+=("$args")
+              ;;
+            improve)
+              case "$args" in
+                "") ;;
+                --extended) argv+=(--extended) ;;
+                *) echo "допустимо только /improve или /improve --extended" >&2; exit 1 ;;
+              esac
+              ;;
+            review|describe|add_docs|update_changelog|generate_labels)
+              [ -z "$args" ] || { echo "команда /$cmd не принимает аргументов" >&2; exit 1; }
+              ;;
+            *) echo "неизвестная команда: /$cmd" >&2; exit 1 ;;
+          esac
+
+          echo "PR-Agent: $url /$cmd"
+          docker run --rm \
+            --env OPENAI__API_BASE --env OPENAI__KEY --env GITHUB__USER_TOKEN \
+            --env CONFIG__MODEL --env CONFIG__REASONING_EFFORT \
+            --env CONFIG__ADDITIONAL_REASONING_EFFORT_MODELS \
+            --env CONFIG__MAX_OUTPUT_TOKENS --env CONFIG__CUSTOM_MODEL_MAX_TOKENS \
+            --env CONFIG__FALLBACK_MODELS --env CONFIG__GIT_PROVIDER \
+            --env CONFIG__RESPONSE_LANGUAGE \
+            "$PR_AGENT_IMAGE" \
+            "${argv[@]}"
+
+  doctor:
+    name: Check credentials
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Preflight — доступность шлюза
+        # Диагностика, а не проверка: печатает производные строки (длина, схема,
+        # хост, DNS, TCP, код ответа /models) и никогда не валит job. Сам ключ и
+        # адрес целиком в лог не попадают.
+        if: always()
+        shell: bash
+        env:
+          OPENAI__API_BASE: ${{ secrets.OPENAI_API_BASE }}
+          OPENAI__KEY: ${{ secrets.OPENAI_KEY }}
+        run: |
+          set -u
+          base="${OPENAI__API_BASE:-}"
+          if [ -z "$base" ]; then echo "OPENAI__API_BASE пуст — секрет не доехал до job'а"; exit 0; fi
+          py=python3; command -v "$py" >/dev/null 2>&1 || py=python
+          "$py" - "$base" <<'PY'
+          import os, socket, sys, urllib.error, urllib.request
+
+          base = sys.argv[1]
+          print("длина значения:", len(base), "| отличается от обрезанного:", base != base.strip())
+          if base and (base[0] in "\"'" or base[-1] in "\"'"):
+              print("ВНИМАНИЕ: в значении кавычки")
+          print("схема:", base.split(":", 1)[0] if "://" in base else "нет схемы")
+          host = base.split("://", 1)[-1].split("/", 1)[0]
+          print("хост:", host)
+          name, _, port = host.partition(":")
+          port = int(port or (443 if base.startswith("https") else 80))
+          try:
+              infos = socket.getaddrinfo(name, port, proto=socket.IPPROTO_TCP)
+              print("DNS:", ", ".join(sorted({i[4][0] for i in infos})))
+          except Exception as exc:
+              print("DNS error:", type(exc).__name__, exc); sys.exit(0)
+          try:
+              sock = socket.create_connection((name, port), timeout=10)
+              sock.close()
+              print("TCP: соединение установлено")
+          except Exception as exc:
+              print("TCP error:", type(exc).__name__, exc); sys.exit(0)
+          req = urllib.request.Request(
+              base.rstrip("/") + "/models",
+              headers={"Authorization": "Bearer " + os.environ.get("OPENAI__KEY", "")},
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=20) as resp:
+                  print("HTTP:", resp.status)
+          except urllib.error.HTTPError as exc:
+              print("HTTP:", exc.code)
+          except Exception as exc:
+              print("HTTP error:", type(exc).__name__, exc)
+          PY
+
+      - name: Doctor
+        shell: bash
+        env:
+          OPENAI__API_BASE: ${{ secrets.OPENAI_API_BASE }}
+          OPENAI__KEY: ${{ secrets.OPENAI_KEY }}
+        # Проверяет ровно то, что ломается молча: модель сконфигурирована, ключ
+        # виден, запрос к модели проходит.
+        run: |
+          docker run --rm \
+            --env OPENAI__API_BASE --env OPENAI__KEY --env GITHUB__USER_TOKEN \
+            --env CONFIG__MODEL --env CONFIG__REASONING_EFFORT \
+            --env CONFIG__ADDITIONAL_REASONING_EFFORT_MODELS \
+            --env CONFIG__MAX_OUTPUT_TOKENS --env CONFIG__CUSTOM_MODEL_MAX_TOKENS \
+            --env CONFIG__FALLBACK_MODELS --env CONFIG__GIT_PROVIDER \
+            --env CONFIG__RESPONSE_LANGUAGE \
+            "$PR_AGENT_IMAGE" \
+            doctor

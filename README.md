@@ -401,6 +401,11 @@ go mod download && go test ./...
 `.gocache/`, `.gopath/`, `.gomodcache/` и `bin/` — в `.gitignore`. Правила, инварианты
 и зоны записи для агентов — в [AGENTS.md](AGENTS.md) и [docs/PLAN.md](docs/PLAN.md).
 
+Ревью pull request'ов моделью — [`.github/workflows/pr-agent.yml`](.github/workflows/pr-agent.yml):
+на открытие PR и по команде в комментарии (`/review`, `/describe`, `/ask ...`). Секреты
+(`OPENAI_API_BASE`, `OPENAI_KEY`), проверка `doctor` и список граблей — в
+[docs/pr-agent.md](docs/pr-agent.md).
+
 ## Roadmap
 
 Подробный план работ с разбивкой на параллельные потоки, зоны записи и порядок мержа —
