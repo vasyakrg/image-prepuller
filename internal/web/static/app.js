@@ -8,6 +8,8 @@
     expanded: new Set(),
     pollTimer: null,
     autoRefresh: true,
+    // Open node detail panel: { name, data, error } or null when closed.
+    nodeDetail: null,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -25,6 +27,34 @@
     if (!iso) return "—";
     const d = new Date(iso);
     return d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  }
+
+  function fmtDur(ms) {
+    if (!ms) return "—";
+    const s = ms / 1000;
+    return s < 10 ? s.toFixed(2) + "s" : Math.round(s) + "s";
+  }
+
+  // Duration is reported by the API once the task finishes; while it is still
+  // active we derive a live value from startedAt so the table does not go stale.
+  function taskDuration(t) {
+    if (t.durationMs) return fmtDur(t.durationMs);
+    if (!t.startedAt) return "—";
+    const started = new Date(t.startedAt).getTime();
+    if (t.state === "running") return fmtDur(Date.now() - started);
+    if (t.finishedAt) return fmtDur(new Date(t.finishedAt).getTime() - started);
+    return "—";
+  }
+
+  function taskStateLabel(st) {
+    switch (st) {
+      case "queued": return { text: "Queued", cls: "pill-neutral" };
+      case "running": return { text: "Running", cls: "pill-blue" };
+      case "succeeded": return { text: "Succeeded", cls: "pill-green" };
+      case "failed": return { text: "Failed", cls: "pill-red" };
+      case "canceled": return { text: "Canceled", cls: "pill-gray" };
+      default: return { text: st || "—", cls: "pill-neutral" };
+    }
   }
 
   function esc(str) {
@@ -102,6 +132,7 @@
       const qs = state.activeCluster ? `?cluster=${encodeURIComponent(state.activeCluster)}` : "";
       state.snapshot = await api(`/api/v1/snapshot${qs}`);
       render();
+      if (state.nodeDetail) await refreshNodeDetail();
     } catch (err) {
       if (err.message !== "unauthorized") showToast(`Ошибка обновления: ${err.message}`);
     }
@@ -157,6 +188,7 @@
 
     renderWorkloads(snap);
     renderNodes(snap);
+    renderTasks(snap);
     renderActivity(snap);
   }
 
@@ -341,8 +373,12 @@
         `<div class="cached-item"><span class="mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(ci.image)}</span><span class="muted">${fmtBytes(ci.sizeBytes)}</span></div>`
       ).join("") || '<div class="muted" style="font-size:12px">Нет данных об образах</div>';
 
+      const selected = state.nodeDetail && state.nodeDetail.name === n.name;
       return `
-        <div class="node-card">
+        <div class="node-card node-card-clickable${selected ? " node-card-active" : ""}"
+             data-node="${esc(n.name)}" role="button" tabindex="0"
+             aria-pressed="${selected ? "true" : "false"}"
+             title="Открыть детали ноды ${esc(n.name)}">
           <div class="node-card-header">
             <strong class="mono" style="font-size:14px">${esc(n.name)}</strong>
             <div style="display:flex;gap:6px;flex-wrap:wrap">${badges}</div>
@@ -364,6 +400,18 @@
         </div>
       `;
     }).join("");
+
+    grid.querySelectorAll(".node-card").forEach((card) => {
+      const name = card.dataset.node;
+      const toggle = () => toggleNodeDetail(name);
+      card.addEventListener("click", toggle);
+      card.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          toggle();
+        }
+      });
+    });
   }
 
   function renderActivity(snap) {
@@ -393,6 +441,192 @@
     }).join("");
   }
 
+  // --- Pull tasks -------------------------------------------------------
+  function clusterQuery() {
+    return state.activeCluster ? `?cluster=${encodeURIComponent(state.activeCluster)}` : "";
+  }
+
+  function renderTasks(snap) {
+    const tasks = snap.tasks || [];
+    const queued = tasks.filter((t) => t.state === "queued").length;
+    const running = tasks.filter((t) => t.state === "running").length;
+    const failed = tasks.filter((t) => t.state === "failed").length;
+
+    $("tab-tasks-count").textContent = String(queued + running);
+    $("tasks-summary").textContent =
+      `Всего: ${tasks.length}` +
+      (queued ? ` · queued ${queued}` : "") +
+      (running ? ` · running ${running}` : "") +
+      (failed ? ` · failed ${failed}` : "");
+
+    const tbody = $("tasks-tbody");
+    if (tasks.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="9" class="empty-row">Пока нет pull-задач. Запустите Pull из Workloads или дождитесь auto-триггера.</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = tasks.map((t) => {
+      const st = taskStateLabel(t.state);
+      const isActive = t.state === "queued" || t.state === "running";
+      const trigger = t.trigger ? `${t.trigger}${t.actor ? " · " + t.actor : ""}` : (t.actor || "—");
+      const created = fmtTime(t.createdAt);
+      const cancelBtn = isActive
+        ? `<button class="btn btn-secondary btn-xs btn-task-cancel" data-task-id="${esc(t.id)}" title="Отменить задачу ${esc(t.id)}">✕ Отменить</button>`
+        : '<span class="muted">—</span>';
+      return `
+        <tr>
+          <td class="mono">${esc(t.id)}</td>
+          <td class="mono">${esc(t.image)}</td>
+          <td class="mono">${esc(t.node)}</td>
+          <td><span class="pill ${st.cls}">${esc(st.text)}</span></td>
+          <td class="mono">#${t.attempt ?? 1}</td>
+          <td>${esc(trigger)}</td>
+          <td class="mono muted">${created} · ${taskDuration(t)}</td>
+          <td>${t.error ? `<span class="cell-err">${esc(t.error)}</span>` : '<span class="muted">—</span>'}</td>
+          <td class="right">${cancelBtn}</td>
+        </tr>
+      `;
+    }).join("");
+
+    tbody.querySelectorAll(".btn-task-cancel").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const id = btn.dataset.taskId;
+        btn.disabled = true;
+        try {
+          await api(`/api/v1/pulls/${encodeURIComponent(id)}/cancel${clusterQuery()}`, { method: "POST" });
+          showToast(`Задача отменена: ${id}`);
+          await refresh();
+        } catch (err) {
+          btn.disabled = false;
+          showToast(`Не удалось отменить задачу: ${err.message}`);
+        }
+      });
+    });
+  }
+
+  // --- Node detail panel ------------------------------------------------
+  function toggleNodeDetail(name) {
+    if (state.nodeDetail && state.nodeDetail.name === name) {
+      closeNodeDetail();
+      return;
+    }
+    state.nodeDetail = { name, data: null, error: "" };
+    if (state.snapshot) renderNodes(state.snapshot);
+    renderNodeDetail();
+    refreshNodeDetail();
+  }
+
+  function closeNodeDetail() {
+    state.nodeDetail = null;
+    renderNodeDetail();
+    if (state.snapshot) renderNodes(state.snapshot);
+  }
+
+  async function refreshNodeDetail() {
+    const nd = state.nodeDetail;
+    if (!nd) return;
+    try {
+      const data = await api(`/api/v1/nodes/${encodeURIComponent(nd.name)}/images${clusterQuery()}`);
+      if (!state.nodeDetail || state.nodeDetail.name !== nd.name) return;
+      state.nodeDetail.data = data;
+      state.nodeDetail.error = "";
+      renderNodeDetail();
+    } catch (err) {
+      if (!state.nodeDetail || state.nodeDetail.name !== nd.name) return;
+      if (err.message === "unauthorized") return;
+      state.nodeDetail.error = err.message;
+      renderNodeDetail();
+    }
+  }
+
+  function renderNodeDetail() {
+    const el = $("node-detail");
+    const nd = state.nodeDetail;
+    if (!nd) {
+      el.classList.add("hidden");
+      el.innerHTML = "";
+      return;
+    }
+    el.classList.remove("hidden");
+
+    const head = `
+      <div class="node-detail-head">
+        <div>
+          <div class="muted node-detail-eyebrow">Node detail</div>
+          <strong class="mono" style="font-size:15px">${esc(nd.name)}</strong>
+        </div>
+        <button id="btn-node-detail-close" class="btn btn-ghost btn-xs" title="Закрыть панель (Esc)">✕ Закрыть</button>
+      </div>
+    `;
+
+    if (!nd.data) {
+      el.innerHTML = head + (nd.error
+        ? `<div class="error-banner">${esc(nd.error)}</div>`
+        : '<div class="muted" style="font-size:12.5px">Загрузка данных ноды…</div>');
+      el.querySelector("#btn-node-detail-close").addEventListener("click", closeNodeDetail);
+      return;
+    }
+
+    const d = nd.data;
+    const pct = d.imageFsTotal > 0 ? (d.imageFsUsed / d.imageFsTotal) * 100 : 0;
+    const snapNode = ((state.snapshot && state.snapshot.nodes) || []).find((n) => n.name === nd.name);
+    let barColor = "var(--green)";
+    if (snapNode && pct >= snapNode.kubeletGcThreshold * 100) barColor = "var(--red)";
+    else if (snapNode && pct >= snapNode.diskPauseThreshold * 100) barColor = "var(--purple)";
+    else if (pct >= 70) barColor = "var(--amber)";
+
+    const badges = [
+      d.ready ? '<span class="pill pill-green">Ready</span>' : '<span class="pill pill-red">NotReady</span>',
+      d.agentUp ? '<span class="pill pill-green">Agent UP</span>' : '<span class="pill pill-red">Agent DOWN</span>',
+      d.diskPaused ? '<span class="pill pill-purple">Disk Paused</span>' : "",
+    ].filter(Boolean).join(" ");
+
+    const cached = d.cachedImages || [];
+    const cachedHtml = cached.length
+      ? cached.map((ci) => `<div class="cached-item"><span class="mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(ci.image)}</span><span class="muted">${fmtBytes(ci.sizeBytes)}</span></div>`).join("")
+      : '<div class="muted" style="font-size:12px">Нет кэшированных образов</div>';
+
+    const conditions = d.conditions || [];
+    const conditionsHtml = conditions.length
+      ? conditions.map((c) => `
+          <div class="condition-item">
+            <span class="pill ${c.status === "True" ? "pill-green" : "pill-red"}">${esc(c.type)}: ${esc(c.status)}</span>
+            <span class="muted condition-detail">${esc(c.reason || "")}${c.message ? " · " + esc(c.message) : ""}</span>
+          </div>
+        `).join("")
+      : '<div class="muted" style="font-size:12px">Условий нет</div>';
+
+    el.innerHTML = head + `
+      <div class="node-detail-badges">${badges}</div>
+      <div class="node-detail-meta">
+        <div class="node-detail-stat">
+          <div class="node-detail-label">ImageFS used / capacity</div>
+          <div class="mono">${fmtBytes(d.imageFsUsed)} / ${fmtBytes(d.imageFsTotal)} (${pct.toFixed(1)}%)</div>
+        </div>
+        <div class="node-detail-stat">
+          <div class="node-detail-label">Disk paused</div>
+          <div class="mono">${d.diskPaused ? "yes" : "no"}</div>
+        </div>
+        <div class="node-detail-stat">
+          <div class="node-detail-label">Agent version</div>
+          <div class="mono">${esc(d.agentVersion || "—")}</div>
+        </div>
+        <div class="node-detail-stat">
+          <div class="node-detail-label">Last seen</div>
+          <div class="mono">${fmtTime(d.lastSeen)}</div>
+        </div>
+      </div>
+      <div class="disk-bar-wrap" title="ImageFS: ${pct.toFixed(1)}%">
+        <div class="disk-bar-fill" style="width:${Math.min(pct, 100).toFixed(1)}%;background:${barColor}"></div>
+      </div>
+      <div class="node-detail-section-title">Cached images (${cached.length})</div>
+      <div class="cached-list node-detail-cached">${cachedHtml}</div>
+      <div class="node-detail-section-title">Conditions</div>
+      <div class="conditions-list">${conditionsHtml}</div>
+    `;
+    el.querySelector("#btn-node-detail-close").addEventListener("click", closeNodeDetail);
+  }
+
   // Event bindings
   $("login-form").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -418,6 +652,7 @@
   $("cluster-select").addEventListener("change", (e) => {
     state.activeCluster = e.target.value;
     state.expanded.clear();
+    closeNodeDetail();
     refresh();
   });
 
@@ -435,6 +670,10 @@
     state.autoRefresh = e.target.checked;
     if (state.autoRefresh) startPolling();
     else stopPolling();
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && state.nodeDetail) closeNodeDetail();
   });
 
   document.querySelectorAll(".tab").forEach((btn) => {

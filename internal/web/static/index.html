@@ -44,6 +44,7 @@
         <span id="mock-badge" class="pill pill-purple hidden">MOCK MODE</span>
         <nav class="tabs">
           <button class="tab active" data-tab="workloads">Workloads</button>
+          <button class="tab" data-tab="tasks">Pull Tasks <span id="tab-tasks-count" class="tab-count">0</span></button>
           <button class="tab" data-tab="nodes">Nodes <span id="tab-nodes-count" class="tab-count">0</span></button>
           <button class="tab" data-tab="activity">Activity</button>
         </nav>
@@ -114,8 +115,39 @@
         </div>
       </section>
 
+      <!-- Pull Tasks Tab -->
+      <section id="tab-tasks" class="tab-panel hidden">
+        <div class="toolbar">
+          <span id="tasks-summary" class="muted">—</span>
+          <span class="toolbar-spacer"></span>
+          <span class="muted" style="font-size:12px">Живое обновление: поллинг 5 s</span>
+        </div>
+        <div class="card table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Task</th>
+                <th>Image</th>
+                <th>Node</th>
+                <th>State</th>
+                <th>Attempt</th>
+                <th>Trigger</th>
+                <th>Created / Duration</th>
+                <th>Error</th>
+                <th class="right">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="tasks-tbody"></tbody>
+          </table>
+        </div>
+      </section>
+
       <!-- Nodes Tab -->
       <section id="tab-nodes" class="tab-panel hidden">
+        <div class="toolbar">
+          <span class="muted" style="font-size:12px">Нажмите на ноду, чтобы открыть детали: образы, ImageFS, условия.</span>
+        </div>
+        <div id="node-detail" class="node-detail hidden"></div>
         <div id="nodes-grid" class="nodes-grid"></div>
       </section>
 
