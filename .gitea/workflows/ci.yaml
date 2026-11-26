@@ -82,6 +82,10 @@ jobs:
 
       - name: validate rendered YAML
         run: |
+          # PyYAML is not guaranteed on the runner image; install it with fallbacks.
+          python3 -m pip install --quiet pyyaml \
+            || python3 -m pip install --quiet --user pyyaml \
+            || python3 -m pip install --quiet --break-system-packages pyyaml
           python3 - <<'PY'
           import yaml
           for path in ("/tmp/default.yaml", "/tmp/full.yaml"):

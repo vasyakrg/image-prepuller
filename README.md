@@ -199,6 +199,32 @@ curl -s -b /tmp/pc localhost:8080/api/v1/clusters | jq
 curl -s -b /tmp/pc 'localhost:8080/api/v1/snapshot?cluster=talos-prod-kz' | jq '.summary'
 ```
 
+## Деплой
+
+Образ и Helm-чарт лежат в репозитории; полный чеклист (секреты, стенд в k3d, e2e-сценарий
+из [docs/PLAN.md](docs/PLAN.md) §9) — [docs/DEPLOY.md](docs/DEPLOY.md).
+
+```bash
+# образ (distroless, nonroot, linux/amd64+arm64)
+docker build -t registry.example.com/ops/image-prepuller:dev .
+
+# hub + агентский DaemonSet в namespace prepuller
+helm upgrade --install prepuller deploy/helm/image-prepuller \
+  --namespace prepuller --create-namespace \
+  --set image.repository=registry.example.com/ops/image-prepuller \
+  --set image.tag=dev \
+  --set secret.auth.user=admin --set secret.auth.password='...' \
+  --set secret.sessionSecret="$(openssl rand -hex 32)"
+```
+
+`values.yaml` собирает hub в live-режиме (`hub.mock=false`) и включает агентский
+DaemonSet; spoke, ingress и NetworkPolicy — отдельными блоками (`spoke.enabled`,
+`ingress.enabled`, `networkPolicy.enabled`). Секреты либо генерируются при установке,
+либо берутся из `secret.existingSecret` (ключи `auth-user`, `auth-pass`, `session-secret`,
+`cluster-token`, `agent-token`). Публикация образа и чарта в реестр — workflow
+[`build-image.yaml`](.gitea/workflows/build-image.yaml) (переменные `REGISTRY`/`IMAGE`,
+секреты `REGISTRY_USERNAME`/`REGISTRY_PASSWORD`).
+
 ## Флаги
 
 | Флаг | По умолчанию | Назначение |
@@ -347,8 +373,11 @@ internal/web/           hub-роутер (server.go) + spoke-роутер (serve
 internal/web/static/    index.html, app.js, styles.css — без сборки и npm
 internal/metrics/       ручная генерация Prometheus text exposition
 internal/testutil/      фейковый spoke/hub, golden-снапшот v2, контрактные тесты hub↔spoke
-docs/                   architecture.md, PLAN.md, ADR-001
-.gitea/workflows/       CI: gofmt, vet, test, build linux/amd64+arm64
+docs/                   architecture.md, PLAN.md, ADR-001, DEPLOY.md
+deploy/helm/            Helm-чарт: hub, spoke, agent DaemonSet, RBAC, NetworkPolicy, ingress
+Dockerfile              образ: distroless, nonroot, linux/amd64+arm64
+.gitea/workflows/       CI (gofmt/vet/test/helm) и сборка образа + публикация чарта
+CHANGELOG.md            история версий
 ```
 
 ## Разработка
@@ -382,7 +411,8 @@ go mod download && go test ./...
 | contract-v2 (готово) | Provider v2 (PullTask/CancelPull/Health), counters+cancel на spoke, заглушки API, testutil, CI-каркас |
 | Stage 2 (готово) | node-agent: CRI containerd, инвентарь образов, disk-guard, HTTP/JSON API v1, pull через агент |
 | Stage 3 (готово) | `K8sProvider` (client-go): workload'ы, слоты image×node, TTL-кэш снапшота, reconciler и `-auto-warm`; транспорт к node-agent (HTTP/JSON v1, Bearer, таймауты), живой pull и present-слоты из CRI-инвентаря — включён в `main.go` через `provider.NewK8sProviderFromEnv` |
-| Далее | Helm/Dockerfile, алерты по покрытию и ImageFS, CSRF-токены, durable audit sink, argon2id |
+| v0.2.0 (готово) | Деплой: Dockerfile, Helm-чарт, CI-сборка образа и чарта; multi-user auth/RBAC и rate-limit; надёжный транспорт hub↔spoke |
+| Далее | алерты по покрытию и ImageFS, e2e в k3d в CI, CSRF-токены, durable audit sink, argon2id |
 
 ## Известные ограничения
 

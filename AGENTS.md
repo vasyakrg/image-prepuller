@@ -97,7 +97,11 @@ PREPULLER_CLUSTER_TOKEN=spoke-secret \
 | `internal/reconcile/` | политика авто-прогрева: очередь, приоритеты (failed > missing, prod > staging > infra), лимиты, backoff |
 | `internal/testutil/` | фейковый spoke/hub, golden-снапшот v2, контрактные тесты |
 | `cmd/prepuller/agent.go` | `runAgent()`: флаги агента, запуск HTTP/JSON сервера, graceful shutdown |
-| `.gitea/workflows/ci.yaml` | CI: gofmt, vet, test, build linux/amd64+arm64 |
+| `.gitea/workflows/ci.yaml` | CI: gofmt, vet, test, build linux/amd64+arm64, helm lint/template |
+| `.gitea/workflows/build-image.yaml` | Сборка и публикация образа (buildx, amd64+arm64) и Helm-чарта в реестр |
+| `Dockerfile` | multi-stage образ: golang:1.24 builder → distroless nonroot (65532) |
+| `deploy/helm/image-prepuller/` | Helm-чарт: hub, spoke, agent DaemonSet, RBAC, NetworkPolicy, ingress |
+| `docs/DEPLOY.md` | чеклист деплоя: секреты, k3d-стенд, e2e-сценарий |
 | `docs/architecture.md` | схемы Mermaid: топология, потоки, состояния, модель данных |
 | `docs/PLAN.md` | план Stage 2–3: workstreams, зоны записи, порядок мержа, гейты |
 
@@ -226,6 +230,7 @@ PREPULLER_CLUSTER_TOKEN=spoke-secret \
 
 - [ ] `gofmt -l .` пуст, `go vet ./...` и `go test ./...` зелёные.
 - [ ] `go build -o bin/prepuller ./cmd/prepuller` проходит.
+- [ ] `helm lint deploy/helm/image-prepuller` и `helm template` (defaults и с `spoke`/`agent`/`ingress`/`networkPolicy`) проходят.
 - [ ] Изменённое поведение отражено в `README.md` (API/флаги/метрики) и, если затронута
   архитектура, в `docs/architecture.md`.
 - [ ] Новые эндпоинты и middleware покрыты тестами; UI-путь проверен вручную

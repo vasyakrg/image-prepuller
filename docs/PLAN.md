@@ -14,13 +14,16 @@
 GOPROXY-зеркало вместо vendor); Phase 1 (contract freeze) выполнена и помечена тегом
 `contract-v2`.
 
-**Phase 2 — в работе.** В `integ/stage-2` уже слиты и проверены гейтами плюс ревью:
-WS-A (node-agent: CRI, инвентарь, HTTP/JSON API v1), WS-B (K8sProvider на client-go,
-TTL-кэш, слоты), WS-C (reconciler + флаг `-auto-warm` в main), WS-H (метрики: один
-Snapshot на скрейп + новые серии), WS-D (UI v2: Pull Tasks, панель ноды). В работе:
-WS-E (spoke/remote), WS-B2 (транспорт K8sProvider ↔ агент), WS-F (auth/RBAC),
-WS-G (Dockerfile/Helm/CI). Отклонение от порядка мержа §9: E отставал по времени,
-поэтому A/B/C/H/D влиты первыми — зоны не пересекаются, конфликтов не было.
+**Phase 2 — выполнена.** В `integ/stage-2` слиты и проверены гейтами плюс ревью все
+потоки: WS-E (надёжный транспорт hub↔spoke) → WS-A (node-agent: CRI, инвентарь,
+HTTP/JSON API v1) → WS-B/WS-B2 (K8sProvider на client-go и транспорт к агенту) →
+WS-C (reconciler + `-auto-warm`) → WS-H (метрики: один Snapshot на скрейп и новые
+серии) → WS-D (UI v2) → WS-F (auth/RBAC, rate-limit, аудит) → WS-G (Dockerfile, Helm,
+CI-сборка образа, `docs/DEPLOY.md`). Отклонение от порядка §9: E отставал по времени,
+поэтому A/B/C/H/D влиты первыми — зоны не пересекались, конфликтов не было.
+
+**Phase 3 — в работе (релиз v0.2.0).** Осталось: e2e-сценарий §9 в k3d на CI, финальный
+changelog и тег `v0.2.0`, публикация образа и чарта в реестр.
 
 ## 1. Цели этапов
 
@@ -239,7 +242,7 @@ go list -m all | diff - <(git show main:go.mod)          # новых завис
 | --- | --- | --- |
 | 0 | git, .gitignore, baseline — **выполнено** (`18aaaa5`) | 0.5 д |
 | 1 | ADR-001 + contract freeze (последовательно) — **выполнено** (тег `contract-v2`) | 2–3 д |
-| 2 | Параллельно WS-A/B/C/D, затем E/F/G/H — **в работе** (A/B/C/D/H в `integ/stage-2`) | 5–8 д (календарно) |
+| 2 | Параллельно WS-A/B/C/D, затем E/F/G/H — **выполнено** (все потоки в `integ/stage-2`) | 5–8 д (календарно) |
 | 3 | Интеграция, e2e в k3d, docs, релиз v0.2.0 | 2–3 д |
 | 4 | Stage 3: авто-прогрев в бою, RBAC, алерты | 8–12 д |
 

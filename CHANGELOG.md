@@ -33,8 +33,23 @@
   `prepuller_agent_info`, `prepuller_cluster_last_sync_timestamp_seconds`,
   `prepuller_cluster_sync_partial`, `prepuller_build_info`.
 
+- **Надёжный транспорт hub → spoke** (`internal/provider/remote.go`): таймауты, ретраи
+  идемпотентных state-changing вызовов с экспоненциальным backoff, ограниченный пул
+  соединений, типизированные ошибки (`ErrSpokeUnavailable`/`ErrSpokeUnauthorized` → 502,
+  `ErrTaskNotActive` → 409); `GET /internal/v1/health` и `GET /internal/v1/counters`,
+  отдающий `SpokeCounters`; отмена завершённой задачи — `409`.
+- **Пользователи и роли (RBAC)**: `PREPULLER_USERS` (`name:password:role`), роли `viewer`
+  и `operator`, `RequireRole`/`RequireOperator`, rate-limit логина с блокировкой,
+  аудит через `auth.Auditor` и `GET /api/v1/audit`; cookie учитывает
+  `PREPULLER_COOKIE_SECURE`.
+- **Деплой**: `Dockerfile` (distroless, nonroot, amd64+arm64), Helm-чарт
+  `deploy/helm/image-prepuller` (hub/spoke/agent DaemonSet, RBAC, NetworkPolicy, ingress),
+  workflow сборки образа и публикации чарта в реестр, `docs/DEPLOY.md`.
+
 ### Changed
 
+- Hub-хендлеры pull/cancel/workload-pull отдают `502` при недоступном spoke и `409`
+  при отмене завершённой задачи вместо общего `400`.
 - Скрейп метрик делает ровно один `Provider.Snapshot()` на кластер вместо шести.
 - `prepuller_cluster_up` равен 0 для кластеров в состоянии `offline`/`partial`.
 - Hub в live-режиме (без `-mock`) поднимает `K8sProvider` вместо `log.Fatalf`;
