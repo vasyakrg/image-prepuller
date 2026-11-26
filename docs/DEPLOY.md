@@ -42,7 +42,7 @@ API with a Bearer token), `agent` (per-node CRI agent). Ports:
 | spoke | 8081 | 9091 | — |
 | agent | 9443 | — | — |
 
-The image is multi-stage (`golang:1.24-alpine` builder, `distroless/static`
+The image is multi-stage (`golang:1.26-alpine` builder, `distroless/static`
 runtime), `CGO_ENABLED=0`, runs as uid/gid 65532 with a read-only root
 filesystem. `/healthz` and `/readyz` are served by the controller in both hub
 and spoke roles; `/metrics` is served on the metrics port only.

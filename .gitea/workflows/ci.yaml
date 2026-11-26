@@ -49,6 +49,13 @@ jobs:
             echo "prometheus/client_golang is forbidden by ADR-001"; exit 1
           fi
 
+      # Достижимые уязвимости в зависимостях блокируют сборку: Dependabot видит граф
+      # модулей, govulncheck — реальные пути вызова (ADR-001, «Обновление 2026-11-26»).
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.10.0
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
   helm:
     runs-on: ubuntu-latest
     steps:

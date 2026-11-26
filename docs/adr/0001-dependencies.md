@@ -143,3 +143,35 @@ flowchart LR
 - Импорт внешних пакетов в `internal/agent` кроме grpc/cri-api — нарушение.
 - Импорт внешних пакетов в `internal/web|model|auth|metrics` — нарушение.
 - Проверка в CI: `go list -m all` сверяется с ожидаемым списком (гейт docs/PLAN.md §6.1).
+
+## Обновление (2026-11-26): go 1.26 и патчи безопасности
+
+Dependabot после публикации v0.2.0 сообщил об уязвимостях в графе модулей. Разбор через
+`govulncheck ./...` (v1.10.0, база vuln.go.dev 2026-11-24) показал 10 достижимых
+уязвимостей в трёх модулях: `golang.org/x/net` (HTTP/2 в net/http: гонка HPACK,
+двойной возврат flow-control, раздувание окна и другие DoS), `google.golang.org/grpc` (2)
+и `golang.org/x/text` (1).
+
+Исправленные версии требуют более свежего тулчейна, поэтому решение, зафиксированное
+выше, обновлено:
+
+- `go` в `go.mod`: `1.24.0` → `1.26.0` (требование `golang.org/x/net` v0.62.0);
+- `google.golang.org/grpc`: v1.80.0 → v1.83.2;
+- `golang.org/x/net`: v0.49.0 → v0.62.0 (транзитивно подтянуты x/text, x/sys, x/term,
+  x/oauth2, genproto/rpc);
+- `Dockerfile`: builder `golang:1.26-alpine`; CI читает версию из `go.mod`
+  (`go-version-file`), правок не потребовалось.
+
+Границы ADR не изменились: новых импортов в код нет, обновлены только уже разрешённые
+зависимости. Контроль регрессий — шаг `govulncheck` в CI (оба workflow, пин `v1.10.0`),
+база проверяется на каждом прогоне.
+
+После обновления `govulncheck ./...` не находит ни достижимых уязвимостей, ни
+проблемных модулей («No vulnerabilities found»).
+
+Побочный эффект обновления: в графе модулей (`go list -m all`, 100 → 106 записей)
+появились `cloud.google.com/go/auth`, `github.com/felixge/httpsnoop`,
+`github.com/google/s2a-go`, `github.com/googleapis/enterprise-certificate-proxy`,
+`github.com/googleapis/gax-go/v2`, `go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp`.
+Это требование `golang.org/x/oauth2` v0.36.0 (его тянет client-go), а не новый импорт:
+`go list -deps ./...` их не содержит, в бинарь они не попадают, `vendor/` по-прежнему нет.

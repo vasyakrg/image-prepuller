@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+### Security
+
+- Уязвимости в графе модулей (Dependabot: 5 алертов; `govulncheck`: 10 достижимых путей)
+  закрыты обновлением зависимостей: `google.golang.org/grpc` v1.80.0 → v1.83.2,
+  `golang.org/x/net` v0.49.0 → v0.62.0 (HTTP/2 DoS в `net/http`: гонка HPACK-энкодера,
+  двойной flow-control refund, раздувание окна, бесконечный цикл на битом
+  `SETTINGS_MAX_FRAME_SIZE`), `golang.org/x/text` v0.33.0 → v0.43.0; транзитивно
+  обновлены x/sys, x/term, x/oauth2, genproto/rpc. Границы ADR-001 не менялись.
+- `go` в `go.mod`: 1.24.0 → 1.26.0 (требование исправленных версий); Dockerfile собирается
+  на `golang:1.26-alpine`.
+- CI: добавлен шаг `govulncheck` (пин v1.10.0) — регрессии по достижимым уязвимостям
+  блокируют сборку.
+
 ### Changed
 
 - `Dockerfile`: builder-стадия запускается на нативной архитектуре раннера
