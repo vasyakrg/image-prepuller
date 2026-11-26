@@ -1,0 +1,104 @@
+name: ci
+
+# GitHub Actions port of .gitea/workflows/ci.yaml: the same gates, no publishing.
+# E2E is deliberately absent: it runs locally (docs/DEPLOY.md).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # Зеркало модулей вместо vendor/ (ADR-001). direct — fallback, если зеркало недоступно.
+  GOPROXY: https://proxy.golang.org,direct
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: go mod download
+        run: go mod download
+
+      - name: gofmt
+        run: |
+          # NUL-separated so paths with spaces stay intact; -r skips gofmt when no files.
+          unformatted="$(git ls-files -z '*.go' | xargs -0 -r gofmt -l)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed for:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+      - name: build linux/amd64 + linux/arm64
+        run: |
+          for arch in amd64 arm64; do
+            GOOS=linux GOARCH="$arch" go build -trimpath -ldflags="-s -w" -o "/tmp/prepuller-linux-$arch" ./cmd/prepuller
+          done
+
+      # Гейт ADR-001: новые зависимости без contract PR ломают сборку.
+      - name: dependency boundary
+        run: |
+          go list -m all > /tmp/modules.txt
+          if grep -q 'prometheus/client_golang' /tmp/modules.txt; then
+            echo "prometheus/client_golang is forbidden by ADR-001"; exit 1
+          fi
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install helm
+        run: |
+          curl -fsSL https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz | tar -xz
+          sudo mv linux-amd64/helm /usr/local/bin/helm
+          helm version --short
+
+      - name: helm lint
+        run: helm lint deploy/helm/image-prepuller
+
+      # Defaults plus every optional component: a broken template fails CI even
+      # when it is disabled in the default values.
+      - name: helm template
+        run: |
+          helm template ci deploy/helm/image-prepuller > /tmp/default.yaml
+          helm template ci deploy/helm/image-prepuller \
+            --set spoke.enabled=true \
+            --set agent.enabled=true \
+            --set ingress.enabled=true \
+            --set networkPolicy.enabled=true \
+            --set secret.auth.password=ci-password \
+            --set secret.sessionSecret=ci-session-secret \
+            --set secret.clusterToken=ci-cluster-token \
+            > /tmp/full.yaml
+          echo "rendered default: $(grep -c '^kind:' /tmp/default.yaml) objects"
+          echo "rendered full:    $(grep -c '^kind:' /tmp/full.yaml) objects"
+
+      - name: validate rendered YAML
+        run: |
+          # PyYAML is not guaranteed on the runner image; install it with fallbacks.
+          python3 -m pip install --quiet pyyaml \
+            || python3 -m pip install --quiet --user pyyaml \
+            || python3 -m pip install --quiet --break-system-packages pyyaml
+          python3 - <<'PY'
+          import yaml
+          for path in ("/tmp/default.yaml", "/tmp/full.yaml"):
+              with open(path) as fh:
+                  docs = [d for d in yaml.safe_load_all(fh) if d]
+              if not docs:
+                  raise SystemExit(path + ": no manifests rendered")
+              print(path + ": " + str(len(docs)) + " manifests OK")
+          PY

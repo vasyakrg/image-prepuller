@@ -4,7 +4,7 @@
 
 ## [Unreleased]
 
-## [0.2.0] — Stage 2/3: живой путь от Kubernetes до containerd
+## [0.2.0] — 2026-11-26 — Stage 2/3: живой путь от Kubernetes до containerd
 
 Контракт заморожен тегом `contract-v2`; изменения ниже — реализация этого контракта.
 
@@ -45,6 +45,14 @@
 - **Деплой**: `Dockerfile` (distroless, nonroot, amd64+arm64), Helm-чарт
   `deploy/helm/image-prepuller` (hub/spoke/agent DaemonSet, RBAC, NetworkPolicy, ingress),
   workflow сборки образа и публикации чарта в реестр, `docs/DEPLOY.md`.
+- **CI на GitHub Actions**: `.github/workflows/ci.yaml` (gofmt/vet/test, сборка под
+  amd64+arm64, гейт зависимостей ADR-001, helm lint/template) и
+  `.github/workflows/build-image.yaml` (публикация образа и OCI-чарта в GHCR на
+  `GITHUB_TOKEN`); PR-Agent ревьюит PR (`.github/workflows/pr-agent.yml`).
+- **Локальный e2e**: `hack/e2e-k3d.sh` автоматизирует приёмочный сценарий из
+  `docs/DEPLOY.md` §12 (одноразовый k3d-кластер, live-провайдер, агенты по CRI,
+  деградация и восстановление, метрики). В CI намеренно не входит — гоняется перед
+  пушем в `main`.
 
 ### Changed
 

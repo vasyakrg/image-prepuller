@@ -201,14 +201,21 @@ curl -s -b /tmp/pc 'localhost:8080/api/v1/snapshot?cluster=talos-prod-kz' | jq '
 
 ## Деплой
 
-Образ и Helm-чарт лежат в репозитории; полный чеклист (секреты, стенд в k3d, e2e-сценарий
-из [docs/PLAN.md](docs/PLAN.md) §9) — [docs/DEPLOY.md](docs/DEPLOY.md).
+Релизные образ и чарт публикуются в GHCR workflow
+[`.github/workflows/build-image.yaml`](.github/workflows/build-image.yaml) (теги `v*`
+и `main`, амд64+arm64). Полный чеклист (секреты, стенд в k3d, e2e-сценарий из
+[docs/PLAN.md](docs/PLAN.md) §9) — [docs/DEPLOY.md](docs/DEPLOY.md).
 
 ```bash
-# образ (distroless, nonroot, linux/amd64+arm64)
-docker build -t registry.example.com/ops/image-prepuller:dev .
+# опубликованные артефакты (public, без логина)
+docker pull ghcr.io/vasyakrg/image-prepuller:0.2.0
+helm upgrade --install prepuller oci://ghcr.io/vasyakrg/charts/image-prepuller \
+  --version 0.2.0 --namespace prepuller --create-namespace \
+  --set secret.auth.user=admin --set secret.auth.password='...' \
+  --set secret.sessionSecret="$(openssl rand -hex 32)"
 
-# hub + агентский DaemonSet в namespace prepuller
+# либо сборка из исходников (distroless, nonroot)
+docker build -t registry.example.com/ops/image-prepuller:dev .
 helm upgrade --install prepuller deploy/helm/image-prepuller \
   --namespace prepuller --create-namespace \
   --set image.repository=registry.example.com/ops/image-prepuller \
@@ -221,9 +228,10 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
 DaemonSet; spoke, ingress и NetworkPolicy — отдельными блоками (`spoke.enabled`,
 `ingress.enabled`, `networkPolicy.enabled`). Секреты либо генерируются при установке,
 либо берутся из `secret.existingSecret` (ключи `auth-user`, `auth-pass`, `session-secret`,
-`cluster-token`, `agent-token`). Публикация образа и чарта в реестр — workflow
-[`build-image.yaml`](.gitea/workflows/build-image.yaml) (переменные `REGISTRY`/`IMAGE`,
-секреты `REGISTRY_USERNAME`/`REGISTRY_PASSWORD`).
+`cluster-token`, `agent-token`). Публикация в GHCR идёт на штатном `GITHUB_TOKEN`
+(права `packages: write`), внешних секретов не нужно; старый Gitea-вариант с
+`REGISTRY`/`IMAGE` и `REGISTRY_USERNAME`/`REGISTRY_PASSWORD` остался в
+[`.gitea/workflows/build-image.yaml`](.gitea/workflows/build-image.yaml) как зеркало.
 
 ## Флаги
 
@@ -377,7 +385,9 @@ internal/testutil/      фейковый spoke/hub, golden-снапшот v2, к
 docs/                   architecture.md, PLAN.md, ADR-001, DEPLOY.md
 deploy/helm/            Helm-чарт: hub, spoke, agent DaemonSet, RBAC, NetworkPolicy, ingress
 Dockerfile              образ: distroless, nonroot, linux/amd64+arm64
-.gitea/workflows/       CI (gofmt/vet/test/helm) и сборка образа + публикация чарта
+.github/workflows/      CI (гейты), PR-Agent и публикация образа + чарта в GHCR
+.gitea/workflows/       те же CI/сборочные workflow для Gitea (зеркало)
+hack/e2e-k3d.sh         локальный e2e-смоук на k3d (приёмка Stage 2/3)
 CHANGELOG.md            история версий
 ```
 
@@ -400,6 +410,16 @@ go mod download && go test ./...
 
 `.gocache/`, `.gopath/`, `.gomodcache/` и `bin/` — в `.gitignore`. Правила, инварианты
 и зоны записи для агентов — в [AGENTS.md](AGENTS.md) и [docs/PLAN.md](docs/PLAN.md).
+
+Гейты (gofmt/vet/test/helm) и сборка релиза — [`.github/workflows/ci.yaml`](.github/workflows/ci.yaml)
+и [`.github/workflows/build-image.yaml`](.github/workflows/build-image.yaml). E2E в CI
+намеренно не гоняется: приёмка Stage 2/3 запускается локально перед пушем в `main`
+(нужны docker и k3d):
+
+```bash
+bash hack/e2e-k3d.sh          # собрать образ, поднять одноразовый кластер, прогнать сценарий
+KEEP=1 bash hack/e2e-k3d.sh   # оставить кластер для разбора
+```
 
 Ревью pull request'ов моделью — [`.github/workflows/pr-agent.yml`](.github/workflows/pr-agent.yml):
 на открытие PR и по команде в комментарии (`/review`, `/describe`, `/ask ...`). Секреты

@@ -366,6 +366,20 @@ The Stage 2/3 acceptance scenario from `docs/PLAN.md` §9. Run it before a relea
 local Docker daemon and `k3d` are available. The hub runs the **live** `K8sProvider`;
 the agent DaemonSet talks to the node containerd over CRI.
 
+Automated variant — the same steps with assertions, a throw-away cluster and a
+cleanup trap:
+
+```bash
+bash hack/e2e-k3d.sh              # build image, create cluster, run scenario, delete cluster
+KEEP=1 bash hack/e2e-k3d.sh       # keep the cluster for debugging
+E2E_SKIP_BUILD=1 bash hack/e2e-k3d.sh   # reuse the already built image
+```
+
+The script never touches your default kubeconfig: it writes an isolated one into a temp
+dir and refuses to continue if `kubectl` points at anything but `k3d-<cluster>`. It is
+deliberately **not** part of GitHub Actions — run it locally before pushing to `main`.
+Manual runbook below, in case you need to poke at individual steps:
+
 ```bash
 # 1. Cluster + local image (no registry push needed).
 k3d cluster create prepuller --agents 2
@@ -425,3 +439,38 @@ k3d cluster delete prepuller
 
 > The agent pod uses `hostNetwork: true` (the hub dials `Node.InternalIP:9443`), so the
 > NetworkPolicy does not apply to it; restrict port 9443 with the node firewall when needed.
+
+## 13. Released artifacts (v0.2.0)
+
+The image and the Helm chart are published to GHCR by
+`.github/workflows/build-image.yaml` on a `v*` tag or a push to `main` — on the
+built-in `GITHUB_TOKEN` (`packages: write`), so no extra repository secrets are needed.
+
+| Artifact | Reference for v0.2.0 |
+| --- | --- |
+| image | `ghcr.io/vasyakrg/image-prepuller:0.2.0` (plus `sha-<12>` and `latest` on main) |
+| chart | `oci://ghcr.io/vasyakrg/charts/image-prepuller` version `0.2.0` |
+
+```bash
+helm upgrade --install prepuller oci://ghcr.io/vasyakrg/charts/image-prepuller \
+  --version 0.2.0 --namespace prepuller --create-namespace \
+  --set secret.auth.user=admin --set secret.auth.password='...' \
+  --set secret.sessionSecret="$(openssl rand -hex 32)"
+```
+
+> GHCR packages are **private by default**, even for a public repository. To pull without
+> credentials, open the package settings on GitHub (`Packages → image-prepuller` and
+> `Packages → charts/image-prepuller`) and switch visibility to public — the
+> `org.opencontainers.image.source` label added by the workflow links the package to the
+> repository. Keep them private and use `imagePullSecrets` / `helm registry login`
+> instead.
+
+Release checklist:
+
+1. `bash hack/e2e-k3d.sh` — the k3d acceptance scenario above must pass locally.
+2. `Chart.yaml` `version`/`appVersion` match the tag (`v0.2.0` → `0.2.0`); the workflow
+   fails the chart job on a mismatch.
+3. `git tag v0.2.0 && git push origin v0.2.0` — builds `ghcr.io/…:0.2.0` (amd64+arm64)
+   and pushes the chart.
+4. Verify: `docker buildx imagetools inspect ghcr.io/vasyakrg/image-prepuller:0.2.0` and
+   `helm show chart oci://ghcr.io/vasyakrg/charts/image-prepuller --version 0.2.0`.

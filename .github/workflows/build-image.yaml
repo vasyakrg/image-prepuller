@@ -1,0 +1,230 @@
+name: build-image
+
+# Builds the container image on every commit to main / tag and publishes it to
+# GHCR, then publishes the Helm chart as an OCI artifact. Everything runs on the
+# built-in GITHUB_TOKEN (permissions below) — no extra repository secrets are
+# required. Pull requests only run the verify gates; nothing is published.
+#
+# Tags: ghcr.io/vasyakrg/image-prepuller:sha-<short12> always, plus "latest" on
+# main and the release version on v* tags (v0.2.0 -> 0.2.0).
+# Chart: helm package deploy/helm/image-prepuller -> helm push oci://ghcr.io/vasyakrg/charts.
+#
+# E2E is deliberately NOT part of GitHub Actions: it runs locally (docs/DEPLOY.md).
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # Зеркало модулей вместо vendor/ (ADR-001). direct — fallback, если зеркало недоступно.
+  GOPROXY: https://proxy.golang.org,direct
+  IMAGE_NAME: ghcr.io/vasyakrg/image-prepuller
+  CHART_OCI_REPO: oci://ghcr.io/vasyakrg/charts
+
+# A newer push to the same ref supersedes the previous run. Pull-request runs may
+# be cancelled freely; publishes never are (a cancelled image push can leave a
+# half-updated registry).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # Fast feedback: the same gates as ci.yaml, so an image is never built from
+  # code that does not pass tests.
+  verify:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: go mod download
+        run: go mod download
+
+      - name: gofmt
+        run: |
+          # NUL-separated so paths with spaces stay intact; -r skips gofmt when no files.
+          unformatted="$(git ls-files -z '*.go' | xargs -0 -r gofmt -l)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed for:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+      - name: install helm
+        run: |
+          curl -fsSL https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz | tar -xz
+          sudo mv linux-amd64/helm /usr/local/bin/helm
+          helm version --short
+
+      - name: helm lint
+        run: helm lint deploy/helm/image-prepuller
+
+      - name: helm template (defaults)
+        run: helm template ci deploy/helm/image-prepuller > /tmp/rendered.yaml
+
+      - name: helm template (spoke + agent + ingress + networkPolicy)
+        run: |
+          helm template ci deploy/helm/image-prepuller \
+            --set spoke.enabled=true \
+            --set agent.enabled=true \
+            --set ingress.enabled=true \
+            --set networkPolicy.enabled=true \
+            --set secret.auth.password=ci-password \
+            --set secret.sessionSecret=ci-session-secret \
+            --set secret.clusterToken=ci-cluster-token \
+            > /tmp/rendered-full.yaml
+
+  image:
+    # Pull requests validate only; pushes and manual runs build and publish.
+    if: github.event_name != 'pull_request'
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        run: |
+          set -eu
+          short_sha="$(git rev-parse --short=12 HEAD)"
+          tags="${IMAGE_NAME}:sha-${short_sha}"
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            tags="${tags},${IMAGE_NAME}:latest"
+          fi
+          case "${GITHUB_REF}" in
+            refs/tags/v*)
+              # v0.2.0 -> 0.2.0
+              tags="${tags},${IMAGE_NAME}:${GITHUB_REF_NAME#v}"
+              ;;
+          esac
+          echo "short_sha=${short_sha}" >> "$GITHUB_OUTPUT"
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+          echo "image tags: ${tags}"
+
+      # VERSION/COMMIT are the Dockerfile build-args (baked into OCI labels).
+      - name: Build and push (linux/amd64, linux/arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+            GOPROXY=https://proxy.golang.org,direct
+          labels: |
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            # Links the GHCR package to the repository; without it the package
+            # cannot inherit the repo's visibility and stays private.
+            org.opencontainers.image.source=https://github.com/vasyakrg/image-prepuller
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke-test the published image (mock hub)
+        run: |
+          set -eu
+          image="${IMAGE_NAME}:sha-${{ steps.tags.outputs.short_sha }}"
+          docker run -d --name prepuller-smoke \
+            -e PREPULLER_AUTH_USER=admin \
+            -e PREPULLER_AUTH_PASS=admin \
+            -e PREPULLER_SESSION_SECRET=smoke-secret \
+            -p 18080:8080 \
+            "${image}"
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/healthz >/dev/null 2>&1; then
+              echo "healthz OK"; docker rm -f prepuller-smoke; exit 0
+            fi
+            sleep 1
+          done
+          echo "image did not become healthy"; docker logs prepuller-smoke || true
+          docker rm -f prepuller-smoke || true
+          exit 1
+
+  chart:
+    needs: verify
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install helm
+        run: |
+          curl -fsSL https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz | tar -xz
+          sudo mv linux-amd64/helm /usr/local/bin/helm
+          helm version --short
+
+      - name: Log in to GHCR (OCI)
+        run: |
+          echo "${HELM_PASSWORD}" | helm registry login ghcr.io -u "${HELM_USERNAME}" --password-stdin
+        env:
+          HELM_USERNAME: ${{ github.actor }}
+          HELM_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Package and push the chart
+        run: |
+          set -eu
+          chart_version="$(helm show chart deploy/helm/image-prepuller | awk '$1 == "version:" {print $2}')"
+          if [ -z "${chart_version}" ]; then
+            echo "could not read .version from Chart.yaml"; exit 1
+          fi
+          echo "chart version: ${chart_version}"
+
+          release="false"
+          case "${GITHUB_REF}" in
+            refs/tags/v*)
+              # A release tag must match the chart version; Chart.yaml itself is
+              # the single source of truth, so no --version override is needed.
+              tag_version="${GITHUB_REF_NAME#v}"
+              if [ "${chart_version}" != "${tag_version}" ]; then
+                echo "Chart.yaml version ${chart_version} does not match release tag ${GITHUB_REF_NAME}"
+                exit 1
+              fi
+              release="true"
+              ;;
+          esac
+
+          mkdir -p /tmp/chart
+          helm package deploy/helm/image-prepuller --destination /tmp/chart
+          tgz="$(ls /tmp/chart/image-prepuller-*.tgz)"
+          echo "packaged: ${tgz}"
+
+          # A release tag is authoritative and may republish its own version.
+          # A branch build publishes the Chart.yaml version only when it is new,
+          # so main never overwrites an already released chart tag.
+          if [ "${release}" != "true" ] \
+            && helm show chart "${CHART_OCI_REPO}/image-prepuller" --version "${chart_version}" >/dev/null 2>&1; then
+            echo "image-prepuller ${chart_version} is already published; not overwriting it"
+            exit 0
+          fi
+
+          helm push "${tgz}" "${CHART_OCI_REPO}"
+          echo "pushed ${tgz} to ${CHART_OCI_REPO}"
