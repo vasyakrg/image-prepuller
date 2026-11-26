@@ -1,6 +1,8 @@
 (() => {
   const state = {
     user: null,
+    // Role from /auth/me or login: "operator" enables pull/sync/cancel controls.
+    role: "",
     clusters: [],
     activeCluster: "",
     snapshot: null,
@@ -92,14 +94,23 @@
   function showLogin() {
     stopPolling();
     state.user = null;
+    state.role = "";
     $("app-view").classList.add("hidden");
     $("login-view").classList.remove("hidden");
     $("login-user").focus();
   }
 
-  function showApp(username) {
+  // Only the operator role may run state-changing actions; viewer keeps read-only UI.
+  function isOperator() {
+    return state.role === "operator";
+  }
+
+  function showApp(username, role) {
     state.user = username;
-    $("user-badge").textContent = username;
+    state.role = role || "";
+    $("user-badge").textContent = role ? `${username} · ${role}` : username;
+    $("btn-sync").disabled = !isOperator();
+    $("btn-sync").title = isOperator() ? "" : "Доступно только роли operator";
     $("login-view").classList.add("hidden");
     $("app-view").classList.remove("hidden");
     refresh();
@@ -256,7 +267,8 @@
           <td><div class="node-dots">${nodeDots}</div></td>
           <td class="right">
             <button class="btn btn-secondary btn-xs btn-pull-wl"
-              data-ns="${esc(w.namespace)}" data-kind="${esc(w.kind)}" data-name="${esc(w.name)}">
+              data-ns="${esc(w.namespace)}" data-kind="${esc(w.kind)}" data-name="${esc(w.name)}"
+              ${isOperator() ? "" : "disabled"} title="${isOperator() ? "" : "Доступно только роли operator"}">
               ↻ Pull All
             </button>
           </td>
@@ -268,7 +280,7 @@
         const imgRows = w.images.map((img) => {
           const cells = img.nodes.map((ns) => {
             const lbl = stateLabel(ns.state);
-            const canPull = ns.state !== "offline" && ns.state !== "pulling";
+            const canPull = isOperator() && ns.state !== "offline" && ns.state !== "pulling";
             return `
               <td>
                 <div style="display:flex;justify-content:space-between;align-items:center;gap:6px">
@@ -470,7 +482,7 @@
       const isActive = t.state === "queued" || t.state === "running";
       const trigger = t.trigger ? `${t.trigger}${t.actor ? " · " + t.actor : ""}` : (t.actor || "—");
       const created = fmtTime(t.createdAt);
-      const cancelBtn = isActive
+      const cancelBtn = isActive && isOperator()
         ? `<button class="btn btn-secondary btn-xs btn-task-cancel" data-task-id="${esc(t.id)}" title="Отменить задачу ${esc(t.id)}">✕ Отменить</button>`
         : '<span class="muted">—</span>';
       return `
@@ -637,7 +649,7 @@
         body: JSON.stringify({ username: $("login-user").value, password: $("login-pass").value }),
       });
       $("login-pass").value = "";
-      showApp(data.username);
+      showApp(data.username, data.role);
     } catch (err) {
       $("login-error").textContent = err.message;
       $("login-error").classList.remove("hidden");
@@ -697,6 +709,6 @@
 
   // Boot
   api("/api/v1/auth/me")
-    .then((data) => showApp(data.username))
+    .then((data) => showApp(data.username, data.role))
     .catch(() => showLogin());
 })();
