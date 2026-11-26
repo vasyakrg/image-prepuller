@@ -6,9 +6,9 @@ description: >-
   backend and an optional per-node agent DaemonSet.
 type: application
 # Chart version. Bump on chart changes (docs/DEPLOY.md).
-version: 0.1.0
+version: 0.2.0
 # Application version; also the default image tag when image.tag is empty.
-appVersion: "0.2.0-dev"
+appVersion: "0.2.0"
 kubeVersion: ">=1.25.0-0"
 home: https://github.com/vasyakrg/image-prepuller
 sources:

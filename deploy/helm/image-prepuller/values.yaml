@@ -154,6 +154,9 @@ agent:
     annotations: {}
   # false -> talk to the real CRI socket; true -> in-memory mock images.
   mock: false
+  # The agent pod uses hostNetwork, so the hub reaches it on Node.InternalIP:port.
+  # k3s/k3d keep containerd under /run/k3s: set this to
+  # /run/k3s/containerd/containerd.sock there (see docs/DEPLOY.md section 12).
   criSocket: /run/containerd/containerd.sock
   # HTTP/JSON listen address of the agent (cmd/prepuller/agent.go -listen-addr).
   port: 9443

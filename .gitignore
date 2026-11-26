@@ -9,6 +9,7 @@
 /.gomodcache/
 .gopath/
 .worktrees/
+.tools/
 
 # Local logs and OS/IDE noise
 *.log

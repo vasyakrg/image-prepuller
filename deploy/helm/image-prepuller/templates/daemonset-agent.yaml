@@ -20,6 +20,12 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
+      # The hub reaches the agent on the node InternalIP:agent.port, and the CRI
+      # socket is host-local, so the agent must share the host network namespace.
+      # NetworkPolicy does not apply to host-network pods; restrict access with
+      # the node firewall / cloud security groups when needed.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: {{ include "ip.agentServiceAccountName" . }}
       automountServiceAccountToken: false
       {{- with .Values.imagePullSecrets }}

@@ -48,8 +48,6 @@
 
 ### Changed
 
-- Hub-хендлеры pull/cancel/workload-pull отдают `502` при недоступном spoke и `409`
-  при отмене завершённой задачи вместо общего `400`.
 - Скрейп метрик делает ровно один `Provider.Snapshot()` на кластер вместо шести.
 - `prepuller_cluster_up` равен 0 для кластеров в состоянии `offline`/`partial`.
 - Hub в live-режиме (без `-mock`) поднимает `K8sProvider` вместо `log.Fatalf`;
@@ -59,6 +57,14 @@
 
 - `RemoteProvider.PullCounters()` больше не возвращает `nil` при живом spoke — данные
   `prepuller_pull_total` для удалённых кластеров.
+- Helm: агентский DaemonSet работает с `hostNetwork: true`, иначе hub не может
+  достучаться до агента на `Node.InternalIP:9443` (найдено на k3d e2e); для k3s/k3d путь
+  CRI-сокета задаётся `agent.criSocket=/run/k3s/containerd/containerd.sock`.
+- Helm: сгенерированные секреты переиспользуются на `helm upgrade` (`lookup`). Раньше
+  каждый upgrade генерировал новый `agent-token`/`session-secret`: уже запущенные поды
+  продолжали работать со старым env, связь hub↔agent рвалась, а сессии сбрасывались.
+- Hub-хендлеры pull/cancel/workload-pull отдают `502` при недоступном spoke и `409` при
+  отмене завершённой задачи вместо общего `400`.
 
 ### Removed
 

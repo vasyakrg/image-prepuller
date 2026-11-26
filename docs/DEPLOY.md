@@ -84,8 +84,11 @@ Two ways to provide them:
 
 **A. Let the chart generate them (quick start).** `secret.create=true` (default)
 and empty `secret.auth.password`, `secret.sessionSecret`, `secret.clusterToken`
-generate random values on install. The Secret is annotated
-`helm.sh/resource-policy: keep`, so it survives `helm upgrade`. Read them back:
+generate random values on install. On `helm upgrade` the chart reuses the values
+stored in the existing Secret (`lookup`), so sessions, the spoke token and the
+hub/agent token pair stay stable; set `secret.*` explicitly to take over. The
+Secret is annotated `helm.sh/resource-policy: keep`, so it also survives
+`helm uninstall`. Read them back:
 
 ```bash
 kubectl -n prepuller get secret prepuller-image-prepuller-secret \
@@ -114,6 +117,10 @@ to the ServiceAccount (`serviceAccount.annotations` / `kubectl patch sa`).
 Secrets are never logged and never returned by the API. The only secret in the
 Helm release values is what you pass with `--set`; prefer `--set-file` or an
 external secret manager for production.
+
+> **GitOps note.** `helm template` and `--dry-run` cannot read the live Secret,
+> so they render fresh random values on every run. Pass `secret.*` explicitly or use
+> `secret.existingSecret` when committing rendered manifests.
 
 > **Multi-user auth, rate limit and audit.** `cmd/prepuller/main.go` wires
 > `auth.UsersFromEnv()`, `auth.RateLimitConfigFromEnv()` and the JSON auditor,
@@ -286,6 +293,14 @@ set `agent.securityContext.runAsUser=65532` and
 containerd group. The NetworkPolicy allows ingress only from the release
 namespace and egress only to DNS and TCP 443.
 
+The DaemonSet runs with `hostNetwork: true`: the hub dials the agent on
+`Node.InternalIP:9443`, and the CRI socket is host-local. NetworkPolicy does not
+apply to host-network pods — restrict port 9443 with the node firewall / cloud
+security groups if the network is not private. On k3s/k3d the CRI socket lives at
+`/run/k3s/containerd/containerd.sock`, so pass
+`--set agent.criSocket=/run/k3s/containerd/containerd.sock`; the default
+`/run/containerd/containerd.sock` is right for kubeadm/Docker/containerd nodes.
+
 The agent API is protected by the `agent-token` Secret key
 (`PREPULLER_AGENT_TOKEN`); empty disables auth. The hub must be given the same
 token when its K8sProvider client is wired in. Check the agent directly:
@@ -304,7 +319,7 @@ curl -fsS -H "Authorization: Bearer <agent-token>" \
 | `CrashLoopBackOff`, logs `auth config error` | `PREPULLER_AUTH_USER`/`_PASS` empty | Fill `secret.auth.user`/`password` or the existing Secret. |
 | `CrashLoopBackOff`, logs `live Kubernetes provider: ...` | The live path cannot build a Kubernetes client (no in-cluster config/RBAC) | Check the pod ServiceAccount and `rbac.create=true`; for a demo set `hub.mock=true`. |
 | 403 `forbidden` on nodes/deployments | ClusterRole/RBAC missing or `rbac.create=false` | Keep `rbac.create=true` or bind the hub ServiceAccount to equivalent read-only rules. |
-| Nodes show `offline`/`degraded` in the UI | Agent DaemonSet not running, socket not mounted, or agent token mismatch | Check `kubectl -n <ns> get ds`, agent logs, and that the hub and agent share `agent-token`. |
+| Nodes show `offline`/`degraded` in the UI | Agent DaemonSet not running, socket not mounted, wrong socket path, or agent token mismatch | Check `kubectl -n <ns> get ds` and agent logs. On k3s/k3d set `agent.criSocket=/run/k3s/containerd/containerd.sock`. Confirm hub and agent share `agent-token` (compare `printenv PREPULLER_AGENT_TOKEN` in both pods); after rotating the Secret, `kubectl -n <ns> rollout restart deploy/<hub>` and the DaemonSet so pods pick up the new value. |
 | `ImagePullBackOff` | Wrong `image.repository`/`tag`, or no registry credentials | Check the tag in the registry; add `imagePullSecrets` or attach the pull secret to the ServiceAccount. |
 | `CreateContainerConfigError` | Referenced Secret/key missing | `kubectl -n prepuller describe pod ...`; check `secret.existingSecret` and its keys. |
 | `read-only file system` errors | The image writes outside `/tmp`; the rootfs is read-only | Expected for hub/spoke (they keep state in memory). For the agent, mount a writable `emptyDir` where it needs scratch space. |
@@ -312,7 +327,9 @@ curl -fsS -H "Authorization: Bearer <agent-token>" \
 | 401 on the UI API | Session cookie invalid or auth misconfigured | Re-login; check `PREPULLER_SESSION_SECRET` is stable across replicas. |
 | Spoke returns 401 | Token mismatch between hub and spoke | Set the same `cluster-token` on both sides. |
 | Spoke unreachable, hub shows `offline` | DNS/Ingress/NetworkPolicy blocks the hub→spoke path | `kubectl run curl --rm -it --image=curlimages/curl -- curl -v <spoke-url>/internal/v1/health`; check DNS, Ingress host, TLS. |
-| Agent `CrashLoopBackOff`, `agent config error` or CRI dial errors | CRI socket path wrong or not mounted | Check `agent.criSocket` and that the hostPath socket exists on the node; for a smoke test set `agent.mock=true` (in-memory images). |
+| Agent pod stuck `ContainerCreating`, event `hostPath type check failed: ... is not a socket file` | `agent.criSocket` points at a missing path for this distro (k3s keeps it under `/run/k3s`) | Set `agent.criSocket` to the real socket (`docker exec <node> ls -l /run/containerd/containerd.sock /run/k3s/containerd/containerd.sock`). |
+| Agent `CrashLoopBackOff`, `agent config error` or CRI dial errors | CRI socket path wrong, not mounted, or containerd rejects the connection | Check `agent.criSocket` and agent logs; for a smoke test set `agent.mock=true` (in-memory images). |
+| Hub can reach the agent from a `kubectl exec` probe but nodes still show offline | Old hub pod kept the previous `agent-token` after the Secret changed | `kubectl -n <ns> rollout restart deploy/<hub>` (or redeploy) so the env is re-read. |
 | Ingress 404 with Traefik | Wrong `ingressClassName` or host | Set `ingress.className=traefik` and the real host; check `kubectl get ingress`. |
 | `helm install` fails: `secret.create=false requires secret.existingSecret` | Guard in `secret.yaml` | Create the Secret or set `secret.create=true`. |
 
@@ -345,47 +362,66 @@ kubectl -n prepuller delete secret prepuller-image-prepuller-secret
 Uninstalling the hub does not touch spoke releases; remove them separately.
 ## 12. k3d end-to-end smoke test
 
-The Stage 2/3 acceptance scenario from `docs/PLAN.md` §9. Run it before a release
-when a local Docker daemon and `k3d` are available.
+The Stage 2/3 acceptance scenario from `docs/PLAN.md` §9. Run it before a release when a
+local Docker daemon and `k3d` are available. The hub runs the **live** `K8sProvider`;
+the agent DaemonSet talks to the node containerd over CRI.
 
 ```bash
 # 1. Cluster + local image (no registry push needed).
-k3d cluster create prepuller --agents 2 --port "8080:30080@loadbalancer"
+k3d cluster create prepuller --agents 2
 docker build -t image-prepuller:e2e .
 k3d image import image-prepuller:e2e -c prepuller
 
-# 2. Install hub + agent DaemonSet on the two agent nodes.
-helm upgrade --install ip deploy/helm/image-prepuller \
+# 2. Install hub + agent DaemonSet. On k3s/k3d the CRI socket lives under /run/k3s.
+helm upgrade --install prepuller deploy/helm/image-prepuller \
   --namespace prepuller --create-namespace \
   --set image.repository=image-prepuller --set image.tag=e2e \
   --set image.pullPolicy=Never \
-  --set agent.enabled=true --set agent.mock=true \
-  --set secret.auth.password=admin --set secret.sessionSecret=e2e-secret \
-  --set secret.clusterToken=e2e-token --set secret.agentToken=e2e-agent-token
+  --set agent.criSocket=/run/k3s/containerd/containerd.sock \
+  --set secret.auth.user=admin --set secret.auth.password=admin \
+  --set secret.sessionSecret=e2e-session-secret
 
-# 3. Wait for the rollout and hit the hub.
-kubectl -n prepuller rollout status deploy/ip-image-prepuller
-kubectl -n prepuller rollout status ds/ip-image-prepuller-agent
-kubectl -n prepuller port-forward svc/ip-image-prepuller 8080:8080 9090:9090 &
-curl -fsS http://localhost:8080/healthz
-curl -fsS http://localhost:8080/readyz
+# 3. Wait for the rollout and port-forward the hub.
+kubectl -n prepuller rollout status deploy/prepuller-image-prepuller
+kubectl -n prepuller rollout status ds/prepuller-image-prepuller-agent
+kubectl -n prepuller port-forward svc/prepuller-image-prepuller 8080:8080 9090:9090 &
 
-# 4. UI checks: log in as admin/admin, deploy a workload with image :latest and
-#    imagePullPolicy: Always, then confirm two policy warnings and that the
-#    auto-warm loop turns a missing slot back to present.
+# 4. Workload with a mutable tag and Always: two policy violations.
+kubectl create deployment api-gateway --image=ghcr.io/acme/api-gateway:latest --replicas=2
+curl -s -c /tmp/pc -X POST localhost:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' -d '{"username":"admin","password":"admin"}'
+curl -s -b /tmp/pc 'localhost:8080/api/v1/snapshot?cluster=talos-prod-eu' \
+  | jq '.workloads[].images[].policyViolations'
 
-# 5. Metrics: new Stage 2/3 series must be present.
-curl -fsS http://localhost:9090/metrics | grep -E 'prepuller_(pull_tasks|sync_last|node_imagefs|agent_build_info)'
+# 5. Nodes and slots come from the agents: agentUp=true, cachedImageCount>0,
+#    syncStatus=ok and partial=false once every agent has answered.
+curl -s -b /tmp/pc 'localhost:8080/api/v1/snapshot?cluster=talos-prod-eu' \
+  | jq '.nodes, .syncStatus, .partial'
 
-# 6. Failure injection: kill the agent pod on one node and check that the hub
-#    keeps serving and the cluster is marked offline/partial.
-kubectl -n prepuller delete pod -l app.kubernetes.io/component=agent --field-selector spec.nodeName=k3d-prepuller-agent-0
+# 6. Auto-warm: a missing slot produces an auto pull task. Without registry
+#    access the pull ends failed — that is the expected "task failed" signal.
+curl -s -b /tmp/pc 'localhost:8080/api/v1/pull-tasks?cluster=talos-prod-eu' \
+  | jq '.tasks[] | {image, state}'
 
-# 7. Tear down.
+# 7. Failure injection: keep the DaemonSet off one node. The hub keeps serving,
+#    that node turns offline and the snapshot becomes partial.
+kubectl -n prepuller patch ds prepuller-image-prepuller-agent --type=json -p \
+  '[{"op":"add","path":"/spec/template/spec/affinity","value":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"kubernetes.io/hostname","operator":"NotIn","values":["k3d-prepuller-agent-0"]}]}]}}}}]'
+curl -s -b /tmp/pc 'localhost:8080/api/v1/snapshot?cluster=talos-prod-eu' \
+  | jq '.syncStatus, .partial, [.nodes[] | {name, agentUp}]'
+kubectl -n prepuller patch ds prepuller-image-prepuller-agent --type=json \
+  -p '[{"op":"remove","path":"/spec/template/spec/affinity"}]'
+
+# 8. Metrics: Stage 2/3 series and the per-node agent gauge.
+curl -fsS http://localhost:9090/metrics | grep -E 'prepuller_(pull_tasks|pull_task_duration|node_ready|node_imagefs|agent_info|cluster_last_sync)'
+
+# 9. Tear down.
 k3d cluster delete prepuller
 ```
 
-> `agent.mock=true` is only for the smoke test: the agent then serves in-memory
-> images instead of talking to containerd. In a real cluster leave it `false`.
-> The hub `-mock` path is separate (`hub.mock`); leave it `true` until main.go
-> wires the live K8sProvider.
+> `agent.mock=true` is only for UI demos: the agent then serves in-memory images instead of
+> talking to containerd. `hub.mock=true` runs the whole stack on the in-memory provider
+> without a Kubernetes API.
+
+> The agent pod uses `hostNetwork: true` (the hub dials `Node.InternalIP:9443`), so the
+> NetworkPolicy does not apply to it; restrict port 9443 with the node firewall when needed.
