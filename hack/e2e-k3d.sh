@@ -231,11 +231,24 @@ for series in prepuller_build_info prepuller_cluster_up prepuller_cluster_sync_p
               prepuller_cluster_last_sync_timestamp_seconds prepuller_agent_info \
               prepuller_node_agent_up prepuller_node_ready \
               prepuller_node_imagefs_capacity_bytes prepuller_images_cached_total \
-              prepuller_workload_policy_violation prepuller_pull_tasks prepuller_pull_total; do
+              prepuller_workload_policy_violation prepuller_pull_tasks; do
   grep -q "^$series" "$TMP/metrics.txt" || missing="$missing $series"
 done
 [ -z "$missing" ] || fail "нет серий метрик:$missing"
 ok "все серии метрик на месте ($(grep -c '^prepuller_' "$TMP/metrics.txt") строк)"
+# prepuller_pull_total рендерится по завершённым pull-задачам: running счётчиков не
+# инкрементирует, а pull внешнего образа живёт до DefaultAgentPullTimeout (10 минут).
+# Поэтому серию с данными требуем только при терминальном состоянии задачи — метрика
+# при этом всё равно должна быть объявлена в экспозиции.
+grep -q '^# TYPE prepuller_pull_total counter' "$TMP/metrics.txt" || fail "метрика prepuller_pull_total не объявлена"
+terminal=$(curl -fsS -b "$COOKIE_JAR" "$BASE/api/v1/pull-tasks?cluster=$CLUSTER_ID" \
+  | jq '[.tasks[] | select(.state == "succeeded" or .state == "failed" or .state == "canceled")] | length')
+if [ "$terminal" -gt 0 ]; then
+  grep -q '^prepuller_pull_total{' "$TMP/metrics.txt" || fail "pull-задача завершена, но счётчиков нет"
+  ok "счётчики pull_total есть (завершённых задач: $terminal)"
+else
+  note "pull-задачи ещё не завершились (внешний реестр), серия счётчиков не рендерится — это ожидаемо"
+fi
 grep -q 'cluster="'"$CLUSTER_ID"'"' "$TMP/metrics.txt" || fail "метрики без метки cluster=\"$CLUSTER_ID\""
 ok "метрики размечены cluster=\"$CLUSTER_ID\""
 
