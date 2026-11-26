@@ -584,23 +584,6 @@ func TestK8sProviderListErrorsDegrade(t *testing.T) {
 	}
 }
 
-func TestK8sProviderPullOperationsAreNotImplemented(t *testing.T) {
-	p := NewK8sProviderWithClientset("test-cluster", kubefake.NewSimpleClientset())
-
-	if _, err := p.TriggerPull(context.Background(), model.PullRequest{Image: "x", Node: "n"}); !errors.Is(err, ErrNotImplemented) {
-		t.Fatalf("TriggerPull error = %v, want ErrNotImplemented", err)
-	}
-	if _, err := p.TriggerWorkloadPull(context.Background(), model.WorkloadPullRequest{}); !errors.Is(err, ErrNotImplemented) {
-		t.Fatalf("TriggerWorkloadPull error = %v, want ErrNotImplemented", err)
-	}
-	if err := p.CancelPull(context.Background(), "task-1"); !errors.Is(err, ErrNotImplemented) {
-		t.Fatalf("CancelPull error = %v, want ErrNotImplemented", err)
-	}
-	if counters := p.PullCounters(); counters != nil {
-		t.Fatalf("PullCounters = %+v, want nil before the agent reports", counters)
-	}
-}
-
 func TestNewK8sProviderValidation(t *testing.T) {
 	if _, err := NewK8sProvider("test-cluster", nil); err == nil {
 		t.Fatalf("nil rest config must be rejected")
