@@ -1,0 +1,32 @@
+{{- if and .Values.rbac.create .Values.serviceAccount.create }}
+# The controller lists Nodes and workload objects (Deployments, StatefulSets,
+# DaemonSets) cluster-wide. It never writes to the Kubernetes API.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "ip.rbacName" . }}
+  labels:
+    {{- include "ip.labels" (dict "ctx" . "component" "hub") | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "ip.rbacName" . }}
+  labels:
+    {{- include "ip.labels" (dict "ctx" . "component" "hub") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "ip.rbacName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "ip.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

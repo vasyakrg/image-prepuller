@@ -1,0 +1,128 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ip.fullname" . }}
+  labels:
+    {{- include "ip.labels" (dict "ctx" . "component" "hub") | nindent 4 }}
+spec:
+  replicas: {{ .Values.hub.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "ip.selectorLabels" (dict "ctx" . "component" "hub") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ip.labels" (dict "ctx" . "component" "hub") | nindent 8 }}
+      {{- $annotations := include "ip.podAnnotations" (dict "ctx" . "metrics" .Values.hub.metrics.annotations "metricsPort" .Values.hub.service.metricsPort) }}
+      {{- if trim $annotations }}
+      annotations:
+        {{- $annotations | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "ip.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: hub
+          image: {{ include "ip.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - controller
+            - -role=hub
+            {{- if .Values.hub.mock }}
+            - -mock
+            {{- end }}
+            - -http-addr=:{{ .Values.hub.service.httpPort }}
+            - -metrics-addr=:{{ .Values.hub.service.metricsPort }}
+            - -cluster-name={{ .Values.hub.clusterName }}
+            {{- if .Values.hub.autoWarm }}
+            - -auto-warm
+            {{- end }}
+          env:
+            - name: PREPULLER_AUTH_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ip.secretName" . }}
+                  key: auth-user
+            - name: PREPULLER_AUTH_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ip.secretName" . }}
+                  key: auth-pass
+            - name: PREPULLER_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ip.secretName" . }}
+                  key: session-secret
+            - name: PREPULLER_AGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ip.secretName" . }}
+                  key: agent-token
+            {{- if .Values.secret.users }}
+            - name: PREPULLER_USERS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ip.secretName" . }}
+                  key: users
+            {{- end }}
+            {{- with .Values.hub.loginRateLimit.attemptsPerMinute }}
+            - name: PREPULLER_LOGIN_ATTEMPTS_PER_MINUTE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.hub.loginRateLimit.block }}
+            - name: PREPULLER_LOGIN_BLOCK
+              value: {{ . | quote }}
+            {{- end }}
+            - name: PREPULLER_COOKIE_SECURE
+              value: {{ .Values.hub.cookieSecure | quote }}
+            {{- with .Values.hub.remoteClusters }}
+            - name: PREPULLER_REMOTE_CLUSTERS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.hub.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.hub.service.httpPort }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.hub.service.metricsPort }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.hub.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+      {{- with .Values.hub.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.hub.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.hub.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

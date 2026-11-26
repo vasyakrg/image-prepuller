@@ -1,0 +1,21 @@
+{{- if .Values.spoke.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ip.fullname" . }}-spoke
+  labels:
+    {{- include "ip.labels" (dict "ctx" . "component" "spoke") | nindent 4 }}
+spec:
+  type: {{ .Values.spoke.service.type }}
+  selector:
+    {{- include "ip.selectorLabels" (dict "ctx" . "component" "spoke") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.spoke.service.httpPort }}
+      targetPort: http
+      protocol: TCP
+    - name: metrics
+      port: {{ .Values.spoke.service.metricsPort }}
+      targetPort: metrics
+      protocol: TCP
+{{- end }}

@@ -1,0 +1,17 @@
+# Keep the build context small: local Go caches live inside the worktree
+# (GOCACHE=$PWD/.gocache) and can grow to hundreds of MB.
+.git
+.gitignore
+.worktrees
+.gocache
+.gopath
+.gomodcache
+bin
+deploy
+docs
+.gitea
+*.md
+*.log
+.env
+.env.*
+.DS_Store

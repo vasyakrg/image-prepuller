@@ -1,0 +1,204 @@
+# Default values for image-prepuller. See docs/DEPLOY.md for a full walkthrough.
+#
+# Stage note (integration): the live K8sProvider (client-go) and the node-agent
+# HTTP/JSON API v1 are merged, so hub.mock defaults to false and the agent
+# DaemonSet is enabled. Use hub.mock=true for demos/UI work without a cluster.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/vasyakrg/image-prepuller
+  # Defaults to .Chart.AppVersion when empty. In production pin an immutable
+  # tag: normally the git SHA produced by .gitea/workflows/build-image.yaml.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+serviceAccount:
+  create: true
+  # Defaults to the release fullname.
+  name: ""
+  annotations: {}
+
+# RBAC for the hub/spoke controller: it lists Nodes and workloads through the
+# Kubernetes API. The agent DaemonSet uses a separate ServiceAccount with no
+# API permissions at all.
+rbac:
+  create: true
+
+# Annotations added to every pod template (hub, spoke, agent).
+podAnnotations: {}
+
+# Pod-level hardening shared by hub and spoke. The image runs as 65532:65532
+# (distroless nonroot) and never writes to disk.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+# Container-level hardening shared by hub and spoke.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# Credentials consumed by the controller. Leave "create: true" and empty
+# password/sessionSecret/clusterToken to have random values generated on
+# install (retrieve with `kubectl get secret ... -o jsonpath ...`).
+# In production, set secret.existingSecret to a pre-created Secret that has the
+# same keys (auth-user, auth-pass, session-secret, cluster-token, agent-token)
+# and set create: false.
+secret:
+  create: true
+  existingSecret: ""
+  auth:
+    user: admin
+    # Empty -> random 24 chars generated on install.
+    password: ""
+  # Empty -> random 64 chars. A stable value is REQUIRED for multiple hub
+  # replicas: sessions are signed with it.
+  sessionSecret: ""
+  # Empty -> random 32 chars. Must match the token configured on the hub for
+  # this spoke (PREPULLER_CLUSTER_TOKEN).
+  clusterToken: ""
+  # Empty -> random 32 chars. Bearer token of the node-agent HTTP API
+  # (PREPULLER_AGENT_TOKEN). Empty on the agent disables its auth.
+  agentToken: ""
+  # Optional multi-user list for PREPULLER_USERS: "name:password:role,..."
+  # (roles viewer/operator). Empty keeps the legacy single auth-user/password.
+  # NOTE: main.go currently passes only the legacy pair to auth.NewManager;
+  # multi-user needs the integrator to wire auth.UsersFromEnv (see DEPLOY.md).
+  users: ""
+
+hub:
+  replicaCount: 1
+  # false -> live K8sProvider (client-go + node agents). Set true to run the
+  # in-memory mock (`-mock`) for demos/UI work; the live path needs the RBAC
+  # below and a reachable Kubernetes API from the pod.
+  mock: false
+  clusterName: talos-prod-eu
+  # -auto-warm starts the reconciler for local clusters (Stage 2/3).
+  autoWarm: true
+  # Optional login rate-limit overrides (PREPULLER_LOGIN_ATTEMPTS_PER_MINUTE /
+  # PREPULLER_LOGIN_BLOCK). Empty = internal/auth defaults.
+  loginRateLimit:
+    attemptsPerMinute: ""
+    block: ""
+  # Secure cookie attribute. Keep true behind TLS ingress; set false only for
+  # plain-HTTP local development.
+  cookieSecure: true
+  # Optional extra spokes, PREPULLER_REMOTE_CLUSTERS format:
+  # "name=url=token,name2=url2=token2". Prefer remoteClusters for the hub to
+  # reach spoke releases deployed in other clusters.
+  remoteClusters: ""
+  service:
+    type: ClusterIP
+    httpPort: 8080
+    metricsPort: 9090
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  # Adds prometheus.io/scrape|port|path pod annotations for the metrics port.
+  metrics:
+    annotations: true
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # Extra environment variables (list of name/value or name/valueFrom).
+  extraEnv: []
+
+spoke:
+  # Headless backend for one managed cluster. Deploy one release (or one
+  # spoke.enabled release) per spoke cluster; the hub reaches it over HTTPS.
+  enabled: false
+  mock: true
+  clusterName: talos-prod-kz
+  replicaCount: 1
+  service:
+    type: ClusterIP
+    httpPort: 8081
+    metricsPort: 9091
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  metrics:
+    annotations: true
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  extraEnv: []
+
+agent:
+  # Per-node DaemonSet serving the agent HTTP/JSON API v1 (WS-A). The live
+  # K8sProvider in the hub talks to it on each node's InternalIP:9443.
+  enabled: true
+  # Dedicated ServiceAccount for the DaemonSet: no Kubernetes API permissions.
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+  # false -> talk to the real CRI socket; true -> in-memory mock images.
+  mock: false
+  criSocket: /run/containerd/containerd.sock
+  # HTTP/JSON listen address of the agent (cmd/prepuller/agent.go -listen-addr).
+  port: 9443
+  diskPauseRatio: 0.78
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+  # Reading the containerd socket requires root or a supplemental group that
+  # owns it. Keep 0 until WS-A adds group-based socket access, then switch to
+  # 65532 plus supplementalGroups: [<containerd gid>]. Root filesystem stays
+  # read-only either way.
+  securityContext:
+    runAsNonRoot: false
+    runAsUser: 0
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+  nodeSelector: {}
+  tolerations: []
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 10%
+  # kubectl drain/upgrade knob: the DaemonSet tolerates control-plane taints
+  # only if listed here.
+
+ingress:
+  enabled: false
+  # Traefik accepts the standard Ingress class name, e.g. "traefik".
+  className: ""
+  annotations: {}
+  hosts:
+    - host: prepuller.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Optional NetworkPolicy for the agent DaemonSet: ingress only from the release
+# namespace, egress limited to DNS and TCP 443 (registries).
+networkPolicy:
+  enabled: false
