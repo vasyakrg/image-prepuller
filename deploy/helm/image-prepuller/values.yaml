@@ -71,6 +71,11 @@ secret:
   # Empty -> random 32 chars. Bearer token of the node-agent HTTP API
   # (PREPULLER_AGENT_TOKEN). Empty on the agent disables its auth.
   agentToken: ""
+  # Optional multi-user list for PREPULLER_USERS: "name:password:role,..."
+  # (roles viewer/operator). Empty keeps the legacy single auth-user/password.
+  # NOTE: main.go currently passes only the legacy pair to auth.NewManager;
+  # multi-user needs the integrator to wire auth.UsersFromEnv (see DEPLOY.md).
+  users: ""
 
 hub:
   replicaCount: 1
@@ -79,9 +84,13 @@ hub:
   # below and a reachable Kubernetes API from the pod.
   mock: false
   clusterName: talos-prod-eu
-  # -auto-warm starts the reconciler for local clusters (Stage 2/3). It works
-  # with -mock too; keep false until the live provider is wired into main.go.
-  autoWarm: false
+  # -auto-warm starts the reconciler for local clusters (Stage 2/3).
+  autoWarm: true
+  # Optional login rate-limit overrides. They only take effect once main.go
+  # wires auth.RateLimitConfigFromEnv into auth.NewManager (see DEPLOY.md).
+  loginRateLimit:
+    attemptsPerMinute: ""
+    block: ""
   # Optional extra spokes, PREPULLER_REMOTE_CLUSTERS format:
   # "name=url=token,name2=url2=token2". Prefer remoteClusters for the hub to
   # reach spoke releases deployed in other clusters.

@@ -72,8 +72,11 @@ it from a single Secret. Keys in the Secret:
 | `session-secret` | `PREPULLER_SESSION_SECRET` | hub | Required for stable sessions. Random per install if empty → users are logged out on restart and multi-replica setups break. |
 | `cluster-token` | `PREPULLER_CLUSTER_TOKEN` | spoke | Bearer token expected by `/internal/v1/*`. Empty disables auth — dev only. |
 | `agent-token` | `PREPULLER_AGENT_TOKEN` | agent | Bearer token of the agent HTTP API v1. Empty disables agent auth. |
+| `users` | `PREPULLER_USERS` | hub | Optional multi-user list `name:password:role,...` (roles `viewer`/`operator`). Needs the `main.go` wiring described below. |
 | — | `PREPULLER_REMOTE_CLUSTERS` | hub | Optional `name=url=token,...` list of extra spokes. |
-| — | `PREPULLER_NODE_NAME` | agent | Node name; the DaemonSet passes `spec.nodeName` via `-node-name`. |
+| — | `PREPULLER_LOGIN_ATTEMPTS_PER_MINUTE` | hub | Optional login rate limit (default 5/min). Needs the `main.go` wiring described below. |
+| — | `PREPULLER_LOGIN_BLOCK` | hub | Optional block duration after too many attempts (Go duration, e.g. `5m`). |
+| — | `PREPULLER_NODE_NAME` | agent | Node name; the DaemonSet sets it from `spec.nodeName`. |
 | — | `PREPULLER_CRI_SOCKET` | agent | CRI socket path, default `/run/containerd/containerd.sock`. |
 
 Two ways to provide them:
@@ -110,6 +113,16 @@ to the ServiceAccount (`serviceAccount.annotations` / `kubectl patch sa`).
 Secrets are never logged and never returned by the API. The only secret in the
 Helm release values is what you pass with `--set`; prefer `--set-file` or an
 external secret manager for production.
+
+> **Multi-user / rate-limit wiring.** `internal/auth` already supports
+> `PREPULLER_USERS`, `PREPULLER_LOGIN_ATTEMPTS_PER_MINUTE` and
+> `PREPULLER_LOGIN_BLOCK`, but `cmd/prepuller/main.go` (integrator-owned) still
+> builds `auth.Config` from the legacy pair only. To activate them the
+> integrator should use `auth.UsersFromEnv()` for `Config.Users`,
+> `auth.RateLimitConfigFromEnv()` for the limiter and
+> `auth.NewJSONAuditor(os.Stdout)` for `Config.Auditor` (see the exact patch in
+> the PR description). Until then the chart renders the variables but the
+> binary ignores them; the legacy `auth-user`/`auth-pass` pair keeps working.
 
 ## 4. Build the image
 
