@@ -1,0 +1,140 @@
+{
+  "clusterName": "talos-fixture",
+  "apiVersion": "v2",
+  "mockMode": false,
+  "updatedAt": "2026-11-26T12:00:05Z",
+  "lastSyncAt": "2026-11-26T12:00:00Z",
+  "syncStatus": "ok",
+  "partial": false,
+  "summary": {
+    "totalWorkloads": 1,
+    "deployments": 1,
+    "statefulSets": 0,
+    "daemonSets": 0,
+    "uniqueImages": 1,
+    "readyWorkers": 1,
+    "totalWorkers": 2,
+    "diskPausedNodes": 0,
+    "presentSlots": 1,
+    "totalSlots": 2,
+    "coveragePercent": 50,
+    "activePulls": 1,
+    "queuedTasks": 0,
+    "runningTasks": 1,
+    "failedTasks": 0,
+    "policyWarnings": 0
+  },
+  "workloads": [
+    {
+      "namespace": "prod",
+      "kind": "Deployment",
+      "name": "api-gateway",
+      "replicas": 2,
+      "imagePullSecrets": ["ghcr-prod-creds"],
+      "images": [
+        {
+          "image": "ghcr.io/acme/api-gateway:1.14.2",
+          "ref": {
+            "image": "ghcr.io/acme/api-gateway",
+            "tag": "1.14.2"
+          },
+          "containerName": "gateway",
+          "isInit": false,
+          "pullPolicy": "IfNotPresent",
+          "nodes": [
+            {
+              "node": "talos-worker-01",
+              "state": "present",
+              "sizeBytes": 148897792,
+              "lastChecked": "2026-11-26T11:59:40Z"
+            },
+            {
+              "node": "talos-worker-02",
+              "state": "pulling",
+              "lastChecked": "2026-11-26T11:59:55Z"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "name": "talos-worker-01",
+      "ready": true,
+      "agentUp": true,
+      "agentVersion": "0.2.0-dev",
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "reason": "KubeletReady",
+          "message": "kubelet is posting ready status",
+          "lastTransition": "2026-11-25T10:00:00Z"
+        }
+      ],
+      "diskPaused": false,
+      "diskPauseThreshold": 0.78,
+      "kubeletGcThreshold": 0.85,
+      "imageFsUsedBytes": 40802189312,
+      "imageFsCapacityBytes": 85899345920,
+      "cachedImageCount": 1,
+      "activePulls": 1,
+      "cachedImages": [
+        {
+          "image": "ghcr.io/acme/api-gateway:1.14.2",
+          "sizeBytes": 148897792
+        }
+      ],
+      "lastSeen": "2026-11-26T11:59:58Z"
+    },
+    {
+      "name": "talos-worker-02",
+      "ready": true,
+      "agentUp": true,
+      "agentVersion": "0.2.0-dev",
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "reason": "KubeletReady",
+          "message": "kubelet is posting ready status",
+          "lastTransition": "2026-11-25T10:00:00Z"
+        }
+      ],
+      "diskPaused": false,
+      "diskPauseThreshold": 0.78,
+      "kubeletGcThreshold": 0.85,
+      "imageFsUsedBytes": 46170898432,
+      "imageFsCapacityBytes": 85899345920,
+      "cachedImageCount": 0,
+      "activePulls": 0,
+      "lastSeen": "2026-11-26T11:59:57Z"
+    }
+  ],
+  "activity": [
+    {
+      "id": "evt-1",
+      "timestamp": "2026-11-26T11:59:55Z",
+      "node": "talos-worker-02",
+      "image": "ghcr.io/acme/api-gateway:1.14.2",
+      "trigger": "manual",
+      "actor": "admin",
+      "result": "pulling"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "task-1",
+      "cluster": "talos-fixture",
+      "image": "ghcr.io/acme/api-gateway:1.14.2",
+      "node": "talos-worker-02",
+      "state": "running",
+      "attempt": 1,
+      "trigger": "manual",
+      "actor": "admin",
+      "createdAt": "2026-11-26T11:59:55Z",
+      "startedAt": "2026-11-26T11:59:55Z"
+    }
+  ]
+}

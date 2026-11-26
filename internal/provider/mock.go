@@ -12,6 +12,8 @@ import (
 	"github.com/local/image-prepuller/internal/model"
 )
 
+const mockAgentVersion = "mock-0.1.0"
+
 type mockNode struct {
 	name           string
 	ready          bool
@@ -37,7 +39,7 @@ type mockImageDef struct {
 	image         string
 	containerName string
 	isInit        bool
-	pullPolicy    string
+	pullPolicy    model.PullPolicy
 	sizeBytes     int64
 }
 
@@ -57,6 +59,11 @@ type MockProvider struct {
 	activity    []model.PullEvent
 	pullCounts  map[string]uint64 // "image|node|result" -> count
 	eventSeq    int
+	tasks       []*model.PullTask
+	taskCell    map[string]string          // task id -> "image|node"
+	taskPrev    map[string]model.PullState // task id -> state before pulling
+	taskSeq     int
+	lastSync    time.Time
 }
 
 func NewMockProvider(clusterName string) *MockProvider {
@@ -118,8 +125,8 @@ func NewMockProvider(clusterName string) *MockProvider {
 			replicas:         2,
 			imagePullSecrets: []string{"ghcr-prod-creds"},
 			images: []mockImageDef{
-				{image: "ghcr.io/acme/api-gateway:1.14.2", containerName: "gateway", pullPolicy: "IfNotPresent", sizeBytes: 142 * mb},
-				{image: "ghcr.io/acme/db-migrator:1.14.2", containerName: "migrate", isInit: true, pullPolicy: "IfNotPresent", sizeBytes: 68 * mb},
+				{image: "ghcr.io/acme/api-gateway:1.14.2", containerName: "gateway", pullPolicy: model.PullPolicyIfNotPresent, sizeBytes: 142 * mb},
+				{image: "ghcr.io/acme/db-migrator:1.14.2", containerName: "migrate", isInit: true, pullPolicy: model.PullPolicyIfNotPresent, sizeBytes: 68 * mb},
 			},
 		},
 		{
@@ -129,7 +136,7 @@ func NewMockProvider(clusterName string) *MockProvider {
 			replicas:         1,
 			imagePullSecrets: []string{"harbor-internal"},
 			images: []mockImageDef{
-				{image: "registry.internal/fin/payments:2.3.0", containerName: "worker", pullPolicy: "IfNotPresent", sizeBytes: 312 * mb},
+				{image: "registry.internal/fin/payments:2.3.0", containerName: "worker", pullPolicy: model.PullPolicyIfNotPresent, sizeBytes: 312 * mb},
 			},
 		},
 		{
@@ -139,7 +146,7 @@ func NewMockProvider(clusterName string) *MockProvider {
 			replicas:         1,
 			imagePullSecrets: []string{},
 			images: []mockImageDef{
-				{image: "nginx:latest", containerName: "cron-proxy", pullPolicy: "Always", sizeBytes: 187 * mb},
+				{image: "nginx:latest", containerName: "cron-proxy", pullPolicy: model.PullPolicyAlways, sizeBytes: 187 * mb},
 			},
 		},
 		{
@@ -149,7 +156,7 @@ func NewMockProvider(clusterName string) *MockProvider {
 			replicas:         1,
 			imagePullSecrets: []string{"harbor-ml-creds"},
 			images: []mockImageDef{
-				{image: "registry.internal/ml/scorer:0.9.1", containerName: "scorer", pullPolicy: "IfNotPresent", sizeBytes: 1840 * mb},
+				{image: "registry.internal/ml/scorer:0.9.1", containerName: "scorer", pullPolicy: model.PullPolicyIfNotPresent, sizeBytes: 1840 * mb},
 			},
 		},
 		{
@@ -159,7 +166,7 @@ func NewMockProvider(clusterName string) *MockProvider {
 			replicas:         4,
 			imagePullSecrets: []string{},
 			images: []mockImageDef{
-				{image: "fluent/fluent-bit:3.1.8", containerName: "fluent-bit", pullPolicy: "IfNotPresent", sizeBytes: 94 * mb},
+				{image: "fluent/fluent-bit:3.1.8", containerName: "fluent-bit", pullPolicy: model.PullPolicyIfNotPresent, sizeBytes: 94 * mb},
 			},
 		},
 	}
@@ -170,6 +177,9 @@ func NewMockProvider(clusterName string) *MockProvider {
 		workloads:   workloads,
 		cells:       make(map[string]map[string]*mockCell),
 		pullCounts:  make(map[string]uint64),
+		taskCell:    make(map[string]string),
+		taskPrev:    make(map[string]model.PullState),
+		lastSync:    now,
 	}
 
 	for _, w := range workloads {
@@ -208,7 +218,7 @@ func NewMockProvider(clusterName string) *MockProvider {
 			Timestamp:  now.Add(-9 * time.Minute),
 			Node:       "talos-worker-01",
 			Image:      "ghcr.io/acme/api-gateway:1.14.2",
-			Trigger:    "auto",
+			Trigger:    model.TriggerAuto,
 			Result:     "success",
 			DurationMs: 2410,
 		},
@@ -217,7 +227,7 @@ func NewMockProvider(clusterName string) *MockProvider {
 			Timestamp:  now.Add(-8 * time.Minute),
 			Node:       "talos-worker-02",
 			Image:      "registry.internal/ml/scorer:0.9.1",
-			Trigger:    "auto",
+			Trigger:    model.TriggerAuto,
 			Result:     "error",
 			DurationMs: 420,
 			Error:      "401 Unauthorized (harbor-ml-creds)",
@@ -227,7 +237,7 @@ func NewMockProvider(clusterName string) *MockProvider {
 			Timestamp:  now.Add(-3 * time.Minute),
 			Node:       "talos-worker-01",
 			Image:      "registry.internal/fin/payments:2.3.0",
-			Trigger:    "auto",
+			Trigger:    model.TriggerAuto,
 			Result:     "success",
 			DurationMs: 4120,
 		},
@@ -240,9 +250,10 @@ func NewMockProvider(clusterName string) *MockProvider {
 	return m
 }
 
-func EvaluatePolicyViolations(image, pullPolicy string) []model.PolicyViolation {
+// EvaluatePolicyViolations reports imagePullPolicy/tag problems for one image.
+func EvaluatePolicyViolations(image string, pullPolicy model.PullPolicy) []model.PolicyViolation {
 	var out []model.PolicyViolation
-	if strings.EqualFold(pullPolicy, "Always") {
+	if pullPolicy == model.PullPolicyAlways {
 		out = append(out, model.PolicyViolation{
 			Reason:  "pull_policy_always",
 			Message: "imagePullPolicy is Always (blocks offline failover)",
@@ -308,6 +319,7 @@ func (m *MockProvider) Snapshot(_ context.Context) model.Snapshot {
 
 			wi := model.WorkloadImage{
 				Image:            imgDef.image,
+				Ref:              model.ParseImageRef(imgDef.image),
 				ContainerName:    imgDef.containerName,
 				IsInit:           imgDef.isInit,
 				PullPolicy:       imgDef.pullPolicy,
@@ -339,10 +351,12 @@ func (m *MockProvider) Snapshot(_ context.Context) model.Snapshot {
 	}
 
 	nodes := make([]model.NodeInfo, 0, len(m.nodes))
+	readyWorkers := 0
 	for _, n := range m.nodes {
 		summary.TotalWorkers++
 		if n.ready {
 			summary.ReadyWorkers++
+			readyWorkers++
 		}
 		paused := n.ready && float64(n.usedBytes)/float64(n.capacityBytes) >= n.diskPauseRatio
 		if paused {
@@ -354,6 +368,8 @@ func (m *MockProvider) Snapshot(_ context.Context) model.Snapshot {
 			Name:                 n.name,
 			Ready:                n.ready,
 			AgentUp:              n.agentUp,
+			AgentVersion:         mockAgentVersion,
+			Conditions:           mockConditions(n),
 			DiskPaused:           paused,
 			DiskPauseThreshold:   n.diskPauseRatio,
 			KubeletGCThreshold:   n.kubeletGCRatio,
@@ -371,64 +387,115 @@ func (m *MockProvider) Snapshot(_ context.Context) model.Snapshot {
 		summary.CoveragePercent = float64(summary.PresentSlots) * 100.0 / float64(summary.TotalSlots)
 	}
 
+	tasks := make([]model.PullTask, 0, len(m.tasks))
+	for _, t := range m.tasks {
+		tasks = append(tasks, *t)
+		if t.State == model.TaskQueued {
+			summary.QueuedTasks++
+		}
+		if t.State == model.TaskRunning {
+			summary.RunningTasks++
+		}
+		if t.State == model.TaskFailed {
+			summary.FailedTasks++
+		}
+	}
+	sort.Slice(tasks, func(i, j int) bool { return tasks[i].CreatedAt.After(tasks[j].CreatedAt) })
+
 	activity := make([]model.PullEvent, len(m.activity))
 	copy(activity, m.activity)
 	sort.Slice(activity, func(i, j int) bool {
 		return activity[i].Timestamp.After(activity[j].Timestamp)
 	})
 
+	syncStatus := model.SyncOK
+	if readyWorkers < len(m.nodes) {
+		syncStatus = model.SyncDegraded
+	}
+
 	return model.Snapshot{
 		ClusterName: m.clusterName,
+		APIVersion:  model.APIVersion,
 		MockMode:    true,
 		UpdatedAt:   time.Now(),
+		LastSyncAt:  m.lastSync,
+		SyncStatus:  syncStatus,
+		Partial:     false,
 		Summary:     summary,
 		Workloads:   workloads,
 		Nodes:       nodes,
 		Activity:    activity,
+		Tasks:       tasks,
 	}
 }
 
-func (m *MockProvider) TriggerPull(_ context.Context, image, nodeName, actor string) error {
+func mockConditions(n *mockNode) []model.NodeCondition {
+	now := time.Now()
+	if !n.ready {
+		return []model.NodeCondition{{
+			Type:           "Ready",
+			Status:         "False",
+			Reason:         "KubeletNotReady",
+			Message:        "node is NotReady (simulated)",
+			LastTransition: now.Add(-7 * time.Minute),
+		}}
+	}
+	return []model.NodeCondition{{
+		Type:           "Ready",
+		Status:         "True",
+		Reason:         "KubeletReady",
+		Message:        "kubelet is posting ready status",
+		LastTransition: now.Add(-26 * time.Hour),
+	}}
+}
+
+func (m *MockProvider) TriggerPull(_ context.Context, req model.PullRequest) (model.PullTask, error) {
 	m.mu.Lock()
-	nodeMap, ok := m.cells[image]
+	nodeMap, ok := m.cells[req.Image]
 	if !ok {
 		m.mu.Unlock()
-		return fmt.Errorf("unknown image %q", image)
+		return model.PullTask{}, fmt.Errorf("unknown image %q", req.Image)
 	}
-	cell, ok := nodeMap[nodeName]
+	cell, ok := nodeMap[req.Node]
 	if !ok {
 		m.mu.Unlock()
-		return fmt.Errorf("unknown node %q", nodeName)
+		return model.PullTask{}, fmt.Errorf("unknown node %q", req.Node)
 	}
-	var targetNode *mockNode
-	for _, n := range m.nodes {
-		if n.name == nodeName {
-			targetNode = n
-			break
-		}
-	}
+	targetNode := m.nodeLocked(req.Node)
 	if targetNode == nil {
 		m.mu.Unlock()
-		return fmt.Errorf("node %q not found", nodeName)
+		return model.PullTask{}, fmt.Errorf("node %q not found", req.Node)
 	}
 	if !targetNode.ready || !targetNode.agentUp {
 		m.mu.Unlock()
-		return fmt.Errorf("node %q is offline / agent unreachable", nodeName)
+		return model.PullTask{}, fmt.Errorf("node %q is offline / agent unreachable", req.Node)
 	}
-	if cell.state == model.StatePulling {
+	// Idempotency: an active pull for the same image+node is returned as-is.
+	if existing := m.activeTaskLocked(req.Image, req.Node); existing != nil {
+		out := *existing
 		m.mu.Unlock()
-		return nil
+		return out, nil
 	}
 
-	var imgSize int64 = 128 * 1024 * 1024
-	for _, w := range m.workloads {
-		for _, img := range w.images {
-			if img.image == image {
-				imgSize = img.sizeBytes
-				break
-			}
-		}
+	imgSize := m.imageSizeLocked(req.Image)
+	now := time.Now()
+	started := now
+	m.taskSeq++
+	task := &model.PullTask{
+		ID:        fmt.Sprintf("task-%d", m.taskSeq),
+		Cluster:   m.clusterName,
+		Image:     req.Image,
+		Node:      req.Node,
+		State:     model.TaskRunning,
+		Attempt:   1,
+		Trigger:   triggerOrDefault(req.Trigger),
+		Actor:     req.Actor,
+		CreatedAt: now,
+		StartedAt: &started,
 	}
+	m.tasks = append(m.tasks, task)
+	m.taskCell[task.ID] = req.Image + "|" + req.Node
+	m.taskPrev[task.ID] = cell.state
 
 	cell.state = model.StatePulling
 	cell.errMsg = ""
@@ -436,40 +503,45 @@ func (m *MockProvider) TriggerPull(_ context.Context, image, nodeName, actor str
 
 	m.eventSeq++
 	evtID := fmt.Sprintf("evt-%d", m.eventSeq)
-	trigger := "auto"
-	if actor != "" {
-		trigger = fmt.Sprintf("manual (%s)", actor)
-	}
 	m.activity = append(m.activity, model.PullEvent{
 		ID:        evtID,
-		Timestamp: time.Now(),
-		Node:      nodeName,
-		Image:     image,
-		Trigger:   trigger,
+		Timestamp: now,
+		Node:      req.Node,
+		Image:     req.Image,
+		Trigger:   task.Trigger,
+		Actor:     req.Actor,
 		Result:    "pulling",
 	})
-	if len(m.activity) > 100 {
-		m.activity = m.activity[len(m.activity)-100:]
-	}
+	m.trimLocked()
+	out := *task
 	m.mu.Unlock()
 
-	// Simulate realistic async image pull in background
-	go func() {
+	// Simulate a realistic asynchronous image pull in the background.
+	go func(taskID string) {
 		delay := time.Duration(1200+rand.Intn(1300)) * time.Millisecond
 		time.Sleep(delay)
 
 		m.mu.Lock()
 		defer m.mu.Unlock()
 
+		t := m.findTaskLocked(taskID)
+		if t == nil || t.State != model.TaskRunning {
+			return
+		}
 		if targetNode.activePulls > 0 {
 			targetNode.activePulls--
 		}
-		targetNode.lastSeen = time.Now()
+		finished := time.Now()
+		targetNode.lastSeen = finished
 		cell.state = model.StatePresent
 		cell.sizeBytes = imgSize
-		cell.lastChecked = time.Now()
+		cell.lastChecked = finished
 		cell.errMsg = ""
-		m.pullCounts[fmt.Sprintf("%s|%s|success", image, nodeName)]++
+		m.pullCounts[fmt.Sprintf("%s|%s|success", req.Image, req.Node)]++
+		t.State = model.TaskSucceeded
+		t.FinishedAt = &finished
+		t.DurationMs = delay.Milliseconds()
+		m.lastSync = finished
 
 		for i := range m.activity {
 			if m.activity[i].ID == evtID {
@@ -478,18 +550,18 @@ func (m *MockProvider) TriggerPull(_ context.Context, image, nodeName, actor str
 				break
 			}
 		}
-	}()
+	}(task.ID)
 
-	return nil
+	return out, nil
 }
 
-func (m *MockProvider) TriggerWorkloadPull(ctx context.Context, namespace, kind, name, actor string) (int, error) {
+func (m *MockProvider) TriggerWorkloadPull(ctx context.Context, req model.WorkloadPullRequest) (int, error) {
 	m.mu.RLock()
 	var images []string
 	var onlineNodes []string
 	found := false
 	for _, w := range m.workloads {
-		if w.namespace == namespace && strings.EqualFold(w.kind, kind) && w.name == name {
+		if w.namespace == req.Namespace && strings.EqualFold(w.kind, req.Kind) && w.name == req.Name {
 			found = true
 			for _, img := range w.images {
 				images = append(images, img.image)
@@ -505,18 +577,66 @@ func (m *MockProvider) TriggerWorkloadPull(ctx context.Context, namespace, kind,
 	m.mu.RUnlock()
 
 	if !found {
-		return 0, fmt.Errorf("workload %s/%s/%s not found", namespace, kind, name)
+		return 0, fmt.Errorf("workload %s/%s/%s not found", req.Namespace, req.Kind, req.Name)
 	}
 
 	triggered := 0
 	for _, img := range images {
 		for _, node := range onlineNodes {
-			if err := m.TriggerPull(ctx, img, node, actor); err == nil {
+			if _, err := m.TriggerPull(ctx, model.PullRequest{
+				Image:   img,
+				Node:    node,
+				Actor:   req.Actor,
+				Trigger: triggerOrDefault(req.Trigger),
+			}); err == nil {
 				triggered++
 			}
 		}
 	}
 	return triggered, nil
+}
+
+func (m *MockProvider) CancelPull(_ context.Context, taskID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	t := m.findTaskLocked(taskID)
+	if t == nil {
+		return fmt.Errorf("%w: %s", ErrTaskNotFound, taskID)
+	}
+	if !t.State.Active() {
+		return fmt.Errorf("pull task %s is already finished (%s)", taskID, t.State)
+	}
+
+	now := time.Now()
+	t.State = model.TaskCanceled
+	t.FinishedAt = &now
+	if cellKey, ok := m.taskCell[taskID]; ok {
+		parts := strings.SplitN(cellKey, "|", 2)
+		if len(parts) == 2 {
+			if n := m.nodeLocked(parts[1]); n != nil && n.activePulls > 0 {
+				n.activePulls--
+			}
+			if cell := m.cellLocked(parts[0], parts[1]); cell != nil {
+				cell.state = m.taskPrev[taskID]
+				if cell.state == model.StatePresent {
+					cell.sizeBytes = m.imageSizeLocked(parts[0])
+				}
+				cell.lastChecked = now
+			}
+		}
+	}
+	m.activity = append(m.activity, model.PullEvent{
+		ID:        fmt.Sprintf("evt-%d", m.nextEventLocked()),
+		Timestamp: now,
+		Node:      t.Node,
+		Image:     t.Image,
+		Trigger:   t.Trigger,
+		Actor:     t.Actor,
+		Result:    "canceled",
+	})
+	m.trimLocked()
+	return nil
 }
 
 func (m *MockProvider) SyncNow(_ context.Context, _ string) error {
@@ -535,7 +655,16 @@ func (m *MockProvider) SyncNow(_ context.Context, _ string) error {
 			}
 		}
 	}
+	m.lastSync = now
 	return nil
+}
+
+func (m *MockProvider) Health(_ context.Context) model.Health {
+	return model.Health{
+		Online:    true,
+		Version:   mockAgentVersion,
+		CheckedAt: time.Now(),
+	}
 }
 
 func (m *MockProvider) PullCounters() []model.PullMetricSample {
@@ -555,4 +684,71 @@ func (m *MockProvider) PullCounters() []model.PullMetricSample {
 		})
 	}
 	return out
+}
+
+func (m *MockProvider) nodeLocked(name string) *mockNode {
+	for _, n := range m.nodes {
+		if n.name == name {
+			return n
+		}
+	}
+	return nil
+}
+
+func (m *MockProvider) cellLocked(image, node string) *mockCell {
+	nodeMap, ok := m.cells[image]
+	if !ok {
+		return nil
+	}
+	return nodeMap[node]
+}
+
+func (m *MockProvider) imageSizeLocked(image string) int64 {
+	for _, w := range m.workloads {
+		for _, img := range w.images {
+			if img.image == image {
+				return img.sizeBytes
+			}
+		}
+	}
+	return 128 * 1024 * 1024
+}
+
+func (m *MockProvider) findTaskLocked(taskID string) *model.PullTask {
+	for _, t := range m.tasks {
+		if t.ID == taskID {
+			return t
+		}
+	}
+	return nil
+}
+
+func (m *MockProvider) activeTaskLocked(image, node string) *model.PullTask {
+	for _, t := range m.tasks {
+		if t.Image == image && t.Node == node && t.State.Active() {
+			return t
+		}
+	}
+	return nil
+}
+
+func (m *MockProvider) nextEventLocked() int {
+	m.eventSeq++
+	return m.eventSeq
+}
+
+func (m *MockProvider) trimLocked() {
+	if len(m.activity) > 100 {
+		m.activity = m.activity[len(m.activity)-100:]
+	}
+	if len(m.tasks) > 200 {
+		m.tasks = m.tasks[len(m.tasks)-200:]
+	}
+}
+
+func triggerOrDefault(t model.PullTrigger) model.PullTrigger {
+	if t == "" {
+		return model.TriggerAuto
+	}
+	return t
 }

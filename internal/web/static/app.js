@@ -377,13 +377,15 @@
         ? '<span class="pill pill-green">Success</span>'
         : ev.result === "pulling"
           ? '<span class="pill pill-blue">Pulling...</span>'
-          : '<span class="pill pill-red">Error</span>';
+          : ev.result === "canceled"
+            ? '<span class="pill pill-gray">Canceled</span>'
+            : '<span class="pill pill-red">Error</span>';
       return `
         <tr>
           <td class="mono muted">${fmtTime(ev.timestamp)}</td>
           <td class="mono">${esc(ev.node)}</td>
           <td class="mono">${esc(ev.image)}</td>
-          <td>${esc(ev.trigger)}</td>
+          <td>${esc(ev.trigger)}${ev.actor ? " · " + esc(ev.actor) : ""}</td>
           <td class="mono muted">${ev.durationMs ? (ev.durationMs / 1000).toFixed(2) + "s" : "—"}</td>
           <td>${resBadge}${ev.error ? ` <span class="cell-err">${esc(ev.error)}</span>` : ""}</td>
         </tr>

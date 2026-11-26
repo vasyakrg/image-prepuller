@@ -29,8 +29,7 @@ func main() {
 	case "controller":
 		runController(os.Args[2:])
 	case "agent":
-		fmt.Fprintln(os.Stderr, "agent mode will be implemented in Stage 2 (CRI /run/containerd/containerd.sock)")
-		os.Exit(1)
+		runAgent(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand %q (expected controller or agent)\n", os.Args[1])
 		os.Exit(2)

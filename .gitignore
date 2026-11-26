@@ -7,6 +7,8 @@
 # Project-local Go caches (GOCACHE=$PWD/.gocache, GOMODCACHE=$PWD/.gomodcache)
 /.gocache/
 /.gomodcache/
+.gopath/
+.worktrees/
 
 # Local logs and OS/IDE noise
 *.log

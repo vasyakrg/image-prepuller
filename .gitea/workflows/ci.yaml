@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  # Зеркало модулей вместо vendor/ (ADR-001). direct — fallback, если зеркало недоступно.
+  GOPROXY: https://goproxy.io,direct
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: go mod download
+        run: go mod download
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l $(git ls-files '*.go'))"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed for:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+      - name: build linux/amd64 + linux/arm64
+        run: |
+          for arch in amd64 arm64; do
+            GOOS=linux GOARCH="$arch" go build -trimpath -ldflags="-s -w" -o "/tmp/prepuller-linux-$arch" ./cmd/prepuller
+          done
+
+      # Гейт ADR-001: новые зависимости без contract PR ломают сборку.
+      - name: dependency boundary
+        run: |
+          go list -m all > /tmp/modules.txt
+          if grep -q 'prometheus/client_golang' /tmp/modules.txt; then
+            echo "prometheus/client_golang is forbidden by ADR-001"; exit 1
+          fi

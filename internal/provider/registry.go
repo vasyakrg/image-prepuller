@@ -28,6 +28,7 @@ type ClusterSummary struct {
 	TotalWorkloads  int     `json:"totalWorkloads"`
 	CoveragePercent float64 `json:"coveragePercent"`
 	PolicyWarnings  int     `json:"policyWarnings"`
+	SyncStatus      string  `json:"syncStatus"`
 }
 
 type Registry struct {
@@ -93,6 +94,7 @@ func (r *Registry) List(ctx context.Context) []ClusterSummary {
 			TotalWorkloads:  snap.Summary.TotalWorkloads,
 			CoveragePercent: snap.Summary.CoveragePercent,
 			PolicyWarnings:  snap.Summary.PolicyWarnings,
+			SyncStatus:      string(snap.SyncStatus),
 		})
 	}
 	return out
@@ -121,20 +123,30 @@ func (r *Registry) AllIDs() []string {
 	return ids
 }
 
-func (r *Registry) TriggerPull(ctx context.Context, clusterID, image, node, actor string) error {
+func (r *Registry) TriggerPull(ctx context.Context, clusterID string, req model.PullRequest) (model.PullTask, error) {
 	e, ok := r.Get(clusterID)
 	if !ok {
-		return fmt.Errorf("unknown cluster %q", clusterID)
+		return model.PullTask{}, fmt.Errorf("unknown cluster %q", clusterID)
 	}
-	return e.Provider.TriggerPull(ctx, image, node, actor)
+	req.Cluster = e.ID
+	return e.Provider.TriggerPull(ctx, req)
 }
 
-func (r *Registry) TriggerWorkloadPull(ctx context.Context, clusterID, ns, kind, name, actor string) (int, error) {
+func (r *Registry) TriggerWorkloadPull(ctx context.Context, clusterID string, req model.WorkloadPullRequest) (int, error) {
 	e, ok := r.Get(clusterID)
 	if !ok {
 		return 0, fmt.Errorf("unknown cluster %q", clusterID)
 	}
-	return e.Provider.TriggerWorkloadPull(ctx, ns, kind, name, actor)
+	req.Cluster = e.ID
+	return e.Provider.TriggerWorkloadPull(ctx, req)
+}
+
+func (r *Registry) CancelPull(ctx context.Context, clusterID, taskID string) error {
+	e, ok := r.Get(clusterID)
+	if !ok {
+		return fmt.Errorf("unknown cluster %q", clusterID)
+	}
+	return e.Provider.CancelPull(ctx, taskID)
 }
 
 func (r *Registry) SyncNow(ctx context.Context, clusterID, actor string) error {
@@ -143,4 +155,13 @@ func (r *Registry) SyncNow(ctx context.Context, clusterID, actor string) error {
 		return fmt.Errorf("unknown cluster %q", clusterID)
 	}
 	return e.Provider.SyncNow(ctx, actor)
+}
+
+// Health returns the provider health view for one cluster ("" means default).
+func (r *Registry) Health(ctx context.Context, clusterID string) (model.Health, error) {
+	e, ok := r.Get(clusterID)
+	if !ok {
+		return model.Health{}, fmt.Errorf("unknown cluster %q", clusterID)
+	}
+	return e.Provider.Health(ctx), nil
 }

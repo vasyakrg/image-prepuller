@@ -9,10 +9,10 @@
 в [architecture.md](architecture.md), решения по зависимостям —
 в [ADR-001](adr/0001-dependencies.md).
 
-**Статус на 2026-11-26:** Phase 0 выполнена (git инициализирован, baseline-коммит
-`18aaaa5`, артефакты в `.gitignore`); ADR-001 в статусе Proposed — ждёт ревью;
-WS-1 (contract freeze) в работе у интегратора. Остальные WS заблокированы до
-`contract-v2`.
+**Статус на 2026-11-26:** Phase 0 выполнена (git, baseline `18aaaa5`, артефакты
+в `.gitignore`); ADR-001 **Accepted** (grpc+cri-api в агенте, client-go в K8s-провайдере,
+GOPROXY-зеркало вместо vendor); Phase 1 (contract freeze) выполнена и помечена тегом
+`contract-v2` — WS-A…WS-H разблокированы. Дальше: волна 1 (A, B, C, D), затем E/F/G/H.
 
 ## 1. Цели этапов
 
@@ -48,10 +48,14 @@ git add -A && git commit -m "chore: baseline stage 1 (docs + mock hub/spoke)"
 
 Правила:
 
-- .gocache/ (138 МБ) и bin/ — в .gitignore, в историю не попадают.
-- Каждая сессия делает git worktree add ../ip-<ws> -b ws/<ws> от main.
-- Сборка в worktree: GOCACHE=$HOME/.cache/go-build (общий кэш безопасен, он
-  content-addressed) или GOCACHE=$PWD/.gocache для полной изоляции.
+- .gocache/ (138 МБ), .gopath/ (модульный кэш) и bin/ — в .gitignore, в историю не попадают.
+- **Worktree создаются внутри репозитория** (в песочнице DSH писать можно только в
+  workspace): `git worktree add .worktrees/ip-<ws> -b ws/<ws>` от main;
+  `.worktrees/` в .gitignore. Путь `../ip-<ws>` из ранней версии плана в песочнице
+  не работает — он вне workspace.
+- Сборка в worktree: `export GOCACHE=$PWD/.gocache GOPATH=$PWD/.gopath
+  GOMODCACHE=$PWD/.gopath/pkg/mod` (общий `$HOME`-кэш в песочнице read-only),
+  затем `go mod download` — с contract-v2 у модуля есть внешние зависимости.
 - Ветки живут ≤ 3 дней; ежедневно git rebase main.
 
 После baseline фиксируем в репозитории два артефакта: этот план и ADR-001 с решением
@@ -91,11 +95,16 @@ git add -A && git commit -m "chore: baseline stage 1 (docs + mock hub/spoke)"
 8. **CI-каркас** .gitea/workflows/ci.yaml (gofmt/vet/test/build) — пока без e2e.
 
 После мержа: тег `contract-v2`, от него режутся все рабочие ветки, а интегратор
-создаёт себе долгоживущее дерево:
+создаёт себе долгоживущее дерево (внутри репозитория — см. §3):
 
 ```bash
-git worktree add ../ip-lead -b integ/stage-2 contract-v2
+git worktree add .worktrees/ip-lead -b integ/stage-2 contract-v2
 ```
+
+**Выполнено (2026-11-26):** сплит `server.go`/`server_spoke.go`, `auth/middleware.go`,
+`runAgent()` + `internal/agent` скелет, model v2, Provider v2, spoke v2 (counters/cancel),
+заглушки hub-API, `internal/testutil` (fake spoke + golden v2 + контрактные тесты),
+`.gitea/workflows/ci.yaml`, зависимости по ADR-001. Тег `contract-v2`.
 
 > Длительность: 2–3 агентских дня. Это единственная последовательная фаза; всё
 > остальное распараллеливается.
@@ -287,7 +296,7 @@ E2E-сценарий Stage 2/3 (обязателен перед релизом):
 ## 12. Definition of Done этапа
 
 - [ ] git-репозиторий, main защищён, все ветки через PR + гейты §6.1.
-- [ ] ADR-001 и contract-v2 в main; go.mod меняется только через них.
+- [x] ADR-001 и contract-v2 в main; go.mod меняется только через них.
 - [ ] WS-A…H смержены в порядке §9; go test ./..., go vet ./..., gofmt — чисто.
 - [ ] E2E-сценарий §9 проходит в CI на k3d.
 - [ ] README/AGENTS/architecture/diagrams обновлены интегратором, docs/DEPLOY.md — WS-G.
@@ -297,7 +306,8 @@ E2E-сценарий Stage 2/3 (обязателен перед релизом):
 ## 13. Первые пять действий
 
 1. ~~git init + .gitignore + baseline-коммит~~ — **выполнено, коммит `18aaaa5`**.
-2. Создать worktree и задачи WS-0…WS-H на борде с write_scopes/blocked_by.
-3. Провести ревью ADR-001 (черновик готов: [docs/adr/0001-dependencies.md](adr/0001-dependencies.md)).
-4. Сделать contract PR (сплит файлов, model v2, Provider v2, testutil, заглушки API).
-5. Запустить волну 1 (A, B, C, D), интегратор в это время — CI-каркас и merge queue.
+2. ~~Создать worktree и задачи WS-0…WS-H на борде с write_scopes/blocked_by~~ — **выполнено**.
+3. ~~Провести ревью ADR-001~~ — **Accepted**, [docs/adr/0001-dependencies.md](adr/0001-dependencies.md).
+4. ~~Сделать contract PR (сплит файлов, model v2, Provider v2, testutil, заглушки API)~~ —
+   **выполнено**, тег `contract-v2`.
+5. Запустить волну 1 (A, B, C, D), интегратор в это время — merge queue и ревью.

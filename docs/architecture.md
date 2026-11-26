@@ -71,18 +71,22 @@ flowchart TB
         ST["static/*<br/>embed.FS"]
     end
 
-    AUTH["internal/auth<br/>Manager"]
+    AUTH["internal/auth<br/>Manager + middleware"]
     REG["internal/provider<br/>Registry"]
-    IFACE["Provider interface"]
+    IFACE["Provider interface v2"]
     MOCK["MockProvider"]
     REM["RemoteProvider"]
+    K8SP["K8sProvider<br/>client-go (WS-B stub)"]
+    AG["internal/agent<br/>DialCRI · grpc+cri-api"]
     MET["internal/metrics<br/>Handler(reg)"]
-    MODEL["internal/model<br/>Snapshot · Workload · NodeInfo · …"]
+    MODEL["internal/model<br/>Snapshot · PullTask · ImageRef · …"]
+    TU["internal/testutil<br/>fake spoke · golden v2"]
 
     MAIN --> WEB
     MAIN --> AUTH
     MAIN --> REG
     MAIN --> MET
+    MAIN --> AG
     SRV --> AUTH
     SRV --> REG
     SRV --> ST
@@ -90,34 +94,43 @@ flowchart TB
     REG --> IFACE
     MOCK -.->|реализует| IFACE
     REM -.->|реализует| IFACE
+    K8SP -.->|реализует| IFACE
     MET --> REG
     IFACE --> MODEL
     MOCK --> MODEL
     REM --> MODEL
+    K8SP --> MODEL
     AUTH --> MODEL
+    TU -.->|контрактные тесты| WEB
+    TU -.->|контрактные тесты| IFACE
 ```
 
-`Provider` — единственная точка расширения под Kubernetes:
+`Provider` v2 — единственная точка расширения под Kubernetes (contract-v2):
 
 ```go
 type Provider interface {
     Snapshot(ctx) model.Snapshot
-    TriggerPull(ctx, image, node, actor string) error
-    TriggerWorkloadPull(ctx, namespace, kind, name, actor string) (int, error)
+    TriggerPull(ctx, model.PullRequest) (model.PullTask, error)
+    TriggerWorkloadPull(ctx, model.WorkloadPullRequest) (int, error)
+    CancelPull(ctx, taskID string) error
     SyncNow(ctx, actor string) error
+    Health(ctx) model.Health
     PullCounters() []model.PullMetricSample
 }
 ```
 
 Hub, spoke, метрики и UI не знают, mock это или живой кластер. Поэтому новый провайдер
-не требует правок ни в роутинге, ни в шаблонах метрик.
+не требует правок ни в роутинге, ни в шаблонах метрик. Границы зависимостей
+(grpc+cri-api только в агенте, client-go только в `internal/provider/k8s*.go`,
+hub-обвязка на stdlib) зафиксированы в [ADR-001](adr/0001-dependencies.md) и проверяются
+на ревью; `internal/testutil` даёт фейковый spoke и golden-снапшот для контрактных тестов.
 
 ## 3. Запуск и регистрация кластеров
 
 ```mermaid
 flowchart TD
     A["main() → os.Args[1]"] --> B{"controller / agent?"}
-    B -->|agent| X["Stage 2 stub<br/>exit 1"]
+    B -->|agent| X["runAgent()<br/>флаги · DialCRI · WS-A"]
     B -->|controller| C{"-role"}
     C -->|spoke| D["provider.NewMockProvider<br/>(live → fatal)"]
     D --> E["Registry.Register<br/>role=local"]
@@ -237,15 +250,42 @@ erDiagram
     SNAPSHOT ||--o{ WORKLOAD : workloads
     SNAPSHOT ||--o{ NODEINFO : nodes
     SNAPSHOT ||--o{ PULLEVENT : activity
+    SNAPSHOT ||--o{ PULLTASK : tasks
     WORKLOAD ||--o{ WORKLOADIMAGE : images
     WORKLOADIMAGE ||--o{ IMAGENODESTATUS : nodes
     WORKLOADIMAGE ||--o{ POLICYVIOLATION : policyViolations
+    WORKLOADIMAGE ||--|| IMAGEREF : ref
     NODEINFO ||--o{ CACHEDIMAGE : cachedImages
+    NODEINFO ||--o{ NODECONDITION : conditions
 
     SNAPSHOT {
         string clusterName
+        string apiVersion
         bool mockMode
         datetime updatedAt
+        datetime lastSyncAt
+        string syncStatus
+        bool partial
+    }
+    PULLTASK {
+        string id
+        string image
+        string node
+        string state
+        int attempt
+        string trigger
+        string actor
+        string error
+    }
+    IMAGEREF {
+        string image
+        string tag
+        string digest
+    }
+    NODECONDITION {
+        string type
+        string status
+        string reason
     }
     SUMMARY {
         int totalWorkloads
@@ -279,6 +319,7 @@ erDiagram
         string name
         bool ready
         bool agentUp
+        string agentVersion
         bool diskPaused
         int64 imageFsUsedBytes
         int64 imageFsCapacityBytes
@@ -288,6 +329,7 @@ erDiagram
         string node
         string image
         string trigger
+        string actor
         string result
         int64 durationMs
     }
@@ -333,26 +375,32 @@ Policy-проверки (не блокируют pull, только предуп
 flowchart TD
     A["UI: Pull / Pull All"] --> B["POST /api/v1/pull<br/>или /workloads/pull"]
     B --> C["requireAuth → actor = username"]
-    C --> D["Registry.TriggerPull(cluster, image, node, actor)"]
+    C --> D["Registry.TriggerPull(cluster, PullRequest)"]
     D --> E{"кластер найден?"}
     E -->|нет| F["400 unknown cluster"]
     E -->|да| G{"local / remote"}
-    G -->|local| H["Provider.TriggerPull"]
+    G -->|local| H["Provider.TriggerPull → PullTask"]
     G -->|remote| I["RemoteProvider → spoke → Provider"]
-    H --> J["cell.state = pulling<br/>activePulls++<br/>activity += PullEvent(trigger=manual)"]
+    H --> J["PullTask{id,state=running}<br/>cell.state = pulling<br/>activePulls++"]
     J --> K["goroutine: sleep 1.2–2.5s"]
-    K --> L["state = present, sizeBytes, success++"]
+    K --> L["PullTask.state=succeeded<br/>state = present, success++"]
     I --> J
-    D --> M["202 Accepted"]
+    D --> M["202 Accepted + PullTask"]
+    N["POST /api/v1/pulls/{id}/cancel"] --> O["Provider.CancelPull"]
+    O --> P["PullTask.state=canceled<br/>activePulls--, cell откатывается"]
 ```
 
 В Stage 1 «pull» — симуляция задержки; реального CRI-вызова нет. Важные свойства,
 которые нужно сохранить в живой реализации:
 
-1. Ответ всегда `202` — операция асинхронная, клиент узнаёт результат из следующего снапшота.
-2. Повторный `TriggerPull` по слоту в состоянии `pulling` — no-op, а не ошибка (идемпотентность).
+1. Ответ всегда `202` + `PullTask` — операция асинхронная, клиент узнаёт результат из
+   следующего снапшота (`Snapshot.Tasks`/`Snapshot.Activity`) или из `/api/v1/pull-tasks`.
+2. Повторный `TriggerPull` по активной паре image+node возвращает существующую задачу
+   (тот же `id`) — идемпотентность, а не ошибка.
 3. Офлайн-нода — ошибка `node ... is offline / agent unreachable`, в UI кнопка disabled.
-4. `Pull All` не атомарен: возвращает счётчик успешно запущенных слотов, ошибки отдельных
+4. `CancelPull` отменяет только `queued`/`running`; завершённая задача — ошибка,
+   неизвестный id — `provider.ErrTaskNotFound` (hub отдаёт 404).
+5. `Pull All` не атомарен: возвращает счётчик успешно запущенных слотов, ошибки отдельных
    слотов проглатываются.
 
 ## 9. Метрики
@@ -372,9 +420,11 @@ flowchart LR
 ```
 
 Экспозиция собирается руками (`strings.Builder`), без `prometheus/client_golang` —
-зависимостей у модуля нет вообще. Учтите: `Handler` вызывает `Snapshot()` отдельно на
-каждое семейство метрик (6 раз на кластер за скрейп). Для mock это дёшево, для live
-провайдера нужно кэширование внутри провайдера или один снапшот на запрос.
+эта зависимость запрещена ADR-001, как и любые UI/роутинг-фреймворки. Внешние
+зависимости модуля ограничены агентом (grpc+cri-api) и K8s-провайдером (client-go).
+Учтите: `Handler` вызывает `Snapshot()` отдельно на каждое семейство метрик (6 раз на
+кластер за скрейп). Для mock это дёшево, для live провайдера нужно кэширование внутри
+провайдера или один снапшот на запрос (WS-B/WS-H).
 
 ## 10. Расширение до живого кластера (Stage 2–3)
 
@@ -392,8 +442,10 @@ flowchart LR
 1. **node-agent** (`prepuller agent`) — DaemonSet на каждой ноде: gRPC-сервер, список
    локальных образов и размеров, `PullImage` через CRI, чтение заполнения ImageFS;
    agent сам ставит авто-прогрев на паузу при превышении порога.
-2. **K8sProvider** — реализует те же 5 методов: список workload'ов через client-go,
-   состояния слотов через аггрегированные ответы агентов, `SyncNow` — внеплановая сверка.
+2. **K8sProvider** — реализует те же методы Provider v2: список workload'ов через
+   client-go (list/watch, кэш), состояния слотов через агрегированные ответы агентов,
+   `SyncNow` — внеплановая сверка, `PullCounters`/`Health` — для метрик и UI.
+   Скелет с clientset уже в `internal/provider/k8s_stub.go` (WS-B заменяет заглушки).
 3. **Reconciler** — периодическая сверка «что требует кластер / что уже есть», постановка
    задач прогрева с ограничением параллелизма и приоритетами, backoff на ошибки registry.
 4. Hub остаётся без изменений: его контракт — `Provider` + `Registry`, а не детали CRI.
@@ -405,4 +457,5 @@ flowchart LR
 - `/healthz` и `/readyz` не проверяют провайдера — readiness говорит лишь о том, что процесс
   поднял HTTP. Для честной проверки нужен отдельный флаг «последний успешный синк».
 - Порт метрик слушается отдельным `http.Server` без auth: открывайте его только для Prometheus.
-- Один статический пользователь; все действия в activity подписаны его логином (`manual (admin)`).
+- Один статический пользователь; в activity действия подписаны парой
+  `trigger: manual` + `actor: <логин>` (contract v2 разделил триггер и актора).

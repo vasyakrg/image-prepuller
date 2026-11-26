@@ -98,3 +98,56 @@ func TestServerAuthMultiClusterAndMetrics(t *testing.T) {
 		}
 	}
 }
+func TestSpokeContractV2Endpoints(t *testing.T) {
+	p := provider.NewMockProvider("talos-kz")
+	spoke := NewSpokeServer(p, "spoke-secret")
+
+	authed := func(method, path string, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer spoke-secret")
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		spoke.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Counters endpoint feeds prepuller_pull_total for remote clusters.
+	rec := authed(http.MethodGet, "/internal/v1/counters", "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "api-gateway") {
+		t.Fatalf("counters = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Pull returns the created task instead of the v1 {"ok":true}.
+	rec = authed(http.MethodPost, "/internal/v1/pull", `{"apiVersion":"v2","image":"ghcr.io/acme/api-gateway:1.14.2","node":"talos-worker-01","actor":"admin","trigger":"manual"}`)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("pull = %d: %s", rec.Code, rec.Body.String())
+	}
+	var task struct {
+		ID    string `json:"id"`
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &task); err != nil {
+		t.Fatalf("decode task: %v", err)
+	}
+	if task.ID == "" || task.State != "running" {
+		t.Fatalf("pull returned %+v, want running task with id", task)
+	}
+
+	// Cancel the task.
+	rec = authed(http.MethodPost, "/internal/v1/pulls/"+task.ID+"/cancel", "")
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("cancel = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Unknown apiVersion is rejected during the rollout window.
+	rec = authed(http.MethodPost, "/internal/v1/pull", `{"apiVersion":"v9","image":"ghcr.io/acme/api-gateway:1.14.2","node":"talos-worker-01"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unsupported apiVersion = %d, want 400", rec.Code)
+	}
+
+	// Previous contract version is still accepted.
+	rec = authed(http.MethodPost, "/internal/v1/reconcile", `{"apiVersion":"v1","actor":"admin"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("v1 reconcile = %d: %s", rec.Code, rec.Body.String())
+	}
+}

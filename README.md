@@ -4,9 +4,12 @@
 из workload'ов реально лежат на каждой ноде, позволяет дотянуть недостающие, следит за
 заполнением ImageFS и отдаёт метрики Prometheus для multi-cluster контура.
 
-> Текущее состояние — **Stage 1 (mock)**: работают Web UI, авторизация, multi-cluster реестр,
-> headless spoke API и Prometheus-метрики на in-memory провайдере. Живой Kubernetes/CRI
-> провайдер и node-agent появятся в Stage 2–3 (см. [Roadmap](#roadmap)).
+> Текущее состояние — **Stage 1 (mock) + contract-v2**: работают Web UI, авторизация,
+> multi-cluster реестр, headless spoke API и Prometheus-метрики на in-memory провайдере.
+> Контракт Stage 2/3 заморожен (тег `contract-v2`): Provider v2, pull-задачи, отмена,
+> counters на spoke, скелет node-agent и K8s-провайдера. Живые CRI/Kubernetes появятся
+> в Stage 2–3 (см. [Roadmap](#roadmap)); внешние зависимости и их границы — в
+> [ADR-001](docs/adr/0001-dependencies.md).
 
 ## Что умеет
 
@@ -20,7 +23,8 @@
   (85%), активные pull'ы, список закэшированных образов.
 - **Policy warnings** — `:latest`/отсутствие иммутабельного тега и `imagePullPolicy: Always`
   (ломают offline failover).
-- **Activity** — журнал pull-событий с триггером (auto / manual + логин), длительностью и ошибкой.
+- **Activity** — журнал pull-событий с триггером (auto / manual), актором (логин оператора),
+  длительностью и ошибкой.
 - **Multi-cluster** — hub агрегирует локальный и удалённые spoke-кластеры через единый интерфейс.
 - **Prometheus** — отдельный порт `:9090/metrics`, метрики по кластерам, нодам, слотам и pull'ам.
 
@@ -136,7 +140,9 @@ stateDiagram-v2
 
 ## Быстрый старт
 
-Нужен только Go (модуль без внешних зависимостей, только stdlib).
+Нужен Go 1.24+ и доступ к модульному proxy (или прогретый `GOMODCACHE`): с contract-v2
+у модуля есть внешние зависимости — grpc, cri-api и client-go (границы и версии —
+[ADR-001](docs/adr/0001-dependencies.md)).
 
 ```bash
 # сборка
@@ -206,20 +212,29 @@ curl -s -b /tmp/pc 'localhost:8080/api/v1/snapshot?cluster=talos-prod-kz' | jq '
 | `POST /api/v1/auth/login` | открыт | `{username,password}` → ставит cookie |
 | `POST /api/v1/auth/logout` | открыт | Сбрасывает cookie |
 | `GET /api/v1/auth/me` | cookie | `{username}` или 401 |
-| `GET /api/v1/clusters` | cookie | `{defaultCluster, clusters[]}` |
-| `GET /api/v1/snapshot?cluster=ID` | cookie | Полный снимок кластера (`model.Snapshot`) |
-| `POST /api/v1/pull` | cookie | `{cluster,image,node}` → 202 |
+| `GET /api/v1/clusters` | cookie | `{defaultCluster, apiVersion, clusters[]}` |
+| `GET /api/v1/snapshot?cluster=ID` | cookie | Полный снимок кластера (`model.Snapshot`, contract v2) |
+| `POST /api/v1/pull` | cookie | `{cluster,image,node}` → 202 `{status,image,node,task}` |
 | `POST /api/v1/workloads/pull` | cookie | `{cluster,namespace,kind,name}` → 202 `{triggered}` |
 | `POST /api/v1/reconcile` | cookie | `{cluster}` → 200, принудительный синк |
+| `GET /api/v1/pull-tasks?cluster=ID` | cookie | `{cluster, tasks[]}` — асинхронные pull-задачи (v2) |
+| `POST /api/v1/pulls/{id}/cancel?cluster=ID` | cookie | Отмена queued/running задачи → 202; 404 — нет задачи (v2) |
+| `GET /api/v1/nodes/{node}/images?cluster=ID` | cookie | Кэш образов и ImageFS одной ноды (v2) |
+| `GET /api/v1/health?cluster=ID` | cookie | `model.Health` провайдера кластера (v2) |
 
 Spoke (только если задан `PREPULLER_CLUSTER_TOKEN` — Bearer):
 
 | Метод и путь | Описание |
 | --- | --- |
-| `GET /internal/v1/snapshot` | Снимок кластера |
-| `POST /internal/v1/pull` | `{image,node,actor}` → 202 |
-| `POST /internal/v1/workloads/pull` | `{namespace,kind,name,actor}` → 202 `{triggered}` |
-| `POST /internal/v1/reconcile` | `{actor}` → 200 |
+| `GET /internal/v1/snapshot` | Снимок кластера (contract v2) |
+| `POST /internal/v1/pull` | `{apiVersion,image,node,actor,trigger,policy}` → 202 `model.PullTask` |
+| `POST /internal/v1/workloads/pull` | `{apiVersion,namespace,kind,name,actor}` → 202 `{triggered}` |
+| `POST /internal/v1/reconcile` | `{apiVersion,actor}` → 200 |
+| `GET /internal/v1/counters` | `[]model.PullMetricSample` — источник `prepuller_pull_total` для hub |
+| `POST /internal/v1/pulls/{id}/cancel` | Отмена задачи → 202; 404 — задача не найдена |
+
+Поле `apiVersion` в запросах обязательно только для новых клиентов: пустое значение и
+`v1` принимаются в течение одного релиза (см. [docs/PLAN.md](docs/PLAN.md) §10).
 
 ## Метрики
 
@@ -237,33 +252,44 @@ Spoke (только если задан `PREPULLER_CLUSTER_TOKEN` — Bearer):
 | `prepuller_node_imagefs_capacity_bytes` | gauge | `cluster`, `node` |
 | `prepuller_pull_total` | counter | `cluster`, `image`, `node`, `result` |
 
-У удалённых кластеров `prepuller_pull_total` пока пуст: `RemoteProvider.PullCounters()`
-возвращает `nil`.
+С contract-v2 `prepuller_pull_total` заполняется и для удалённых кластеров:
+`RemoteProvider.PullCounters()` ходит в `GET /internal/v1/counters` своего spoke.
 
 ## Структура репозитория
 
 ```
-cmd/prepuller/          точка входа, разбор подкоманд и флагов, запуск/graceful shutdown
-internal/auth/          cookie-сессии: HMAC-SHA256, constant-time сравнение, TTL
-internal/model/         доменные типы и JSON-контракт API (Snapshot, Workload, NodeInfo, …)
-internal/provider/      Provider interface, MockProvider, RemoteProvider, Registry
-internal/web/           hub- и spoke-роутеры, auth-middleware, embed статики
+cmd/prepuller/          точка входа, controller-подкоманда, runAgent(), запуск/graceful shutdown
+internal/agent/         node-agent: Config, DialCRI (grpc + cri-api), заглушка gRPC-сервера
+internal/auth/          cookie-сессии и middleware (RequireAuth, RequireToken)
+internal/model/         доменные типы и JSON-контракт API v2 (Snapshot, PullTask, ImageRef, …)
+internal/provider/      Provider v2, MockProvider, RemoteProvider, K8sProvider (stub), Registry
+internal/web/           hub-роутер (server.go) + spoke-роутер (server_spoke.go), embed статики
 internal/web/static/    index.html, app.js, styles.css — без сборки и npm
 internal/metrics/       ручная генерация Prometheus text exposition
+internal/testutil/      фейковый spoke/hub, golden-снапшот v2, контрактные тесты hub↔spoke
+docs/                   architecture.md, PLAN.md, ADR-001
+.gitea/workflows/       CI: gofmt, vet, test, build linux/amd64+arm64
 ```
 
 ## Разработка
 
 ```bash
-go test ./...            # тесты auth и web (роутинг, 401, cookie, метрики)
+go test ./...            # auth, web, контрактные тесты hub↔spoke (internal/testutil)
 go vet ./...
 gofmt -l .
 go build -o bin/prepuller ./cmd/prepuller
 ```
 
-В рабочем каталоге лежит локальный `.gocache/` — если `GOCACHE` не задан глобально,
-используйте `GOCACHE=$PWD/.gocache go test ./...`. Правила и инварианты для агентов —
-в [AGENTS.md](AGENTS.md).
+Если `GOCACHE`/`GOMODCACHE` недоступны (песочница, read-only HOME), задайте их внутри
+рабочего каталога:
+
+```bash
+export GOCACHE=$PWD/.gocache GOPATH=$PWD/.gopath GOMODCACHE=$PWD/.gopath/pkg/mod
+go mod download && go test ./...
+```
+
+`.gocache/`, `.gopath/`, `.gomodcache/` и `bin/` — в `.gitignore`. Правила, инварианты
+и зоны записи для агентов — в [AGENTS.md](AGENTS.md) и [docs/PLAN.md](docs/PLAN.md).
 
 ## Roadmap
 
@@ -273,8 +299,9 @@ go build -o bin/prepuller ./cmd/prepuller
 | Этап | Содержание |
 | --- | --- |
 | Stage 1 (готово) | Mock-провайдер, hub/spoke, Web UI, auth, multi-cluster, метрики |
-| Stage 2 | `agent`-режим: gRPC/HTTP к CRI containerd, реальный pull, инвентаризация образов на ноде |
-| Stage 3 | `K8sProvider`: список workload'ов через API, состояния слотов с нод, фоновый reconciler и авто-прогрев |
+| contract-v2 (готово) | Provider v2 (PullTask/CancelPull/Health), counters+cancel на spoke, заглушки API, testutil, CI-каркас |
+| Stage 2 | `agent`-режим: gRPC-сервер, CRI containerd, реальный pull, инвентаризация образов на ноде |
+| Stage 3 | `K8sProvider` (client-go): список workload'ов, состояния слотов с нод, фоновый reconciler и авто-прогрев |
 | Далее | RBAC/несколько пользователей, аудит-лог, Helm-чарт, алерты по покрытию и ImageFS |
 
 ## Известные ограничения
@@ -282,7 +309,9 @@ go build -o bin/prepuller ./cmd/prepuller
 - Один статический пользователь, без rate-limit и блокировки после неудачных попыток.
 - Автоматический prepull-цикл не реализован: `SyncNow` только обновляет `lastSeen`/`lastChecked`
   в mock-провайдере; реальная сверка появится в Stage 3.
-- `Missing` в mock не возникает: все слоты инициализируются `present`/офлайн/паузой.
+- `Missing` в mock почти не возникает: все слоты инициализируются `present`/офлайн/паузой;
+  `missing` появляется только после отмены pull-задачи (`POST /api/v1/pulls/{id}/cancel`).
+- `tasks` в mock ограничены 200 последними, `activity` — 100; пагинации пока нет.
 - Один экземпляр hub: состояние (сессии, реестр) in-memory, реплики не разделяют данные.
 - Hub при старте без `-mock` завершается с `live Kubernetes provider is Stage 3` — это
   ожидаемое поведение, а не сломанная конфигурация.
