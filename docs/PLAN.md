@@ -6,7 +6,13 @@
 и не конфликтовать друг с другом.
 
 Базовые правила поведения агента — в [AGENTS.md](../AGENTS.md), архитектура —
-в [architecture.md](architecture.md).
+в [architecture.md](architecture.md), решения по зависимостям —
+в [ADR-001](adr/0001-dependencies.md).
+
+**Статус на 2026-11-26:** Phase 0 выполнена (git инициализирован, baseline-коммит
+`18aaaa5`, артефакты в `.gitignore`); ADR-001 в статусе Proposed — ждёт ревью;
+WS-1 (contract freeze) в работе у интегратора. Остальные WS заблокированы до
+`contract-v2`.
 
 ## 1. Цели этапов
 
@@ -23,7 +29,7 @@
 
 Не готово и определяет план:
 
-- нет git-репозитория → **worktree невозможны**, это блокер №1;
+- ~~нет git-репозитория~~ → **закрыто в Phase 0** (2026-11-26: baseline-коммит, worktree доступны);
 - нет node-agent (подкоманда agent — заглушка);
 - нет живого K8s/CRI провайдера (-mock обязателен);
 - нет автоматического цикла сверки/прогрева;
@@ -214,7 +220,7 @@ go list -m all | diff - <(git show main:go.mod)          # новых завис
 
 | Фаза | Содержание | Длительность |
 | --- | --- | --- |
-| 0 | git, .gitignore, baseline | 0.5 д |
+| 0 | git, .gitignore, baseline — **выполнено** (`18aaaa5`) | 0.5 д |
 | 1 | ADR-001 + contract freeze (последовательно) | 2–3 д |
 | 2 | Параллельно WS-A/B/C/D, затем E/F/G/H | 5–8 д (календарно) |
 | 3 | Интеграция, e2e в k3d, docs, релиз v0.2.0 | 2–3 д |
@@ -290,7 +296,7 @@ E2E-сценарий Stage 2/3 (обязателен перед релизом):
 
 ## 13. Первые пять действий
 
-1. git init + .gitignore + baseline-коммит (lead, 30 минут).
+1. ~~git init + .gitignore + baseline-коммит~~ — **выполнено, коммит `18aaaa5`**.
 2. Создать worktree и задачи WS-0…WS-H на борде с write_scopes/blocked_by.
 3. Провести ревью ADR-001 (черновик готов: [docs/adr/0001-dependencies.md](adr/0001-dependencies.md)).
 4. Сделать contract PR (сплит файлов, model v2, Provider v2, testutil, заглушки API).
