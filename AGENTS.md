@@ -85,7 +85,7 @@ PREPULLER_CLUSTER_TOKEN=spoke-secret \
 | `internal/provider/provider.go` | интерфейс `Provider` — главная точка расширения |
 | `internal/provider/registry.go` | потокобезопасный реестр кластеров, `DefaultID`, `AllIDs` |
 | `internal/provider/mock.go` | in-memory кластер: 4 ноды, 5 workload'ов, симуляция pull |
-| `internal/provider/remote.go` | hub → spoke по `/internal/v1/*` с Bearer |
+| `internal/provider/remote.go` | hub → spoke по `/internal/v1/*`: Bearer, таймауты, ретраи state-changing вызовов, типизированные ошибки (`ErrSpokeUnavailable`/`ErrSpokeUnauthorized`/`ErrTaskNotActive`), health и counters |
 | `internal/auth/**` | cookie-сессии с ролью (HMAC-SHA256), RBAC (`RequireAuth`/`RequireRole`/`RequireOperator`), rate-limit логина, аудит; `users.go`, `roles.go`, `audit.go`, `ratelimit.go` |
 | `internal/auth/middleware.go` | `RequireAuth` (hub cookie), `RequireToken` (spoke Bearer), `RequireRole`/`RequireOperator` |
 | `internal/web/server.go` | hub-роутер, hub-хендлеры, `writeJSON` |
@@ -161,6 +161,7 @@ PREPULLER_CLUSTER_TOKEN=spoke-secret \
   state-changing ручки, operator 202, `/api/v1/audit` и 429 при превышении лимита логина.
 - `internal/agent/*_test.go` — CRI-адаптер на фейках, инвентарь и disk-guard, HTTP-сервер
   агента (auth, коды 200/400/401/404/409/502), mock-бэкенд без containerd.
+- `internal/provider/remote_test.go` — транспорт hub→spoke на `httptest`: ретраи с backoff, таймауты, типизированные ошибки (502/401/409), health и counters.
 - `internal/provider/k8s_test.go` — K8sProvider на fake clientset: workload'ы, слоты,
   policy-warnings, TTL-кэш, health, деградация при ошибке list.
 - `internal/reconcile/*_test.go` — правила отбора, приоритеты, лимиты, backoff, `Start`.
@@ -169,7 +170,8 @@ PREPULLER_CLUSTER_TOKEN=spoke-secret \
 - `internal/testutil/contract_test.go` — контракт hub↔spoke на фейковом spoke:
   снапшот v2, `TriggerPull`→`PullTask`, идемпотентность, отмена, counters, health,
   заглушки hub-API (`pull-tasks`, `nodes/{node}/images`, `pulls/{id}/cancel`, `health`),
-  golden-снапшот `testdata/snapshot_v2.json`.
+  golden-снапшот `testdata/snapshot_v2.json`. `internal/testutil/reliability_test.go` —
+  надёжность spoke: битый JSON, обрыв соединения, context cancel, повторная отмена.
 - Правило: любое изменение поведения API, auth, метрик или контракта сопровождается тестом.
   Метрики проверяйте по подстроке с меткой `cluster="..."`.
 - Тесты не должны требовать Kubernetes, сети или внешних бинарей: spoke — `httptest`,
@@ -191,6 +193,7 @@ PREPULLER_CLUSTER_TOKEN=spoke-secret \
   снапшот тормозит до `WithAgentTimeout` (5 s) на ноду.
 - **`RemoteProvider.PullCounters()` ходит в `GET /internal/v1/counters`** (contract v2);
   при недоступном spoke возвращает `nil` — это по-прежнему значит «метрик нет», а не «ноль».
+- **Транспорт hub→spoke ретраит только идемпотентные state-changing вызовы** (pull, workload-pull, cancel, reconcile): 3 попытки, backoff 150 ms → 2 s, таймаут 5 s на попытку. `Snapshot`, `counters` и `health` ходят одним запросом, чтобы мёртвый spoke не тормозил UI и скрейп. `ErrSpokeUnavailable`/`ErrSpokeUnauthorized` → `502` (`pullErrorStatus`), `ErrTaskNotActive` → `409`.
 - **`RemoteProvider.Snapshot` глотает ошибки**: при недоступном spoke возвращается пустой
   снапшот с `SyncStatus: offline`, `Partial: true` и `time.Now()`. Признак недоступности —
   `TotalWorkers == 0` или `SyncStatus == offline`; не считайте такой кластер «здоровым».

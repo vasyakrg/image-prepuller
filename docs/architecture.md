@@ -262,6 +262,16 @@ UI не кэширует ничего, кроме последнего снап�
 `snapshot` выбранного кластера. Переключение кластера в селекте меняет только
 `state.activeCluster` и сразу перезапрашивает снапшот.
 
+### Надёжность транспорта hub → spoke
+
+`RemoteProvider` держит один `http.Client` с ограниченным пулом соединений и таймаутом
+5 s на попытку. Идемпотентные state-changing вызовы (`pull`, `workloads/pull`, `cancel`,
+`reconcile`) повторяются до 3 раз с экспоненциальным backoff (150 ms → 2 s); чтения
+(`snapshot`, `counters`, `health`) — ровно один запрос, чтобы мёртвый spoke не
+тормозил страницу и скрейп метрик. Ошибки типизированы: `ErrSpokeUnavailable`/
+`ErrSpokeUnauthorized` → `502`, `ErrTaskNotActive` → `409`; `Snapshot` по-прежнему
+деградирует в offline-снапшот, а `PullCounters` возвращает `nil`.
+
 ## 6. Модель данных
 
 ```mermaid

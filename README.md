@@ -37,7 +37,11 @@
 - **Node-agent** — `prepuller agent`: HTTP/JSON API v1 рядом с containerd
   (`/agent/v1/snapshot`, `/agent/v1/images/{ref}`, `/agent/v1/pulls`), disk-guard по
   ImageFS и опциональный Bearer-токен.
-- **Multi-cluster** — hub агрегирует локальный и удалённые spoke-кластеры через единый интерфейс.
+- **Multi-cluster** — hub агрегирует локальный и удалённые spoke-кластеры через единый
+  интерфейс. State-changing вызовы к spoke (pull, workload-pull, отмена, reconcile)
+  повторяются с экспоненциальным backoff (3 попытки, таймаут 5 с на попытку);
+  недоступный spoke и отклонённый токен дают `502`, а UI не блокируется — снапшот,
+  counters и health читаются без ретраев.
 - **Prometheus** — отдельный порт `:9090/metrics`, метрики по кластерам, нодам, слотам,
   pull-задачам и свежести синка.
 
@@ -278,8 +282,12 @@ Spoke (только если задан `PREPULLER_CLUSTER_TOKEN` — Bearer):
 | `POST /internal/v1/pull` | `{apiVersion,image,node,actor,trigger,policy}` → 202 `model.PullTask` |
 | `POST /internal/v1/workloads/pull` | `{apiVersion,namespace,kind,name,actor}` → 202 `{triggered}` |
 | `POST /internal/v1/reconcile` | `{apiVersion,actor}` → 200 |
-| `GET /internal/v1/counters` | `[]model.PullMetricSample` — источник `prepuller_pull_total` для hub |
-| `POST /internal/v1/pulls/{id}/cancel` | Отмена задачи → 202; 404 — задача не найдена |
+| `GET /internal/v1/counters` | `provider.SpokeCounters`: `pullTotal`, `pullSucceeded`, `pullFailed`, `pullCanceled`, `pullInFlight`, `imagesCached`, `lastSyncAt`, `samples[]` — источник `prepuller_pull_total` для hub |
+| `GET /internal/v1/health` | Дешёвый liveness/версия spoke: `model.Health` + `apiVersion`, `uptimeSeconds`; не вызывает `Snapshot` |
+| `POST /internal/v1/pulls/{id}/cancel` | Отмена задачи → 202; 404 — задача не найдена; 409 — задача уже завершена |
+
+Тело запроса ограничено 1 МиБ (413), неизвестный `apiVersion` — 400; все ошибки —
+`{"error":"..."}`.
 
 Поле `apiVersion` в запросах обязательно только для новых клиентов: пустое значение и
 `v1` принимаются в течение одного релиза (см. [docs/PLAN.md](docs/PLAN.md) §10).
@@ -391,6 +399,10 @@ go mod download && go test ./...
   `missing` появляется только после отмены pull-задачи (`POST /api/v1/pulls/{id}/cancel`).
 - `tasks` в mock ограничены 200 последними, `activity` — 100; пагинации пока нет.
 - Один экземпляр hub: состояние (сессии, реестр) in-memory, реплики не разделяют данные.
+- Транспорт hub→spoke повторяет только идемпотентные state-changing вызовы (pull,
+  workload-pull, cancel, reconcile) — максимум 3 попытки с backoff; `Snapshot`,
+  `counters` и `health` читаются одним запросом, чтобы мёртвый spoke не тормозил
+  страницу и скрейп метрик. Таймаут одной попытки — 5 с.
 - Hub/spoke без `-mock` собирают live-провайдер из in-cluster конфига, иначе из
   `$KUBECONFIG` / `~/.kube/config` (вне кластера) и падают на старте, если конфига нет.
   Ноды без доступного агента дают `offline`-слоты, `syncStatus=degraded` и `partial=true`;

@@ -307,6 +307,10 @@ func pullErrorStatus(err error) int {
 		return http.StatusBadGateway
 	case errors.Is(err, provider.ErrAgentUnavailable):
 		return http.StatusBadGateway
+	case errors.Is(err, provider.ErrSpokeUnauthorized):
+		return http.StatusBadGateway
+	case errors.Is(err, provider.ErrSpokeUnavailable):
+		return http.StatusBadGateway
 	case errors.Is(err, provider.ErrNotImplemented):
 		return http.StatusNotImplemented
 	default:

@@ -179,6 +179,8 @@ func TestPullErrorStatus(t *testing.T) {
 		{fmt.Errorf("pull: %w", provider.ErrAgentDiskPaused), http.StatusConflict},
 		{fmt.Errorf("pull: %w", provider.ErrAgentUnauthorized), http.StatusBadGateway},
 		{fmt.Errorf("pull: %w", provider.ErrAgentUnavailable), http.StatusBadGateway},
+		{fmt.Errorf("pull: %w", provider.ErrSpokeUnauthorized), http.StatusBadGateway},
+		{fmt.Errorf("pull: %w", provider.ErrSpokeUnavailable), http.StatusBadGateway},
 		{provider.ErrNotImplemented, http.StatusNotImplemented},
 		{errors.New("image and node are required"), http.StatusBadRequest},
 	}
