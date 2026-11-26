@@ -176,8 +176,11 @@ PREPULLER_CLUSTER_TOKEN=spoke-secret \
 
 ## 8. Подводные камни
 
-- **`metrics.Handler` вызывает `Snapshot()` 6 раз на кластер за скрейп.** Для mock дёшево;
-  в live-реализации добавьте кэш в провайдере, а не в метриках.
+- **`metrics.Handler` делает ровно один `Snapshot()` на кластер за скрейп** (`collectClusters` —
+  единственная точка вызова; тест `TestHandlerCallsSnapshotOncePerCluster`). Кэш тяжёлого
+  снапшота живёт в провайдере (`K8sProvider` — TTL 2s), а не в метриках.
+- **`K8sProvider` без node-agent**: слоты `offline`, `syncStatus=degraded`, `partial=true` —
+  это ожидаемо (агент не отдал инвентарь), а не баг. Pull в live-режиме идёт через агент.
 - **`RemoteProvider.PullCounters()` ходит в `GET /internal/v1/counters`** (contract v2);
   при недоступном spoke возвращает `nil` — это по-прежнему значит «метрик нет», а не «ноль».
 - **`RemoteProvider.Snapshot` глотает ошибки**: при недоступном spoke возвращается пустой

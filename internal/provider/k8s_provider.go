@@ -13,9 +13,10 @@ import (
 )
 
 const (
-	// DefaultSnapshotTTL bounds how long one list round is reused. metrics.Handler
-	// calls Snapshot six times per scrape (AGENTS.md section 8), so an uncached
-	// live provider would hammer the API server with 6x the list traffic.
+	// DefaultSnapshotTTL bounds how long one list round is reused. The metrics
+	// scrape, the UI polling and the reconciler call Snapshot independently, so
+	// without a cache a single cluster listing would be repeated several times a
+	// second against the API server and every node agent.
 	DefaultSnapshotTTL = 2 * time.Second
 	// DefaultDiskPauseRatio is the ImageFS usage above which auto-prepull pauses.
 	// It sits below the kubelet GC threshold (0.85) on purpose: stop pre-pulling

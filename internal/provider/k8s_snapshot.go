@@ -9,9 +9,11 @@ import (
 	"github.com/local/image-prepuller/internal/model"
 )
 
-// Snapshot returns the cached cluster view or re-lists the cluster. The cache
-// guards against metrics.Handler, which calls Snapshot six times per scrape;
-// SyncNow drops the cache so the next call is fresh.
+// Snapshot returns the cached cluster view or re-lists the cluster. Even though
+// metrics.Handler takes exactly one Snapshot per cluster per scrape, the UI, the
+// reconciler and the API also poll concurrently; the TTL cache keeps a single
+// cluster listing shared between them. SyncNow drops the cache so the next call
+// is fresh.
 func (p *K8sProvider) Snapshot(ctx context.Context) model.Snapshot {
 	p.mu.Lock()
 	defer p.mu.Unlock()
