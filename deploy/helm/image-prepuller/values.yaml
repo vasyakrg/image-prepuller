@@ -86,11 +86,14 @@ hub:
   clusterName: talos-prod-eu
   # -auto-warm starts the reconciler for local clusters (Stage 2/3).
   autoWarm: true
-  # Optional login rate-limit overrides. They only take effect once main.go
-  # wires auth.RateLimitConfigFromEnv into auth.NewManager (see DEPLOY.md).
+  # Optional login rate-limit overrides (PREPULLER_LOGIN_ATTEMPTS_PER_MINUTE /
+  # PREPULLER_LOGIN_BLOCK). Empty = internal/auth defaults.
   loginRateLimit:
     attemptsPerMinute: ""
     block: ""
+  # Secure cookie attribute. Keep true behind TLS ingress; set false only for
+  # plain-HTTP local development.
+  cookieSecure: true
   # Optional extra spokes, PREPULLER_REMOTE_CLUSTERS format:
   # "name=url=token,name2=url2=token2". Prefer remoteClusters for the hub to
   # reach spoke releases deployed in other clusters.

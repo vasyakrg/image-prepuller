@@ -78,6 +78,8 @@ spec:
             - name: PREPULLER_LOGIN_BLOCK
               value: {{ . | quote }}
             {{- end }}
+            - name: PREPULLER_COOKIE_SECURE
+              value: {{ .Values.hub.cookieSecure | quote }}
             {{- with .Values.hub.remoteClusters }}
             - name: PREPULLER_REMOTE_CLUSTERS
               value: {{ . | quote }}
