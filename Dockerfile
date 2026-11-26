@@ -2,7 +2,12 @@
 
 # ---------- build stage -------------------------------------------------------
 # Go 1.24 matches the go directive in go.mod (AGENTS.md section 3).
-FROM golang:1.24-alpine AS builder
+#
+# $BUILDPLATFORM keeps the builder on the runner's native architecture: Go
+# cross-compiles to $TARGETARCH (ENV below), so a multi-arch build does not run
+# the compiler under QEMU emulation — that is the difference between ~2 minutes
+# and ~15 minutes for arm64.
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
 
 ARG VERSION=dev
 ARG COMMIT=unknown

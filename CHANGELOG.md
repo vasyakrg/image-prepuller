@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `Dockerfile`: builder-стадия запускается на нативной архитектуре раннера
+  (`--platform=$BUILDPLATFORM`), Go кросс-компилирует под `TARGETARCH`. Сборка образа
+  в CI перестала гонять компилятор arm64 под QEMU: multi-arch build на GitHub Actions
+  занимает минуты вместо ~15.
+
 ## [0.2.0] — 2026-11-26 — Stage 2/3: живой путь от Kubernetes до containerd
 
 Контракт заморожен тегом `contract-v2`; изменения ниже — реализация этого контракта.
