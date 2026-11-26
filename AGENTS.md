@@ -64,9 +64,10 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 
 ## 3. Ограничения стека
 
-- **Go 1.26** в `go.mod` (локально может быть новее — не поднимайте директиву `go` без причины).
-  Директива поднята с 1.24 в 2026-11 вместе с патчами x/net и grpc: исправленные версии
-  требуют go 1.26 (см. ADR-001, «Обновление»).
+- **Go 1.26.11** в `go.mod` (локально может быть новее — не поднимайте директиву `go` без причины).
+  Директива поднята с 1.24 в 2026-11 вместе с патчами x/net и grpc, патч-уровень
+  зафиксирован отдельно: `govulncheck` сверяет стандартную библиотеку тулчейна с базой
+  уязвимостей, а 1.26.0 содержал 37 известных проблем (см. ADR-001, «Обновление»).
 - **Зависимости — только по ADR-001** ([docs/adr/0001-dependencies.md](docs/adr/0001-dependencies.md)).
   Разрешённые импорты по пакетам:
 
@@ -114,7 +115,7 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 | `.gitea/workflows/ci.yaml` | CI для Gitea (зеркало `.github/`): gofmt, vet, test, build linux/amd64+arm64, `govulncheck`, helm lint/template |
 | `.gitea/workflows/build-image.yaml` | Сборка и публикация образа (buildx, amd64+arm64) и Helm-чарта в реестр |
 | `.github/workflows/pr-agent.yml` | Ревью pull request'ов моделью (PR-Agent): `review` на открытие PR, `command` на комментарий со слэшем (только владелец), `doctor` вручную. Секреты — `OPENAI_API_BASE`/`OPENAI_KEY`; подробности в `docs/pr-agent.md` |
-| `Dockerfile` | multi-stage образ: golang:1.26 builder → distroless nonroot (65532) |
+| `Dockerfile` | multi-stage образ: golang:1.26.11 builder → distroless nonroot (65532) |
 | `deploy/helm/image-prepuller/` | Helm-чарт: hub, spoke, agent DaemonSet, RBAC, NetworkPolicy, ingress |
 | `docs/DEPLOY.md` | чеклист деплоя: секреты, k3d-стенд, e2e-сценарий |
 | `docs/architecture.md` | схемы Mermaid: топология, потоки, состояния, модель данных |

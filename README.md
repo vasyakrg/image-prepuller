@@ -158,7 +158,7 @@ stateDiagram-v2
 
 ## Быстрый старт
 
-Нужен Go 1.26+ и доступ к модульному proxy (или прогретый `GOMODCACHE`): с contract-v2
+Нужен Go 1.26.11+ и доступ к модульному proxy (или прогретый `GOMODCACHE`): с contract-v2
 у модуля есть внешние зависимости — grpc, cri-api и client-go (границы и версии —
 [ADR-001](docs/adr/0001-dependencies.md)).
 
