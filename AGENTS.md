@@ -157,6 +157,8 @@ PREPULLER_CLUSTER_TOKEN=spoke-secret \
   API, метрики, roadmap.
 - Техническая — `docs/architecture.md`: топология, компоненты, auth-потоки, модель данных,
   состояния, pull-путь, метрики, план Stage 2–3.
+- Архитектурные решения — `docs/adr/`: `0001-dependencies.md` (границы зависимостей Stage 2/3).
+  Новая зависимость без ADR не принимается.
 - Схемы — только Mermaid в markdown (рендерится в Gitea/GitHub/Obsidian); PNG-вставки и
   внешние редакторы не нужны. Меняя код, проверяйте, что диаграммы не врут.
 

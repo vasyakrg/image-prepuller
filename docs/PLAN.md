@@ -58,7 +58,7 @@ git add -A && git commit -m "chore: baseline stage 1 (docs + mock hub/spoke)"
 
 Состав PR (behavior-neutral, кроме новых полей):
 
-1. **ADR-001 «Зависимости Stage 2/3».** Решение и границы:
+1. **[ADR-001 «Зависимости Stage 2/3»](adr/0001-dependencies.md).** Решение и границы:
    - internal/agent — google.golang.org/grpc + k8s.io/cri-api;
    - internal/provider/k8s*.go — k8s.io/client-go (или stdlib REST-клиент, если
      решим сохранить zero-dep; тогда TTL-кэш и list-watch пишем сами);
@@ -292,6 +292,6 @@ E2E-сценарий Stage 2/3 (обязателен перед релизом):
 
 1. git init + .gitignore + baseline-коммит (lead, 30 минут).
 2. Создать worktree и задачи WS-0…WS-H на борде с write_scopes/blocked_by.
-3. Написать ADR-001 (зависимости) — ревью до начала любой feature-ветки.
+3. Провести ревью ADR-001 (черновик готов: [docs/adr/0001-dependencies.md](adr/0001-dependencies.md)).
 4. Сделать contract PR (сплит файлов, model v2, Provider v2, testutil, заглушки API).
 5. Запустить волну 1 (A, B, C, D), интегратор в это время — CI-каркас и merge queue.
