@@ -110,6 +110,23 @@ func (p *K8sProvider) buildSnapshot(ctx context.Context, now time.Time) model.Sn
 		summary.CoveragePercent = float64(summary.PresentSlots) * 100.0 / float64(summary.TotalSlots)
 	}
 
+	// Tasks created by the agent transport (synchronous pulls). Failed ones
+	// carry the agent error, e.g. the 409 disk-paused cause.
+	snap.Tasks = p.tasksSnapshot()
+	for _, task := range snap.Tasks {
+		switch task.State {
+		case model.TaskQueued:
+			summary.QueuedTasks++
+		case model.TaskRunning:
+			summary.RunningTasks++
+		case model.TaskFailed:
+			summary.FailedTasks++
+		}
+	}
+	// The agent does not report its pull queue yet; a running provider task is
+	// the best available "active pull" signal for the live cluster.
+	summary.ActivePulls += summary.RunningTasks
+
 	snap.Summary = summary
 	snap.Workloads = workloads
 	snap.Nodes = nodeInfos

@@ -34,9 +34,10 @@ const (
 // from the node agent through NodeInventorySource.
 //
 // It never talks to a container runtime directly: only the node agent (WS-A) may
-// do that. Until the agent transport exists, UnavailableInventorySource makes
-// every slot offline and the snapshot partial instead of silently pretending the
-// images are missing.
+// do that. By default the provider talks to the agent HTTP/JSON API v1 (see
+// k8s_agent.go): an unreachable agent makes that node's slots offline and the
+// snapshot partial instead of silently pretending the images are missing.
+// WithNodeInventorySource overrides the inventory source (tests, offline data).
 //
 // Dependency boundary (ADR-001): client-go and k8s.io/api are allowed only in
 // internal/provider/k8s*.go, never in internal/web, internal/model or the agent.
@@ -47,6 +48,7 @@ type K8sProvider struct {
 	namespaces     []string // empty means all namespaces
 	labelSelector  string
 	inventory      NodeInventorySource
+	agent          *agentTransport // default inventory + pull transport (k8s_agent.go)
 	diskPauseRatio float64
 	kubeletGCRatio float64
 	snapshotTTL    time.Duration
@@ -71,8 +73,9 @@ type snapshotCache struct {
 // K8sOption customizes K8sProvider construction.
 type K8sOption func(*K8sProvider)
 
-// WithNodeInventorySource wires the node-agent inventory seam (WS-A). The
-// default UnavailableInventorySource reports every node as agent-down.
+// WithNodeInventorySource overrides the node-agent inventory seam. The default
+// is the live agent HTTP/JSON transport (k8s_agent.go); tests and offline
+// snapshots pass a StaticInventorySource or UnavailableInventorySource instead.
 func WithNodeInventorySource(src NodeInventorySource) K8sOption {
 	return func(p *K8sProvider) { p.inventory = src }
 }
@@ -153,20 +156,21 @@ func NewK8sProviderWithClientset(clusterID string, clientset kubernetes.Interfac
 	p := &K8sProvider{
 		clientset:      clientset,
 		clusterID:      clusterID,
-		inventory:      UnavailableInventorySource{},
 		diskPauseRatio: DefaultDiskPauseRatio,
 		kubeletGCRatio: DefaultKubeletGCRatio,
 		snapshotTTL:    DefaultSnapshotTTL,
 		healthTimeout:  DefaultHealthTimeout,
 		now:            time.Now,
 	}
+	p.agent = newAgentTransport(clientset)
 	for _, opt := range opts {
 		if opt != nil {
 			opt(p)
 		}
 	}
 	if p.inventory == nil {
-		p.inventory = UnavailableInventorySource{}
+		// Live default: per-node inventory over the agent HTTP/JSON API v1.
+		p.inventory = p.agent
 	}
 	if p.versionFn == nil {
 		p.versionFn = p.apiServerVersion
@@ -177,23 +181,6 @@ func NewK8sProviderWithClientset(clusterID string, clientset kubernetes.Interfac
 // Clientset exposes the clientset to the reconciler (WS-C) and tests.
 func (p *K8sProvider) Clientset() kubernetes.Interface { return p.clientset }
 
-// TriggerPull reports ErrNotImplemented until the node-agent transport (WS-A)
-// can execute CRI PullImage on a node. There is deliberately no local fallback:
-// the hub runs on the control plane and cannot touch node image stores.
-func (p *K8sProvider) TriggerPull(_ context.Context, _ model.PullRequest) (model.PullTask, error) {
-	return model.PullTask{}, fmt.Errorf("k8s provider: TriggerPull: node-agent transport unavailable (WS-A): %w", ErrNotImplemented)
-}
-
-// TriggerWorkloadPull is unavailable for the same reason as TriggerPull.
-func (p *K8sProvider) TriggerWorkloadPull(_ context.Context, _ model.WorkloadPullRequest) (int, error) {
-	return 0, fmt.Errorf("k8s provider: TriggerWorkloadPull: node-agent transport unavailable (WS-A): %w", ErrNotImplemented)
-}
-
-// CancelPull is unavailable for the same reason as TriggerPull.
-func (p *K8sProvider) CancelPull(_ context.Context, _ string) error {
-	return fmt.Errorf("k8s provider: CancelPull: node-agent transport unavailable (WS-A): %w", ErrNotImplemented)
-}
-
 // SyncNow drops the cached snapshot so the next Snapshot re-lists the cluster.
 // The reconciliation pass itself belongs to WS-C.
 func (p *K8sProvider) SyncNow(_ context.Context, _ string) error {
@@ -202,7 +189,3 @@ func (p *K8sProvider) SyncNow(_ context.Context, _ string) error {
 	p.mu.Unlock()
 	return nil
 }
-
-// PullCounters stays empty until the node agent reports per-node pull counters
-// (WS-A). nil means "no series", not "zero pulls".
-func (p *K8sProvider) PullCounters() []model.PullMetricSample { return nil }
