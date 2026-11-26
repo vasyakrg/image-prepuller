@@ -1,0 +1,21 @@
+apiVersion: v2
+name: image-prepuller
+description: >-
+  Image cache prewarmer for Kubernetes worker nodes. Deploys the hub (Web UI,
+  cookie auth, multi-cluster registry, Prometheus), an optional headless spoke
+  backend and an optional per-node agent DaemonSet.
+type: application
+# Chart version. Bump on chart changes (docs/DEPLOY.md).
+version: 0.1.0
+# Application version; also the default image tag when image.tag is empty.
+appVersion: "0.2.0-dev"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/vasyakrg/image-prepuller
+sources:
+  - https://github.com/vasyakrg/image-prepuller
+keywords:
+  - kubernetes
+  - images
+  - prepull
+  - containerd
+  - cache

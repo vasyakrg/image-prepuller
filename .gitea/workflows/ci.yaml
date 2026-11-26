@@ -48,3 +48,46 @@ jobs:
           if grep -q 'prometheus/client_golang' /tmp/modules.txt; then
             echo "prometheus/client_golang is forbidden by ADR-001"; exit 1
           fi
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install helm
+        run: |
+          curl -fsSL https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz | tar -xz
+          sudo mv linux-amd64/helm /usr/local/bin/helm
+          helm version --short
+
+      - name: helm lint
+        run: helm lint deploy/helm/image-prepuller
+
+      # Defaults plus every optional component: a broken template fails CI even
+      # when it is disabled in the default values.
+      - name: helm template
+        run: |
+          helm template ci deploy/helm/image-prepuller > /tmp/default.yaml
+          helm template ci deploy/helm/image-prepuller \
+            --set spoke.enabled=true \
+            --set agent.enabled=true \
+            --set ingress.enabled=true \
+            --set networkPolicy.enabled=true \
+            --set secret.auth.password=ci-password \
+            --set secret.sessionSecret=ci-session-secret \
+            --set secret.clusterToken=ci-cluster-token \
+            > /tmp/full.yaml
+          echo "rendered default: $(grep -c '^kind:' /tmp/default.yaml) objects"
+          echo "rendered full:    $(grep -c '^kind:' /tmp/full.yaml) objects"
+
+      - name: validate rendered YAML
+        run: |
+          python3 - <<'PY'
+          import yaml
+          for path in ("/tmp/default.yaml", "/tmp/full.yaml"):
+              with open(path) as fh:
+                  docs = [d for d in yaml.safe_load_all(fh) if d]
+              if not docs:
+                  raise SystemExit(path + ": no manifests rendered")
+              print(path + ": " + str(len(docs)) + " manifests OK")
+          PY

@@ -1,0 +1,99 @@
+{{- if .Values.agent.enabled }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "ip.fullname" . }}-agent
+  labels:
+    {{- include "ip.labels" (dict "ctx" . "component" "agent") | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "ip.selectorLabels" (dict "ctx" . "component" "agent") | nindent 6 }}
+  updateStrategy:
+    {{- toYaml .Values.agent.updateStrategy | nindent 4 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ip.labels" (dict "ctx" . "component" "agent") | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "ip.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # The agent talks to the CRI socket, which is root-owned on most distros;
+      # it is the only workload that does not use the shared non-root pod
+      # securityContext. The root filesystem stays read-only and all
+      # capabilities are dropped.
+      containers:
+        - name: agent
+          image: {{ include "ip.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - agent
+            - -cri-socket={{ .Values.agent.criSocket }}
+            - -listen-addr=:{{ .Values.agent.port }}
+            - -disk-pause-ratio={{ .Values.agent.diskPauseRatio }}
+            {{- if .Values.agent.mock }}
+            - -mock
+            {{- end }}
+          env:
+            - name: PREPULLER_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: PREPULLER_AGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ip.secretName" . }}
+                  key: agent-token
+            {{- with .Values.agent.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.agent.port }}
+              protocol: TCP
+          # Agent wire API v1 exposes GET /healthz next to /agent/v1/*.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.agent.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.agent.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: cri-socket
+              mountPath: {{ .Values.agent.criSocket }}
+              readOnly: true
+      {{- with .Values.agent.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.agent.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: cri-socket
+          hostPath:
+            path: {{ .Values.agent.criSocket }}
+            type: Socket
+{{- end }}

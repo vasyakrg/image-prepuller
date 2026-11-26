@@ -1,0 +1,35 @@
+{{- if and .Values.networkPolicy.enabled .Values.agent.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ip.fullname" . }}-agent
+  labels:
+    {{- include "ip.labels" (dict "ctx" . "component" "agent") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ip.selectorLabels" (dict "ctx" . "component" "agent") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Hub/controller in the same namespace may reach the agent gRPC port.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.agent.port }}
+  egress:
+    # DNS.
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Registries (HTTPS) and hub HTTPS.
+    - ports:
+        - protocol: TCP
+          port: 443
+{{- end }}

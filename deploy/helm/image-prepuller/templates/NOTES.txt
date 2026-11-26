@@ -1,0 +1,51 @@
+{{- $fullname := include "ip.fullname" . -}}
+{{- $secretName := include "ip.secretName" . -}}
+image-prepuller {{ .Chart.AppVersion }} is installed as "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Hub:
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}/
+{{- end }}
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $fullname }} {{ .Values.hub.service.httpPort }}:{{ .Values.hub.service.httpPort }}
+  open http://localhost:{{ .Values.hub.service.httpPort }}/
+{{- end }}
+
+{{- if .Values.secret.create }}
+Credentials (generated on install; retrieve them with):
+  kubectl -n {{ .Release.Namespace }} get secret {{ $secretName }} -o jsonpath='{.data.auth-user}' | base64 -d
+  kubectl -n {{ .Release.Namespace }} get secret {{ $secretName }} -o jsonpath='{.data.auth-pass}' | base64 -d
+{{- else }}
+Credentials come from the existing secret "{{ $secretName }}".
+{{- end }}
+
+Health and metrics:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $fullname }} {{ .Values.hub.service.metricsPort }}:{{ .Values.hub.service.metricsPort }}
+  curl -fsS http://localhost:{{ .Values.hub.service.httpPort }}/healthz
+  curl -fsS http://localhost:{{ .Values.hub.service.httpPort }}/readyz
+  curl -fsS http://localhost:{{ .Values.hub.service.metricsPort }}/metrics
+
+{{- if .Values.hub.mock }}
+
+WARNING: hub.mock=true -> controller runs with -mock. The live Kubernetes/CRI
+provider is Stage 3; set hub.mock=false only after WS-B is merged.
+{{- end }}
+
+{{- if .Values.spoke.enabled }}
+
+Spoke "{{ .Values.spoke.clusterName }}" is enabled: service {{ $fullname }}-spoke
+(HTTP {{ .Values.spoke.service.httpPort }}, metrics {{ .Values.spoke.service.metricsPort }}).
+Point the hub at it with hub.remoteClusters, e.g.
+  --set hub.remoteClusters="{{ .Values.spoke.clusterName }}=http://{{ $fullname }}-spoke.{{ .Release.Namespace }}.svc:{{ .Values.spoke.service.httpPort }}=<token>"
+{{- end }}
+
+{{- if not .Values.agent.enabled }}
+
+The per-node agent DaemonSet is DISABLED (agent.enabled=false). The agent
+implements the HTTP/JSON wire API v1 (WS-A), but main.go does not wire the live
+K8sProvider yet, so nothing consumes it in production. Enable it once the live
+provider is wired in (agent.enabled=true).
+{{- end }}
+
+Full deployment guide: docs/DEPLOY.md
