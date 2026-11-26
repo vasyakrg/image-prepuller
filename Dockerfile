@@ -13,7 +13,7 @@ ARG TARGETARCH=amd64
 
 # ADR-001: modules come from a GOPROXY mirror, no vendor/ directory.
 # Override with --build-arg GOPROXY=direct for an isolated build.
-ARG GOPROXY=https://goproxy.io,direct
+ARG GOPROXY=https://proxy.golang.org,direct
 
 ENV CGO_ENABLED=0 \
     GOOS=${TARGETOS} \

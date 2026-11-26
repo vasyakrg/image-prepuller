@@ -7,7 +7,7 @@ on:
 
 env:
   # Зеркало модулей вместо vendor/ (ADR-001). direct — fallback, если зеркало недоступно.
-  GOPROXY: https://goproxy.io,direct
+  GOPROXY: https://proxy.golang.org,direct
 
 jobs:
   test:

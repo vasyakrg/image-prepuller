@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
 
 env:
-  GOPROXY: https://goproxy.io,direct
+  GOPROXY: https://proxy.golang.org,direct
 
 jobs:
   # Fast feedback: the same gates as ci.yaml, so an image is never built from
