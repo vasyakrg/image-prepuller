@@ -9,12 +9,13 @@
 `hub` (Web UI + cookie-авторизация + реестр кластеров + Prometheus) и `spoke`
 (headless backend API рядом с кластером, Bearer-токен).
 
-Текущий этап — **Stage 1 + contract-v2**: единственный рабочий провайдер —
-`MockProvider`. Контракт Stage 2/3 заморожен тегом `contract-v2` (Provider v2,
-pull-задачи, отмена, counters на spoke, заглушки hub-API, `internal/testutil`).
-Живой Kubernetes/CRI — Stage 2–3 (`cmd/prepuller/main.go` намеренно падает с
-`live Kubernetes provider is Stage 3` при запуске без `-mock`; `agent`-подкоманда
-разбирает флаги и падает с `not implemented`).
+Текущий этап — **Stage 2/3 (integration)**: `MockProvider` работает всегда через
+`-mock`; live-путь собран из `K8sProvider` (client-go: workload'ы, слоты, TTL-кэш)
+и `node-agent` (`internal/agent`: CRI, инвентарь образов, disk-guard, HTTP/JSON
+API v1), транспорт провайдер→агент — `internal/provider/k8s_agent.go`. Авто-прогрев —
+`internal/reconcile`, включается флагом `-auto-warm`. Контракт заморожен тегом
+`contract-v2`; agent wire v1 — HTTP/JSON (`/healthz`, `/agent/v1/snapshot`,
+`/agent/v1/images/{ref}`, `/agent/v1/pulls`).
 
 ## 2. Быстрые команды
 
@@ -64,6 +65,7 @@ PREPULLER_CLUSTER_TOKEN=spoke-secret \
   | `internal/provider/k8s*.go` | `k8s.io/client-go`, `k8s.io/api`, `k8s.io/apimachinery`, stdlib |
   | `internal/web`, `internal/model`, `internal/auth`, `internal/metrics` | только stdlib |
   | `internal/provider/{provider,registry,mock,remote}.go` | только stdlib |
+  | `internal/reconcile` | stdlib + `internal/model`, `internal/provider` |
   | `internal/testutil` | stdlib + внутренние пакеты |
 
   `go.mod`/`go.sum` — зона интегратора: feature-ветки их не меняют, новая зависимость
@@ -90,10 +92,11 @@ PREPULLER_CLUSTER_TOKEN=spoke-secret \
 | `internal/web/server_spoke.go` | spoke-роутер `/internal/v1/*` (contract v2) |
 | `internal/web/static/` | UI: `index.html`, `app.js`, `styles.css` |
 | `internal/metrics/prometheus.go` | сборка `/metrics` по всем кластерам |
-| `internal/agent/` | node-agent: `Config`, `Agent.Run` (заглушка), `DialCRI` (grpc+cri-api) |
-| `internal/provider/k8s_stub.go` | `K8sProvider` на client-go, live-методы = `ErrNotImplemented` (WS-B) |
+| `internal/agent/` | node-agent: CRI-клиент (grpc+cri-api), инвентарь образов, disk-guard, HTTP/JSON API v1 |
+| `internal/provider/k8s_*.go` | `K8sProvider` на client-go: list Deployments/STS/DS и Node, слоты image×node, policy-warnings, TTL-кэш снапшота, `NodeInventorySource` (инвентарь от агента) |
+| `internal/reconcile/` | политика авто-прогрева: очередь, приоритеты (failed > missing, prod > staging > infra), лимиты, backoff |
 | `internal/testutil/` | фейковый spoke/hub, golden-снапшот v2, контрактные тесты |
-| `cmd/prepuller/agent.go` | `runAgent()`: флаги агента, запуск (WS-A) |
+| `cmd/prepuller/agent.go` | `runAgent()`: флаги агента, запуск HTTP/JSON сервера, graceful shutdown |
 | `.gitea/workflows/ci.yaml` | CI: gofmt, vet, test, build linux/amd64+arm64 |
 | `docs/architecture.md` | схемы Mermaid: топология, потоки, состояния, модель данных |
 | `docs/PLAN.md` | план Stage 2–3: workstreams, зоны записи, порядок мержа, гейты |
@@ -127,6 +130,11 @@ PREPULLER_CLUSTER_TOKEN=spoke-secret \
    `K8sProvider`). UI только отображает `PullState`, не выводит статусы сам.
 10. **Coverage = `presentSlots / totalSlots`**, считается в провайдере (`Snapshot.Summary`),
     а не в UI.
+11. **Agent wire — HTTP/JSON v1.** Пути и поля контракта агента
+    (`/healthz`, `/agent/v1/snapshot`, `/agent/v1/images/{ref}`, `/agent/v1/pulls`)
+    фиксированы в `internal/agent/server.go`; меняя их, обновите клиент в
+    `internal/provider/k8s_agent.go` и тесты обеих сторон. Pull при `diskPaused` —
+    `409`, ошибка CRI — `502`, неизвестный образ — `404`.
 
 ## 6. Соглашения по коду
 
@@ -150,6 +158,13 @@ PREPULLER_CLUSTER_TOKEN=spoke-secret \
 - `internal/web/server_test.go` — 401 без cookie, логин, список кластеров, снапшот
   удалённого кластера, Bearer-защита spoke, counters/cancel/apiVersion, наличие
   кластерных метрик.
+- `internal/agent/*_test.go` — CRI-адаптер на фейках, инвентарь и disk-guard, HTTP-сервер
+  агента (auth, коды 200/400/401/404/409/502), mock-бэкенд без containerd.
+- `internal/provider/k8s_test.go` — K8sProvider на fake clientset: workload'ы, слоты,
+  policy-warnings, TTL-кэш, health, деградация при ошибке list.
+- `internal/reconcile/*_test.go` — правила отбора, приоритеты, лимиты, backoff, `Start`.
+- `internal/metrics/prometheus_test.go` — новые серии, ровно один `Snapshot()` на кластер,
+  offline-кластер.
 - `internal/testutil/contract_test.go` — контракт hub↔spoke на фейковом spoke:
   снапшот v2, `TriggerPull`→`PullTask`, идемпотентность, отмена, counters, health,
   заглушки hub-API (`pull-tasks`, `nodes/{node}/images`, `pulls/{id}/cancel`, `health`),

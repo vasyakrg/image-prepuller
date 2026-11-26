@@ -76,8 +76,10 @@ flowchart TB
     IFACE["Provider interface v2"]
     MOCK["MockProvider"]
     REM["RemoteProvider"]
-    K8SP["K8sProvider<br/>client-go (WS-B stub)"]
-    AG["internal/agent<br/>DialCRI · grpc+cri-api"]
+    K8SP["K8sProvider<br/>client-go · TTL-кэш 2s"]
+    AGC["internal/provider/k8s_agent.go<br/>HTTP-клиент агента v1"]
+    AG["internal/agent<br/>CRI · HTTP/JSON API v1"]
+    REC["internal/reconcile<br/>очередь · приоритеты · backoff"]
     MET["internal/metrics<br/>Handler(reg)"]
     MODEL["internal/model<br/>Snapshot · PullTask · ImageRef · …"]
     TU["internal/testutil<br/>fake spoke · golden v2"]
@@ -87,6 +89,10 @@ flowchart TB
     MAIN --> REG
     MAIN --> MET
     MAIN --> AG
+    MAIN --> REC
+    REC --> IFACE
+    K8SP --> AGC
+    AGC -.->|"/agent/v1/*"| AG
     SRV --> AUTH
     SRV --> REG
     SRV --> ST
@@ -125,23 +131,31 @@ Hub, spoke, метрики и UI не знают, mock это или живой 
 hub-обвязка на stdlib) зафиксированы в [ADR-001](adr/0001-dependencies.md) и проверяются
 на ревью; `internal/testutil` даёт фейковый spoke и golden-снапшот для контрактных тестов.
 
+`K8sProvider` берёт инвентарь образов ноды через интерфейс `NodeInventorySource`
+(`internal/provider/k8s_inventory.go`); его рабочая реализация — HTTP-клиент к node-agent
+(`internal/provider/k8s_agent.go`), который ходит в `/agent/v1/*`. Пока агент недоступен,
+включён `UnavailableInventorySource`: слоты получают `offline`, снапшот — `degraded`/`partial`.
+
 ## 3. Запуск и регистрация кластеров
 
 ```mermaid
 flowchart TD
     A["main() → os.Args[1]"] --> B{"controller / agent?"}
-    B -->|agent| X["runAgent()<br/>флаги · DialCRI · WS-A"]
+    B -->|agent| X["runAgent()<br/>флаги · CRI · HTTP/JSON сервер :9443"]
     B -->|controller| C{"-role"}
-    C -->|spoke| D["provider.NewMockProvider<br/>(live → fatal)"]
+    C -->|spoke| D["provider.NewMockProvider<br/>(live → K8sProvider)"]
     D --> E["Registry.Register<br/>role=local"]
     E --> F["web.NewSpokeServer(provider, token)"]
     C -->|hub| G["auth.NewManager<br/>env user/pass/secret"]
     G --> H{"-mock?"}
     H -->|да| I["Register: local + 2 demo remote"]
-    H -->|нет| Y["fatal: Stage 3"]
+    H -->|нет| Y["provider.NewK8sProviderFromEnv<br/>client-go + agent-клиент"]
     I --> J["PREPULLER_REMOTE_CLUSTERS<br/>name=url=token"]
     J --> K["Registry.Register<br/>RemoteProvider"]
-    K --> L["web.NewServer(reg, auth)"]
+    K --> M{"-auto-warm?"}
+    M -->|да| N["reconcile.Start<br/>по локальным кластерам"]
+    M -->|нет| L["web.NewServer(reg, auth)"]
+    N --> L
     F --> S["serve(httpAddr, metricsAddr)"]
     L --> S
     S --> T["две http.Server:<br/>API :8080 и metrics :9090"]
@@ -151,6 +165,12 @@ flowchart TD
 Порядок `Register` важен: `Registry.DefaultID()` — первый зарегистрированный кластер,
 именно он открывается в UI по умолчанию. `AllIDs()` сортирует id, поэтому порядок
 метрик стабилен и не зависит от порядка регистрации.
+
+В live-режиме (без `-mock`) hub поднимает `K8sProvider`: kube-конфиг берётся из
+in-cluster service account, иначе из `$KUBECONFIG`/`~/.kube/config`; токен агента —
+`PREPULLER_AGENT_TOKEN`. С флагом `-auto-warm` для каждого локального кластера
+запускается свой `reconcile.Reconciler` под тем же signal-контекстом, что и HTTP-серверы;
+удалённые кластеры пропускаются — reconciler рядом с ними запускает spoke.
 
 ## 4. Аутентификация
 
@@ -410,21 +430,32 @@ flowchart LR
     SCR["Prometheus scrape<br/>GET /metrics"] --> MH["metrics.Handler(reg)"]
     MH --> IDS["reg.AllIDs() (sorted)"]
     IDS --> LOOP["для каждого cluster id"]
-    LOOP --> SNAP["Provider.Snapshot(ctx)"]
-    SNAP --> CL["cluster_up, image_present, policy_violation"]
-    SNAP --> ND["node_agent_up, disk_paused, imagefs_used/capacity"]
+    LOOP --> SNAP["ровно один Provider.Snapshot(ctx)"]
+    SNAP --> CL["cluster_up · sync_partial · last_sync_timestamp"]
+    SNAP --> ND["node_ready · disk_paused · imagefs used/capacity/free · images_cached"]
+    SNAP --> TS["pull_tasks{state} · pull_task_duration_seconds · agent_info"]
+    SNAP --> IMG["image_present · workload_policy_violation"]
     LOOP --> CNT["Provider.PullCounters()<br/>pull_total"]
     CL --> OUT["text/plain; version=0.0.4"]
     ND --> OUT
+    TS --> OUT
+    IMG --> OUT
     CNT --> OUT
 ```
 
 Экспозиция собирается руками (`strings.Builder`), без `prometheus/client_golang` —
 эта зависимость запрещена ADR-001, как и любые UI/роутинг-фреймворки. Внешние
 зависимости модуля ограничены агентом (grpc+cri-api) и K8s-провайдером (client-go).
-Учтите: `Handler` вызывает `Snapshot()` отдельно на каждое семейство метрик (6 раз на
-кластер за скрейп). Для mock это дёшево, для live провайдера нужно кэширование внутри
-провайдера или один снапшот на запрос (WS-B/WS-H).
+Скрейп делает ровно один `Snapshot()` на кластер: `collectClusters()` — единственная
+точка вызова, все билдеры получают готовый снимок. Это зафиксировано тестом
+`TestHandlerCallsSnapshotOncePerCluster`. Тяжёлый live-снапшот дополнительно кэшируется
+внутри провайдера (`K8sProvider` — TTL 2s), а не в метриках.
+
+Семантика: `prepuller_cluster_up=0` при `syncStatus=offline` или `partial=true`;
+`prepuller_cluster_last_sync_timestamp_seconds` отсутствует, если `LastSyncAt` неизвестен
+(нулевое время), и никогда не подменяется текущим временем. `pull_task_duration_seconds` —
+gauge со средним по терминальным задачам (гистограмма в text 0.0.4 без client_golang
+потребовала бы bucket-серий и нескольких sample с одинаковым label-set, что невалидно).
 
 ## 10. Расширение до живого кластера (Stage 2–3)
 

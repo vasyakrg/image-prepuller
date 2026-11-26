@@ -19,14 +19,27 @@
   `failed`, `paused_disk`, `offline`; размер, время последней проверки, текст ошибки.
 - **Ручной прогрев** — отдельный слот (image + node) или все образы workload'а сразу на все
   онлайн-ноды.
+- **Pull Tasks** — журнал асинхронных pull-задач (`queued` / `running` / `succeeded` /
+  `failed` / `canceled`): попытка, триггер и актор, время создания и длительность, ошибка;
+  активную задачу можно отменить кнопкой (`POST /api/v1/pulls/{id}/cancel`), обновление каждые 5 s.
 - **Nodes view** — ImageFS (used/capacity), порог паузы авто-прогрева (78%) и порог kubelet GC
   (85%), активные pull'ы, список закэшированных образов.
+- **Node detail** — клик по ноде открывает панель: кэшированные образы с размерами, ImageFS
+  used/capacity и процент, `diskPaused`, версия агента и условия ноды (Ready/NotReady);
+  панель обновляется каждым поллингом, закрывается кнопкой или Esc.
 - **Policy warnings** — `:latest`/отсутствие иммутабельного тега и `imagePullPolicy: Always`
   (ломают offline failover).
-- **Activity** — журнал pull-событий с триггером (auto / manual), актором (логин оператора),
-  длительностью и ошибкой.
+- **Activity** — журнал pull-событий с триггером (auto / manual), актором (логин оператора
+  или `reconciler`), длительностью и ошибкой.
+- **Авто-прогрев** — `internal/reconcile` раз в 30 s сверяет снапшот с желаемым состоянием и
+  ставит pull-задачи (`trigger=auto`, actor `reconciler`) с приоритетами, лимитами
+  параллелизма и экспоненциальным backoff; включается флагом `-auto-warm`.
+- **Node-agent** — `prepuller agent`: HTTP/JSON API v1 рядом с containerd
+  (`/agent/v1/snapshot`, `/agent/v1/images/{ref}`, `/agent/v1/pulls`), disk-guard по
+  ImageFS и опциональный Bearer-токен.
 - **Multi-cluster** — hub агрегирует локальный и удалённые spoke-кластеры через единый интерфейс.
-- **Prometheus** — отдельный порт `:9090/metrics`, метрики по кластерам, нодам, слотам и pull'ам.
+- **Prometheus** — отдельный порт `:9090/metrics`, метрики по кластерам, нодам, слотам,
+  pull-задачам и свежести синка.
 
 ## Архитектура
 
@@ -63,8 +76,8 @@ flowchart TB
     end
 
     subgraph LocalK8s["Локальный кластер (hub)"]
-        LPROV["Provider<br/>mock → K8s (Stage 3)"]
-        NODES["Worker nodes<br/>containerd image store"]
+        LPROV["K8sProvider<br/>client-go · TTL-кэш 2s"]
+        NODES["Worker nodes<br/>containerd + node-agent"]
     end
 
     UI -->|"HTTPS + cookie"| AUTH
@@ -82,8 +95,9 @@ flowchart TB
     HUBMET --> REG
 ```
 
-Пунктиром мысленно отметьте то, чего пока нет: CRI-вызовы и node-agent — Stage 2/3,
-сейчас всё это заменяет `MockProvider`.
+С флагом `-mock` все провайдеры заменяются на `MockProvider` — ни Kubernetes, ни
+containerd не нужны. В live-режиме hub поднимает `K8sProvider` (client-go) и берёт инвентарь
+образов ноды у node-agent'а по HTTP/JSON API v1; pull уходит в CRI через агент.
 
 ### Поток ручного прогрева
 
@@ -157,6 +171,10 @@ export PREPULLER_SESSION_SECRET="$(openssl rand -hex 32)"   # иначе сек�
 # отдельно — headless spoke
 export PREPULLER_CLUSTER_TOKEN=spoke-secret
 ./bin/prepuller controller -role=spoke -mock -http-addr=:8081 -cluster-name=talos-prod-kz
+
+# node-agent на каждой worker-ноде (в кластере — DaemonSet)
+export PREPULLER_AGENT_TOKEN=agent-secret
+./bin/prepuller agent -mock -node-name=talos-worker-01 -listen-addr=:9443
 ```
 
 Откройте http://localhost:8080, войдите под `PREPULLER_AUTH_USER` / `PREPULLER_AUTH_PASS`.
@@ -186,9 +204,18 @@ curl -s -b /tmp/pc 'localhost:8080/api/v1/snapshot?cluster=talos-prod-kz' | jq '
 | `-metrics-addr` | `:9090` | Адрес Prometheus-метрик (только `GET /metrics`) |
 | `-mock` | `false` | In-memory провайдер, Kubernetes не нужен |
 | `-cluster-name` | `talos-prod-eu` | Имя локального кластера |
+| `-auto-warm` | `false` | Запустить reconciler авто-прогрева для каждого локального кластера |
 
-Подкоманда `agent` зарезервирована под Stage 2 (CRI `/run/containerd/containerd.sock`)
-и пока завершается с сообщением об ошибке.
+Подкоманда `agent` — node-agent:
+
+| Флаг | По умолчанию | Назначение |
+| --- | --- | --- |
+| `-mock` | `false` | In-memory CRI-бэкенд (4 образа, ImageFS 58/100 GiB), containerd не нужен |
+| `-listen-addr` | `:9443` | Адрес HTTP/JSON API агента |
+| `-node-name` | имя хоста | Имя ноды в снапшотах и pull-задачах |
+| `-cri-socket` | `/run/containerd/containerd.sock` | Unix-сокет CRI |
+| `-token` | `""` | Bearer-токен для `/agent/v1/*`; пусто — без проверки |
+| `-disk-pause-ratio` | `0.78` | Порог ImageFS, после которого pull отклоняется с 409 |
 
 ## Переменные окружения
 
@@ -199,6 +226,7 @@ curl -s -b /tmp/pc 'localhost:8080/api/v1/snapshot?cluster=talos-prod-kz' | jq '
 | `PREPULLER_SESSION_SECRET` | hub | нет | Ключ подписи cookie; без него генерируется случайный (сессии живут до рестарта) |
 | `PREPULLER_CLUSTER_TOKEN` | spoke | нет | Bearer-токен для `/internal/v1/*`; пустое значение = API без авторизации |
 | `PREPULLER_REMOTE_CLUSTERS` | hub | нет | Дополнительные spoke: `name=url=token,name2=url2=token2` |
+| `PREPULLER_AGENT_TOKEN` | agent | нет | Bearer-токен агентского API; пусто — без авторизации |
 
 ## HTTP API
 
@@ -236,6 +264,15 @@ Spoke (только если задан `PREPULLER_CLUSTER_TOKEN` — Bearer):
 Поле `apiVersion` в запросах обязательно только для новых клиентов: пустое значение и
 `v1` принимаются в течение одного релиза (см. [docs/PLAN.md](docs/PLAN.md) §10).
 
+Node-agent (HTTP/JSON, API v1; `/healthz` открыт, остальное — Bearer из `-token`):
+
+| Метод и путь | Описание |
+| --- | --- |
+| `GET /healthz` | `{apiVersion,status,node,agentVersion}`, без авторизации |
+| `GET /agent/v1/snapshot` | Инвентарь ноды: образы, ImageFS, runtime, условия, `diskPaused` |
+| `GET /agent/v1/images/{ref}` | Один образ по имени/ID; 404 — не найден |
+| `POST /agent/v1/pulls` | `{image}` → pull через CRI; 409 — `diskPaused`, 502 — ошибка CRI |
+
 ## Метрики
 
 Экспортируются на отдельном порту (`-metrics-addr`, по умолчанию `:9090`) в текстовом
@@ -251,18 +288,33 @@ Spoke (только если задан `PREPULLER_CLUSTER_TOKEN` — Bearer):
 | `prepuller_node_imagefs_used_bytes` | gauge | `cluster`, `node` |
 | `prepuller_node_imagefs_capacity_bytes` | gauge | `cluster`, `node` |
 | `prepuller_pull_total` | counter | `cluster`, `image`, `node`, `result` |
+| `prepuller_pull_tasks` | gauge | `cluster`, `state` (`queued`/`running`/`succeeded`/`failed`/`canceled`) |
+| `prepuller_pull_task_duration_seconds` | gauge | `cluster`, `state` (только терминальные; среднее по `durationMs`) |
+| `prepuller_node_imagefs_free_bytes` | gauge | `cluster`, `node` |
+| `prepuller_node_ready` | gauge | `cluster`, `node` |
+| `prepuller_images_cached_total` | gauge | `cluster`, `node` |
+| `prepuller_agent_info` | gauge | `cluster`, `node`, `version` |
+| `prepuller_cluster_last_sync_timestamp_seconds` | gauge | `cluster` |
+| `prepuller_cluster_sync_partial` | gauge | `cluster` |
+| `prepuller_build_info` | gauge | `version`, `commit`, `go_version` |
 
 С contract-v2 `prepuller_pull_total` заполняется и для удалённых кластеров:
 `RemoteProvider.PullCounters()` ходит в `GET /internal/v1/counters` своего spoke.
 
+Скрейп делает ровно один `Provider.Snapshot()` на кластер — все серии строятся из одного
+снимка. `prepuller_cluster_up=0` и `prepuller_cluster_sync_partial=1` для offline/partial
+кластеров; `..._last_sync_timestamp_seconds` отсутствует, если `LastSyncAt` неизвестен, и
+никогда не подменяется текущим временем.
+
 ## Структура репозитория
 
 ```
-cmd/prepuller/          точка входа, controller-подкоманда, runAgent(), запуск/graceful shutdown
-internal/agent/         node-agent: Config, DialCRI (grpc + cri-api), заглушка gRPC-сервера
+cmd/prepuller/          точка входа: controller (hub/spoke) и agent, запуск/graceful shutdown
+internal/agent/         node-agent: CRI-клиент, инвентарь образов, disk-guard, HTTP/JSON API v1
 internal/auth/          cookie-сессии и middleware (RequireAuth, RequireToken)
 internal/model/         доменные типы и JSON-контракт API v2 (Snapshot, PullTask, ImageRef, …)
-internal/provider/      Provider v2, MockProvider, RemoteProvider, K8sProvider (stub), Registry
+internal/provider/      Provider v2, MockProvider, RemoteProvider, K8sProvider (client-go), Registry
+internal/reconcile/     политика авто-прогрева: очередь, приоритеты, лимиты, backoff
 internal/web/           hub-роутер (server.go) + spoke-роутер (server_spoke.go), embed статики
 internal/web/static/    index.html, app.js, styles.css — без сборки и npm
 internal/metrics/       ручная генерация Prometheus text exposition
@@ -274,7 +326,7 @@ docs/                   architecture.md, PLAN.md, ADR-001
 ## Разработка
 
 ```bash
-go test ./...            # auth, web, контрактные тесты hub↔spoke (internal/testutil)
+go test ./...            # auth, agent, provider, reconcile, metrics, web, контрактные тесты
 go vet ./...
 gofmt -l .
 go build -o bin/prepuller ./cmd/prepuller
@@ -300,9 +352,9 @@ go mod download && go test ./...
 | --- | --- |
 | Stage 1 (готово) | Mock-провайдер, hub/spoke, Web UI, auth, multi-cluster, метрики |
 | contract-v2 (готово) | Provider v2 (PullTask/CancelPull/Health), counters+cancel на spoke, заглушки API, testutil, CI-каркас |
-| Stage 2 | `agent`-режим: gRPC-сервер, CRI containerd, реальный pull, инвентаризация образов на ноде |
-| Stage 3 | `K8sProvider` (client-go): список workload'ов, состояния слотов с нод, фоновый reconciler и авто-прогрев |
-| Далее | RBAC/несколько пользователей, аудит-лог, Helm-чарт, алерты по покрытию и ImageFS |
+| Stage 2 (готово) | node-agent: CRI containerd, инвентарь образов, disk-guard, HTTP/JSON API v1, pull через агент |
+| Stage 3 (в работе) | `K8sProvider` (client-go): workload'ы, слоты image×node, TTL-кэш снапшота; reconciler и `-auto-warm` |
+| Далее | RBAC/несколько пользователей, аудит-лог, Helm/Dockerfile, алерты по покрытию и ImageFS |
 
 ## Известные ограничения
 
