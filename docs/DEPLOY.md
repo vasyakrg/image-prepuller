@@ -446,10 +446,14 @@ The image and the Helm chart are published to GHCR by
 `.github/workflows/build-image.yaml` on a `v*` tag or a push to `main` — on the
 built-in `GITHUB_TOKEN` (`packages: write`), so no extra repository secrets are needed.
 
-| Artifact | Reference for v0.2.0 |
-| --- | --- |
-| image | `ghcr.io/vasyakrg/image-prepuller:0.2.0` (plus `sha-<12>` and `latest` on main) |
-| chart | `oci://ghcr.io/vasyakrg/charts/image-prepuller` version `0.2.0` |
+| Artifact | Reference for v0.2.0 | Digest |
+| --- | --- | --- |
+| image | `ghcr.io/vasyakrg/image-prepuller:0.2.0` (multi-arch amd64+arm64; plus `sha-<12>`; `latest` follows `main`) | `sha256:5f5527aa5d070d1889b29894faf604e2347d036522256053237668b1913b7fca` |
+| chart | `oci://ghcr.io/vasyakrg/charts/image-prepuller` version `0.2.0` | `sha256:ad84a3f3137cbdfa3e1d97b72f0476e82ad87c4355de56cc9c0d6ed96a27532f` |
+
+Both packages are **public** — pulling an image or chart needs no credentials (verified
+anonymously). If you flip them to private in the GitHub package settings, add
+`imagePullSecrets` for the pods and `helm registry login ghcr.io` before install.
 
 ```bash
 helm upgrade --install prepuller oci://ghcr.io/vasyakrg/charts/image-prepuller \
