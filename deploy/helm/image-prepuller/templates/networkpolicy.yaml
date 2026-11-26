@@ -13,7 +13,7 @@ spec:
     - Ingress
     - Egress
   ingress:
-    # Hub/controller in the same namespace may reach the agent gRPC port.
+    # Hub/controller in the same namespace may reach the agent HTTP API port.
     - from:
         - podSelector:
             matchLabels:

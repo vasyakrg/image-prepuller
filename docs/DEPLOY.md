@@ -316,3 +316,49 @@ kubectl -n prepuller delete secret prepuller-image-prepuller-secret
 ```
 
 Uninstalling the hub does not touch spoke releases; remove them separately.
+## 12. k3d end-to-end smoke test
+
+The Stage 2/3 acceptance scenario from `docs/PLAN.md` §9. Run it before a release
+when a local Docker daemon and `k3d` are available.
+
+```bash
+# 1. Cluster + local image (no registry push needed).
+k3d cluster create prepuller --agents 2 --port "8080:30080@loadbalancer"
+docker build -t image-prepuller:e2e .
+k3d image import image-prepuller:e2e -c prepuller
+
+# 2. Install hub + agent DaemonSet on the two agent nodes.
+helm upgrade --install ip deploy/helm/image-prepuller \
+  --namespace prepuller --create-namespace \
+  --set image.repository=image-prepuller --set image.tag=e2e \
+  --set image.pullPolicy=Never \
+  --set agent.enabled=true --set agent.mock=true \
+  --set secret.auth.password=admin --set secret.sessionSecret=e2e-secret \
+  --set secret.clusterToken=e2e-token --set secret.agentToken=e2e-agent-token
+
+# 3. Wait for the rollout and hit the hub.
+kubectl -n prepuller rollout status deploy/ip-image-prepuller
+kubectl -n prepuller rollout status ds/ip-image-prepuller-agent
+kubectl -n prepuller port-forward svc/ip-image-prepuller 8080:8080 9090:9090 &
+curl -fsS http://localhost:8080/healthz
+curl -fsS http://localhost:8080/readyz
+
+# 4. UI checks: log in as admin/admin, deploy a workload with image :latest and
+#    imagePullPolicy: Always, then confirm two policy warnings and that the
+#    auto-warm loop turns a missing slot back to present.
+
+# 5. Metrics: new Stage 2/3 series must be present.
+curl -fsS http://localhost:9090/metrics | grep -E 'prepuller_(pull_tasks|sync_last|node_imagefs|agent_build_info)'
+
+# 6. Failure injection: kill the agent pod on one node and check that the hub
+#    keeps serving and the cluster is marked offline/partial.
+kubectl -n prepuller delete pod -l app.kubernetes.io/component=agent --field-selector spec.nodeName=k3d-prepuller-agent-0
+
+# 7. Tear down.
+k3d cluster delete prepuller
+```
+
+> `agent.mock=true` is only for the smoke test: the agent then serves in-memory
+> images instead of talking to containerd. In a real cluster leave it `false`.
+> The hub `-mock` path is separate (`hub.mock`); leave it `true` until main.go
+> wires the live K8sProvider.
