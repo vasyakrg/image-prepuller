@@ -16,6 +16,7 @@ import (
 	"github.com/local/image-prepuller/internal/auth"
 	"github.com/local/image-prepuller/internal/metrics"
 	"github.com/local/image-prepuller/internal/provider"
+	"github.com/local/image-prepuller/internal/reconcile"
 	"github.com/local/image-prepuller/internal/web"
 )
 
@@ -43,7 +44,11 @@ func runController(args []string) {
 	metricsAddr := fs.String("metrics-addr", ":9090", "Prometheus metrics listen address")
 	mockMode := fs.Bool("mock", false, "Run with interactive in-memory mock data (no Kubernetes required)")
 	clusterName := fs.String("cluster-name", "talos-prod-eu", "Local cluster name")
+	autoWarm := fs.Bool("auto-warm", false, "Enable the auto-pull reconciler for local clusters (Stage 2/3)")
 	_ = fs.Parse(args)
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	reg := provider.NewRegistry()
 
@@ -57,7 +62,7 @@ func runController(args []string) {
 		reg.Register(provider.ClusterEntry{ID: *clusterName, Name: *clusterName, Role: "local", Provider: localProv})
 		token := os.Getenv("PREPULLER_CLUSTER_TOKEN")
 		log.Printf("starting prepuller SPOKE (headless) cluster=%s on %s", *clusterName, *httpAddr)
-		serve(*httpAddr, *metricsAddr, web.NewSpokeServer(localProv, token), metrics.Handler(reg))
+		serve(ctx, *httpAddr, *metricsAddr, web.NewSpokeServer(localProv, token), metrics.Handler(reg))
 		return
 	}
 
@@ -106,10 +111,38 @@ func runController(args []string) {
 	if err != nil {
 		log.Fatalf("init web server: %v", err)
 	}
-	serve(*httpAddr, *metricsAddr, webSrv, metrics.Handler(reg))
+	startReconcilers(ctx, reg, *autoWarm)
+	serve(ctx, *httpAddr, *metricsAddr, webSrv, metrics.Handler(reg))
 }
 
-func serve(httpAddr, metricsAddr string, mainHandler, metricsHandler http.Handler) {
+// startReconcilers runs one auto-warm reconciler per local cluster. Remote
+// clusters are skipped: their provider talks to a spoke which runs its own
+// reconciler next to the cluster.
+func startReconcilers(ctx context.Context, reg *provider.Registry, enabled bool) {
+	if !enabled {
+		return
+	}
+	for _, id := range reg.AllIDs() {
+		entry, ok := reg.Get(id)
+		if !ok || entry.Role != "local" {
+			continue
+		}
+		go func(clusterID string, p provider.Provider) {
+			log.Printf("auto-warm reconciler started for cluster %s", clusterID)
+			rec := reconcile.New(reconcile.Config{})
+			rec.Start(ctx, p, clusterID, func(res reconcile.Result) {
+				if len(res.Triggered) == 0 && len(res.Failures) == 0 {
+					return
+				}
+				log.Printf("auto-warm %s: examined=%d planned=%d triggered=%d failures=%d duration=%s",
+					clusterID, res.Examined, len(res.Planned), len(res.Triggered), len(res.Failures),
+					res.Duration.Round(time.Millisecond))
+			})
+		}(id, entry.Provider)
+	}
+}
+
+func serve(ctx context.Context, httpAddr, metricsAddr string, mainHandler, metricsHandler http.Handler) {
 	uiHTTP := &http.Server{Addr: httpAddr, Handler: mainHandler, ReadHeaderTimeout: 10 * time.Second}
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("GET /metrics", metricsHandler)
@@ -128,12 +161,10 @@ func serve(httpAddr, metricsAddr string, mainHandler, metricsHandler http.Handle
 		}
 	}()
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
+	<-ctx.Done()
 	log.Println("shutting down...")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = uiHTTP.Shutdown(ctx)
-	_ = metricsHTTP.Shutdown(ctx)
+	_ = uiHTTP.Shutdown(shutdownCtx)
+	_ = metricsHTTP.Shutdown(shutdownCtx)
 }
