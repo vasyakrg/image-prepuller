@@ -1,0 +1,91 @@
+package agent
+
+import (
+	"context"
+	"sync"
+	"testing"
+	"time"
+)
+
+// timeAfter is a tiny helper so tests can fail fast without importing time
+// everywhere.
+func timeAfter(t *testing.T, seconds int) <-chan time.Time {
+	t.Helper()
+	return time.After(time.Duration(seconds) * time.Second)
+}
+
+// fakeCRI wraps MockBackend and lets tests inject CRI failures. It is the only
+// fake the agent needs: no containerd, no network.
+type fakeCRI struct {
+	*MockBackend
+
+	mu         sync.Mutex
+	listErr    error
+	fsErr      error
+	stateErr   error
+	runtimeErr error
+	statusErr  error
+	pullErr    error
+	pulls      []string
+}
+
+func newFakeCRI() *fakeCRI { return &fakeCRI{MockBackend: NewMockBackend()} }
+
+func (f *fakeCRI) ListImages(ctx context.Context) ([]ImageInfo, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.MockBackend.ListImages(ctx)
+}
+
+func (f *fakeCRI) ImageStatus(ctx context.Context, image string) (ImageInfo, bool, error) {
+	if f.statusErr != nil {
+		return ImageInfo{}, false, f.statusErr
+	}
+	return f.MockBackend.ImageStatus(ctx, image)
+}
+
+func (f *fakeCRI) PullImage(ctx context.Context, image string) (string, error) {
+	f.mu.Lock()
+	f.pulls = append(f.pulls, image)
+	f.mu.Unlock()
+	if f.pullErr != nil {
+		return "", f.pullErr
+	}
+	return f.MockBackend.PullImage(ctx, image)
+}
+
+func (f *fakeCRI) ImageFS(ctx context.Context) (ImageFSStats, error) {
+	if f.fsErr != nil {
+		return ImageFSStats{}, f.fsErr
+	}
+	return f.MockBackend.ImageFS(ctx)
+}
+
+func (f *fakeCRI) RuntimeState(ctx context.Context) (RuntimeState, error) {
+	if f.stateErr != nil {
+		return RuntimeState{}, f.stateErr
+	}
+	return f.MockBackend.RuntimeState(ctx)
+}
+
+func (f *fakeCRI) RuntimeVersion(ctx context.Context) (RuntimeInfo, error) {
+	if f.runtimeErr != nil {
+		return RuntimeInfo{}, f.runtimeErr
+	}
+	return f.MockBackend.RuntimeVersion(ctx)
+}
+
+func (f *fakeCRI) pullCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.pulls...)
+}
+
+func testConfig() Config {
+	return Config{
+		NodeName:       "talos-worker-01",
+		ListenAddr:     "127.0.0.1:0",
+		DiskPauseRatio: 0.78,
+	}
+}
