@@ -275,6 +275,7 @@ jobs:
         env:
           OPENAI__API_BASE: ${{ secrets.OPENAI_API_BASE }}
           OPENAI__KEY: ${{ secrets.OPENAI_KEY }}
+          GITHUB__USER_TOKEN: ${{ secrets.PR_AGENT_TOKEN || secrets.GITHUB_TOKEN }}
         # Проверяет ровно то, что ломается молча: модель сконфигурирована, ключ
         # виден, запрос к модели проходит.
         run: |
