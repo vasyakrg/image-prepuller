@@ -1,0 +1,19 @@
+# Build artifacts
+/bin/
+*.exe
+*.test
+*.out
+
+# Project-local Go caches (GOCACHE=$PWD/.gocache, GOMODCACHE=$PWD/.gomodcache)
+/.gocache/
+/.gomodcache/
+
+# Local logs and OS/IDE noise
+*.log
+.DS_Store
+.idea/
+.vscode/
+
+# Local env files with credentials
+.env
+.env.*

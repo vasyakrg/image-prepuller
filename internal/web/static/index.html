@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="ru" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Image Prepuller — Kubernetes Ops Console</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <!-- Login View -->
+  <div id="login-view" class="login-screen hidden">
+    <div class="login-card">
+      <div class="login-header">
+        <div class="brand-dot"></div>
+        <div>
+          <h1>Image Prepuller</h1>
+          <p class="muted">Kubernetes Node Image Cache Console</p>
+        </div>
+      </div>
+      <form id="login-form">
+        <label class="field">
+          <span>Логин</span>
+          <input id="login-user" type="text" autocomplete="username" placeholder="admin" required />
+        </label>
+        <label class="field">
+          <span>Пароль</span>
+          <input id="login-pass" type="password" autocomplete="current-password" placeholder="••••••••" required />
+        </label>
+        <div id="login-error" class="error-banner hidden"></div>
+        <button type="submit" class="btn btn-primary btn-full">Войти</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Main App View -->
+  <div id="app-view" class="app-shell hidden">
+    <header class="topbar">
+      <div class="topbar-left">
+        <div class="brand">
+          <span class="brand-dot"></span>
+          <span class="brand-title">Image Prepuller</span>
+        </div>
+        <select id="cluster-select" class="select" style="padding:4px 10px;font-size:12.5px" title="Выбор кластера"></select>
+        <span id="mock-badge" class="pill pill-purple hidden">MOCK MODE</span>
+        <nav class="tabs">
+          <button class="tab active" data-tab="workloads">Workloads</button>
+          <button class="tab" data-tab="nodes">Nodes <span id="tab-nodes-count" class="tab-count">0</span></button>
+          <button class="tab" data-tab="activity">Activity</button>
+        </nav>
+      </div>
+      <div class="topbar-right">
+        <label class="autorefresh-toggle" title="Автообновление каждые 5 секунд">
+          <input id="autorefresh-cb" type="checkbox" checked />
+          <span>Auto 5s</span>
+        </label>
+        <button id="btn-sync" class="btn btn-secondary">↻ Sync Now</button>
+        <span id="user-badge" class="muted mono"></span>
+        <button id="btn-logout" class="btn btn-ghost">Выйти</button>
+      </div>
+    </header>
+
+    <main class="container">
+      <!-- KPI Strip -->
+      <section class="kpi-grid">
+        <div class="kpi-card">
+          <div class="kpi-label">Marked Workloads</div>
+          <div id="kpi-workloads" class="kpi-value">—</div>
+          <div id="kpi-workloads-sub" class="kpi-sub muted">—</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Cluster Coverage</div>
+          <div id="kpi-coverage" class="kpi-value">—</div>
+          <div id="kpi-coverage-sub" class="kpi-sub muted">—</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Worker Nodes</div>
+          <div id="kpi-workers" class="kpi-value">—</div>
+          <div id="kpi-workers-sub" class="kpi-sub muted">—</div>
+        </div>
+        <div class="kpi-card kpi-clickable" id="kpi-warnings-card" title="Нажмите для фильтрации нарушений">
+          <div class="kpi-label">Policy Warnings</div>
+          <div id="kpi-warnings" class="kpi-value">—</div>
+          <div class="kpi-sub muted">:latest или PullPolicy Always</div>
+        </div>
+      </section>
+
+      <!-- Workloads Tab -->
+      <section id="tab-workloads" class="tab-panel">
+        <div class="toolbar">
+          <input id="filter-search" class="input" type="search" placeholder="Поиск по сервису или образу..." />
+          <select id="filter-ns" class="select">
+            <option value="">Namespace: Все</option>
+          </select>
+          <select id="filter-status" class="select">
+            <option value="all">Статус: Все</option>
+            <option value="issues">Только с проблемами</option>
+            <option value="warnings">Только Policy Warnings</option>
+          </select>
+        </div>
+        <div class="card table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th style="width:28px"></th>
+                <th>Workload</th>
+                <th>Images</th>
+                <th>Policy</th>
+                <th>Node Coverage</th>
+                <th class="right">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="workloads-tbody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Nodes Tab -->
+      <section id="tab-nodes" class="tab-panel hidden">
+        <div id="nodes-grid" class="nodes-grid"></div>
+      </section>
+
+      <!-- Activity Tab -->
+      <section id="tab-activity" class="tab-panel hidden">
+        <div class="card table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Node</th>
+                <th>Image</th>
+                <th>Trigger</th>
+                <th>Duration</th>
+                <th>Result</th>
+              </tr>
+            </thead>
+            <tbody id="activity-tbody"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
