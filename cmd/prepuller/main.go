@@ -57,7 +57,13 @@ func runController(args []string) {
 		if *mockMode {
 			localProv = provider.NewMockProvider(*clusterName)
 		} else {
-			log.Fatalf("live Kubernetes provider is Stage 3; run with --mock for Stage 1")
+			liveProv, err := provider.NewK8sProviderFromEnv(*clusterName,
+				provider.WithAgentToken(os.Getenv("PREPULLER_AGENT_TOKEN")))
+			if err != nil {
+				log.Fatalf("live Kubernetes provider: %v", err)
+			}
+			log.Printf("live Kubernetes provider for cluster %s (node-agent API v1 on :%d)", *clusterName, provider.DefaultAgentPort)
+			localProv = liveProv
 		}
 		reg.Register(provider.ClusterEntry{ID: *clusterName, Name: *clusterName, Role: "local", Provider: localProv})
 		token := os.Getenv("PREPULLER_CLUSTER_TOKEN")
@@ -82,7 +88,13 @@ func runController(args []string) {
 		reg.Register(provider.ClusterEntry{ID: "talos-prod-kz", Name: "talos-prod-kz", Role: "remote", Endpoint: "https://prepuller-spoke.kz.internal", Provider: provider.NewMockProvider("talos-prod-kz")})
 		reg.Register(provider.ClusterEntry{ID: "talos-stage-ru", Name: "talos-stage-ru", Role: "remote", Endpoint: "https://prepuller-spoke.ru.internal", Provider: provider.NewMockProvider("talos-stage-ru")})
 	} else {
-		log.Fatalf("live Kubernetes provider is Stage 3; run with --mock for Stage 1")
+		log.Printf("starting prepuller HUB with the live Kubernetes provider (cluster %s)", *clusterName)
+		liveProv, err := provider.NewK8sProviderFromEnv(*clusterName,
+			provider.WithAgentToken(os.Getenv("PREPULLER_AGENT_TOKEN")))
+		if err != nil {
+			log.Fatalf("live Kubernetes provider: %v", err)
+		}
+		reg.Register(provider.ClusterEntry{ID: *clusterName, Name: *clusterName, Role: "local", Provider: liveProv})
 	}
 
 	// Optional extra remote spokes via PREPULLER_REMOTE_CLUSTERS="name=url=token,name2=url2=token2"

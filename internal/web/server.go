@@ -142,7 +142,7 @@ func (s *Server) handleManualPull(w http.ResponseWriter, r *http.Request, user s
 		Trigger: model.TriggerManual,
 	})
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeJSON(w, pullErrorStatus(err), map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
@@ -172,7 +172,7 @@ func (s *Server) handleWorkloadPull(w http.ResponseWriter, r *http.Request, user
 		Trigger:   model.TriggerManual,
 	})
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeJSON(w, pullErrorStatus(err), map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"triggered": count})
@@ -220,11 +220,7 @@ func (s *Server) handleCancelPull(w http.ResponseWriter, r *http.Request, _ stri
 		cluster = req.Cluster
 	}
 	if err := s.registry.CancelPull(r.Context(), cluster, taskID); err != nil {
-		status := http.StatusBadRequest
-		if errors.Is(err, provider.ErrTaskNotFound) {
-			status = http.StatusNotFound
-		}
-		writeJSON(w, status, map[string]string{"error": err.Error()})
+		writeJSON(w, pullErrorStatus(err), map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"taskId": taskID, "status": "canceled"})
@@ -269,6 +265,29 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request, _ string) 
 		return
 	}
 	writeJSON(w, http.StatusOK, health)
+}
+
+// pullErrorStatus maps errors from the pull layer onto HTTP statuses so the UI
+// can tell a node whose disk is above the pause threshold (409), an unreachable
+// or unauthorized node agent (502) and genuinely bad input (400) apart instead
+// of collapsing everything into 400.
+func pullErrorStatus(err error) int {
+	switch {
+	case errors.Is(err, provider.ErrTaskNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, provider.ErrCancelNotSupported):
+		return http.StatusConflict
+	case errors.Is(err, provider.ErrAgentDiskPaused):
+		return http.StatusConflict
+	case errors.Is(err, provider.ErrAgentUnauthorized):
+		return http.StatusBadGateway
+	case errors.Is(err, provider.ErrAgentUnavailable):
+		return http.StatusBadGateway
+	case errors.Is(err, provider.ErrNotImplemented):
+		return http.StatusNotImplemented
+	default:
+		return http.StatusBadRequest
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

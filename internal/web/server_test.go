@@ -2,7 +2,10 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +13,7 @@ import (
 
 	"github.com/local/image-prepuller/internal/auth"
 	"github.com/local/image-prepuller/internal/metrics"
+	"github.com/local/image-prepuller/internal/model"
 	"github.com/local/image-prepuller/internal/provider"
 )
 
@@ -149,5 +153,61 @@ func TestSpokeContractV2Endpoints(t *testing.T) {
 	rec = authed(http.MethodPost, "/internal/v1/reconcile", `{"apiVersion":"v1","actor":"admin"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("v1 reconcile = %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// errProvider fails TriggerPull with a fixed error so the HTTP layer mapping can
+// be exercised without a live Kubernetes cluster. The embedded Provider is nil:
+// only TriggerPull is called by these tests.
+type errProvider struct {
+	provider.Provider
+	err error
+}
+
+func (p errProvider) TriggerPull(context.Context, model.PullRequest) (model.PullTask, error) {
+	return model.PullTask{}, p.err
+}
+
+func TestPullErrorStatus(t *testing.T) {
+	cases := []struct {
+		err  error
+		want int
+	}{
+		{nil, http.StatusBadRequest},
+		{fmt.Errorf("pull: %w", provider.ErrTaskNotFound), http.StatusNotFound},
+		{fmt.Errorf("pull: %w", provider.ErrCancelNotSupported), http.StatusConflict},
+		{fmt.Errorf("pull: %w", provider.ErrAgentDiskPaused), http.StatusConflict},
+		{fmt.Errorf("pull: %w", provider.ErrAgentUnauthorized), http.StatusBadGateway},
+		{fmt.Errorf("pull: %w", provider.ErrAgentUnavailable), http.StatusBadGateway},
+		{provider.ErrNotImplemented, http.StatusNotImplemented},
+		{errors.New("image and node are required"), http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		if got := pullErrorStatus(tc.err); got != tc.want {
+			t.Errorf("pullErrorStatus(%v) = %d, want %d", tc.err, got, tc.want)
+		}
+	}
+}
+
+// TestSpokePullErrorStatuses checks the wire statuses the hub/UI see for a node
+// whose ImageFS is above the pause threshold (409) and for an unreachable agent
+// (502) instead of a blanket 400.
+func TestSpokePullErrorStatuses(t *testing.T) {
+	body := `{"apiVersion":"v2","image":"ghcr.io/acme/api-gateway:1.14.2","node":"talos-worker-01"}`
+	cases := []struct {
+		err  error
+		want int
+	}{
+		{fmt.Errorf("agent: %w", provider.ErrAgentDiskPaused), http.StatusConflict},
+		{fmt.Errorf("agent: %w", provider.ErrAgentUnavailable), http.StatusBadGateway},
+		{fmt.Errorf("agent: %w", provider.ErrAgentUnauthorized), http.StatusBadGateway},
+	}
+	for _, tc := range cases {
+		mux := NewSpokeServer(errProvider{err: tc.err}, "")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/internal/v1/pull", strings.NewReader(body)))
+		if rec.Code != tc.want {
+			t.Errorf("pull with %v = %d (%s), want %d", tc.err, rec.Code, rec.Body.String(), tc.want)
+		}
 	}
 }

@@ -2,7 +2,6 @@ package web
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 
 	"github.com/local/image-prepuller/internal/auth"
@@ -51,7 +50,7 @@ func NewSpokeServer(p provider.Provider, clusterToken string) http.Handler {
 			Policy:  req.Policy,
 		})
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			writeJSON(w, pullErrorStatus(err), map[string]string{"error": err.Error()})
 			return
 		}
 		writeJSON(w, http.StatusAccepted, task)
@@ -82,7 +81,7 @@ func NewSpokeServer(p provider.Provider, clusterToken string) http.Handler {
 			Trigger:   req.Trigger,
 		})
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			writeJSON(w, pullErrorStatus(err), map[string]string{"error": err.Error()})
 			return
 		}
 		writeJSON(w, http.StatusAccepted, map[string]int{"triggered": n})
@@ -123,11 +122,7 @@ func NewSpokeServer(p provider.Provider, clusterToken string) http.Handler {
 			return
 		}
 		if err := p.CancelPull(r.Context(), taskID); err != nil {
-			status := http.StatusBadRequest
-			if errors.Is(err, provider.ErrTaskNotFound) {
-				status = http.StatusNotFound
-			}
-			writeJSON(w, status, map[string]string{"error": err.Error()})
+			writeJSON(w, pullErrorStatus(err), map[string]string{"error": err.Error()})
 			return
 		}
 		writeJSON(w, http.StatusAccepted, map[string]any{"taskId": taskID, "status": "canceled"})
