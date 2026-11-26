@@ -46,6 +46,11 @@ spec:
                 secretKeyRef:
                   name: {{ include "ip.secretName" . }}
                   key: cluster-token
+            - name: PREPULLER_AGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ip.secretName" . }}
+                  key: agent-token
             {{- with .Values.spoke.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

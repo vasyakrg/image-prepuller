@@ -1,9 +1,8 @@
 # Default values for image-prepuller. See docs/DEPLOY.md for a full walkthrough.
 #
-# Stage note (2026-11-26): the live Kubernetes/CRI provider is Stage 3 and the
-# node-agent is Stage 2 (WS-A). Until those land the controller MUST run with
-# `-mock`; that is why hub.mock/spoke.mock default to true and agent.enabled to
-# false. Flip them in the same release that ships WS-A/WS-B.
+# Stage note (integration): the live K8sProvider (client-go) and the node-agent
+# HTTP/JSON API v1 are merged, so hub.mock defaults to false and the agent
+# DaemonSet is enabled. Use hub.mock=true for demos/UI work without a cluster.
 
 nameOverride: ""
 fullnameOverride: ""
@@ -22,6 +21,12 @@ serviceAccount:
   # Defaults to the release fullname.
   name: ""
   annotations: {}
+
+# RBAC for the hub/spoke controller: it lists Nodes and workloads through the
+# Kubernetes API. The agent DaemonSet uses a separate ServiceAccount with no
+# API permissions at all.
+rbac:
+  create: true
 
 # Annotations added to every pod template (hub, spoke, agent).
 podAnnotations: {}
@@ -48,8 +53,8 @@ securityContext:
 # password/sessionSecret/clusterToken to have random values generated on
 # install (retrieve with `kubectl get secret ... -o jsonpath ...`).
 # In production, set secret.existingSecret to a pre-created Secret that has the
-# same keys (auth-user, auth-pass, session-secret, cluster-token) and set
-# create: false.
+# same keys (auth-user, auth-pass, session-secret, cluster-token, agent-token)
+# and set create: false.
 secret:
   create: true
   existingSecret: ""
@@ -69,10 +74,10 @@ secret:
 
 hub:
   replicaCount: 1
-  # true -> `-mock` (Stage 1/2). Set false only after the live provider (WS-B)
-  # is merged; the process exits with "live Kubernetes provider is Stage 3"
-  # otherwise.
-  mock: true
+  # false -> live K8sProvider (client-go + node agents). Set true to run the
+  # in-memory mock (`-mock`) for demos/UI work; the live path needs the RBAC
+  # below and a reachable Kubernetes API from the pod.
+  mock: false
   clusterName: talos-prod-eu
   # -auto-warm starts the reconciler for local clusters (Stage 2/3). It works
   # with -mock too; keep false until the live provider is wired into main.go.
@@ -127,11 +132,14 @@ spoke:
   extraEnv: []
 
 agent:
-  # Per-node DaemonSet serving the agent HTTP/JSON API v1 (WS-A). It is still
-  # disabled by default: the hub does not wire K8sProvider into main.go yet, so
-  # there is nothing consuming the agent in production. Enable it once the
-  # live provider is wired in.
-  enabled: false
+  # Per-node DaemonSet serving the agent HTTP/JSON API v1 (WS-A). The live
+  # K8sProvider in the hub talks to it on each node's InternalIP:9443.
+  enabled: true
+  # Dedicated ServiceAccount for the DaemonSet: no Kubernetes API permissions.
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
   # false -> talk to the real CRI socket; true -> in-memory mock images.
   mock: false
   criSocket: /run/containerd/containerd.sock

@@ -1,10 +1,9 @@
 # DEPLOY: image-prepuller
 
 Runbook for deploying the hub, the spoke backend and the node-agent from this
-repository. Written for the Stage 2/3 codebase: until the live Kubernetes/CRI
-provider lands, the controller **must** run with `-mock` (`hub.mock=true` /
-`spoke.mock=true`); the agent DaemonSet is a skeleton and stays disabled
-(`agent.enabled=false`).
+repository. The default release runs the **live** `K8sProvider` (client-go) in
+the hub and the node-agent HTTP/JSON API v1 on every node. Set `hub.mock=true`
+for an in-memory demo without a Kubernetes API.
 
 - [1. What gets deployed](#1-what-gets-deployed)
 - [2. Prerequisites](#2-prerequisites)
@@ -24,23 +23,24 @@ The chart `deploy/helm/image-prepuller` renders:
 
 | Object | Template | Enabled by default |
 | --- | --- | --- |
-| ServiceAccount | `serviceaccount.yaml` | yes |
-| Secret (auth, session secret, cluster token) | `secret.yaml` | yes |
+| ServiceAccount (hub/spoke + agent) | `serviceaccount.yaml` | yes |
+| ClusterRole + ClusterRoleBinding (read-only Nodes/workloads) | `rbac.yaml` | yes (`rbac.create`) |
+| Secret (auth, session secret, cluster token, agent token) | `secret.yaml` | yes |
 | Deployment + Service (hub) | `deployment-hub.yaml`, `service-hub.yaml` | yes |
 | Ingress (Traefik-compatible) | `ingress.yaml` | no (`ingress.enabled`) |
 | Deployment + Service (spoke) | `deployment-spoke.yaml`, `service-spoke.yaml` | no (`spoke.enabled`) |
-| DaemonSet (node-agent) | `daemonset-agent.yaml` | no (`agent.enabled`) |
+| DaemonSet (node-agent) | `daemonset-agent.yaml` | yes (`agent.enabled`) |
 | NetworkPolicy (agent) | `networkpolicy.yaml` | no (`networkPolicy.enabled`) |
 
 One binary, three roles: `controller -role=hub` (Web UI + cookie auth +
 multi-cluster registry + Prometheus), `controller -role=spoke` (headless backend
 API with a Bearer token), `agent` (per-node CRI agent). Ports:
 
-| Role | HTTP/API | Metrics | gRPC |
+| Role | HTTP/API | Metrics | Node agent API |
 | --- | --- | --- | --- |
 | hub | 8080 | 9090 | — |
 | spoke | 8081 | 9091 | — |
-| agent | — | — | 9443 |
+| agent | 9443 | — | — |
 
 The image is multi-stage (`golang:1.24-alpine` builder, `distroless/static`
 runtime), `CGO_ENABLED=0`, runs as uid/gid 65532 with a read-only root
@@ -147,6 +147,11 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
   --set hub.clusterName=talos-prod-eu
 ```
 
+This default install runs the live provider: the hub lists Nodes and workloads
+through the in-cluster ServiceAccount and talks to the agent DaemonSet on each
+node's InternalIP:9443. For an in-memory demo without Kubernetes access add
+`--set hub.mock=true --set agent.enabled=false`.
+
 Production example with an existing Secret, ingress and TLS:
 
 ```bash
@@ -234,16 +239,18 @@ helm upgrade prepuller deploy/helm/image-prepuller \
 
 `PREPULLER_REMOTE_CLUSTERS` uses `name=url=token` entries separated by commas.
 The hub keeps the registration order; the first registered cluster is the UI
-default. Registering a spoke in the hub's `-mock` mode is optional — mock mode
-already registers three fake clusters.
+default. In `hub.mock=true` mode three fake clusters are registered and remote
+spokes are ignored.
 
-## 8. Enable the agent DaemonSet
+## 8. The agent DaemonSet
 
-The agent (WS-A) is implemented and serves the HTTP/JSON wire API v1 on port
-9443 (`GET /healthz`, `GET /agent/v1/snapshot`, `GET /agent/v1/images/{ref}`,
-`POST /agent/v1/pulls`). It is disabled by default because `main.go` does not
-wire the live `K8sProvider` yet, so nothing consumes the agent in production.
-Enable it when the live provider is wired in:
+The agent serves the HTTP/JSON wire API v1 on port 9443 (`GET /healthz`,
+`GET /agent/v1/snapshot`, `GET /agent/v1/images/{ref}`, `POST /agent/v1/pulls`).
+It is enabled by default; the live hub needs it on every node. It runs under a
+dedicated ServiceAccount with **no** Kubernetes API permissions and does not
+mount a ServiceAccount token.
+
+To tune or disable it:
 
 ```bash
 helm upgrade --install prepuller deploy/helm/image-prepuller \
@@ -251,6 +258,11 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
   --set agent.enabled=true \
   --set agent.criSocket=/run/containerd/containerd.sock \
   --set networkPolicy.enabled=true
+
+# demo without a container runtime: in-memory agent, no socket needed
+helm upgrade --install prepuller deploy/helm/image-prepuller \
+  --namespace prepuller --reuse-values \
+  --set agent.mock=true
 ```
 
 The DaemonSet mounts the CRI socket read-only, runs with a read-only root
@@ -277,7 +289,9 @@ curl -fsS -H "Authorization: Bearer <agent-token>" \
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | `CrashLoopBackOff`, logs `auth config error` | `PREPULLER_AUTH_USER`/`_PASS` empty | Fill `secret.auth.user`/`password` or the existing Secret. |
-| `CrashLoopBackOff`, logs `live Kubernetes provider is Stage 3` | `-mock` missing while the live provider is not merged | Set `hub.mock=true` / `spoke.mock=true` (defaults). |
+| `CrashLoopBackOff`, logs `live Kubernetes provider: ...` | The live path cannot build a Kubernetes client (no in-cluster config/RBAC) | Check the pod ServiceAccount and `rbac.create=true`; for a demo set `hub.mock=true`. |
+| 403 `forbidden` on nodes/deployments | ClusterRole/RBAC missing or `rbac.create=false` | Keep `rbac.create=true` or bind the hub ServiceAccount to equivalent read-only rules. |
+| Nodes show `offline`/`degraded` in the UI | Agent DaemonSet not running, socket not mounted, or agent token mismatch | Check `kubectl -n <ns> get ds`, agent logs, and that the hub and agent share `agent-token`. |
 | `ImagePullBackOff` | Wrong `image.repository`/`tag`, or no registry credentials | Check the tag in the registry; add `imagePullSecrets` or attach the pull secret to the ServiceAccount. |
 | `CreateContainerConfigError` | Referenced Secret/key missing | `kubectl -n prepuller describe pod ...`; check `secret.existingSecret` and its keys. |
 | `read-only file system` errors | The image writes outside `/tmp`; the rootfs is read-only | Expected for hub/spoke (they keep state in memory). For the agent, mount a writable `emptyDir` where it needs scratch space. |

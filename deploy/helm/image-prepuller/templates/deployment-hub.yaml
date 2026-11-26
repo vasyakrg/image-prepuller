@@ -58,6 +58,11 @@ spec:
                 secretKeyRef:
                   name: {{ include "ip.secretName" . }}
                   key: session-secret
+            - name: PREPULLER_AGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ip.secretName" . }}
+                  key: agent-token
             {{- with .Values.hub.remoteClusters }}
             - name: PREPULLER_REMOTE_CLUSTERS
               value: {{ . | quote }}

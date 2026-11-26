@@ -58,6 +58,20 @@ app.kubernetes.io/managed-by: {{ .ctx.Release.Service }}
 {{- end }}
 {{- end }}
 
+{{/* ServiceAccount name used by the agent DaemonSet (no API permissions). */}}
+{{- define "ip.agentServiceAccountName" -}}
+{{- if .Values.agent.serviceAccount.create }}
+{{- default (printf "%s-agent" (include "ip.fullname" .)) .Values.agent.serviceAccount.name }}
+{{- else }}
+{{- default "default" .Values.agent.serviceAccount.name }}
+{{- end }}
+{{- end }}
+
+{{/* ClusterRole/ClusterRoleBinding name for the hub controller. */}}
+{{- define "ip.rbacName" -}}
+{{- printf "%s-rbac" (include "ip.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
 {{/* Secret name holding auth-user/auth-pass/session-secret/cluster-token. */}}
 {{- define "ip.secretName" -}}
 {{- if .Values.secret.existingSecret }}
