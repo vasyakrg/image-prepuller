@@ -136,9 +136,9 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 | `internal/reconcile/` | политика авто-прогрева: очередь, приоритеты (failed > missing, prod > staging > infra), лимиты, backoff |
 | `internal/testutil/` | фейковый spoke/hub, golden-снапшот v2, контрактные тесты |
 | `cmd/prepuller/agent.go` | `runAgent()`: флаги агента, запуск HTTP/JSON сервера, graceful shutdown |
-| `.github/workflows/ci.yaml` | **Единственный** CI на GitHub: гейты `test` (gofmt, vet, test, build linux/amd64+arm64, гейт зависимостей ADR-001, `govulncheck`) и `helm` (lint/template), затем `image` (buildx amd64+arm64, публикация в GHCR на `GITHUB_TOKEN`, теги `sha-*`/latest/версия) и `chart` (OCI-чарт) — оба `needs: [test, helm]` |
+| `.github/workflows/ci.yaml` | **Единственный** CI на GitHub: гейты `test` (gofmt, vet, test, build linux/amd64+arm64, гейт зависимостей ADR-001, `govulncheck`) и `helm` (lint/template), затем `image` (buildx amd64+arm64, публикация в GHCR на `GITHUB_TOKEN`, теги `sha-*`/latest/версия, `needs: [test, helm]`) и `chart` (OCI-чарт, только с релизного тега `v*` и `needs: [test, helm, image]`) |
 | `hack/e2e-k3d.sh` | Локальный e2e-смоук на k3d: live-провайдер, агенты по CRI, policy violations, деградация/восстановление, метрики |
-| `.gitea/workflows/ci.yaml` | CI для Gitea (зеркало `.github/`): те же гейты `test` + `helm`, затем `image` (buildx, публикация в реестр по `vars.REGISTRY`/`vars.IMAGE`) и `chart` (если задан `vars.CHART_OCI_REPO`) |
+| `.gitea/workflows/ci.yaml` | CI для Gitea (зеркало `.github/`): те же гейты `test` + `helm`, затем `image` (buildx, публикация в реестр по `vars.REGISTRY`/`vars.IMAGE`) и `chart` с релизного тега `v*` после образа (если задан `vars.CHART_OCI_REPO`) |
 | `.github/workflows/pr-agent.yml` | Ревью pull request'ов моделью (PR-Agent): `review` на открытие PR, `command` на комментарий со слэшем (только владелец), `doctor` вручную. Секреты — `OPENAI_API_BASE`/`OPENAI_KEY`; подробности в `docs/pr-agent.md` |
 | `Dockerfile` | multi-stage образ: golang:1.26.11 builder → distroless nonroot (65532) |
 | `deploy/helm/image-prepuller/` | Helm-чарт: hub (`hub.enabled`), spoke (прямой режим или `spoke.hub.*` outbound), agent DaemonSet, RBAC, ingress, Service метрик агента, `agent.networkPolicy`, `ServiceMonitor` и `PrometheusRule` раздельно для hub и агента, `hub.managedClusters` |
@@ -311,17 +311,22 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
   pull не валится. Сэмплирование `ImageFS` — единственный сигнал: не выключайте
   `-pull-stall-watch`, не предложив другой; e2e проверяет отказ по мёртвому реестру
   (`hack/e2e-k3d.sh` §9, < 60 s).
-- **Чарт и образ версионируются вместе.** Чарт из `main` передаёт агенту флаги
-  `agent.pull.*` (`-pull-timeout`, `-registry-probe-timeout`,
-  `-pull-stall-timeout`), которых нет в релизном образе `0.2.0`:
-  `image.tag=0.2.0` + чарт из `main` — это `CrashLoopBackOff` с
-  `flag provided but not defined: -pull-timeout` и все ноды `offline`. Пустой
-  `image.tag` не превращается в заглушку: `ip.imageTag` подставляет версию
-  релизного чарта (`Chart.version == Chart.appVersion`) либо `latest` для
-  чарта из `main` (и печатает предупреждение в `NOTES`). Для первой раскатки
-  всё равно пиньте `image.tag=sha-<тот же коммит>`; релизная пара — OCI-чарт
-  релиза + его образ. Меняя чарт, поднимайте `Chart.version`; `appVersion`
-  поднимается вместе с релизом.
+- **Чарт и приложение версионируются одной версией.** `Chart.version == appVersion`,
+  и релизный тег обязан совпасть с обоими (`v0.7.0` → `0.7.0`): helm-гейт CI ловит
+  расхождение на PR, job'ы `image`/`chart` — на теге. Образ по умолчанию —
+  `Chart.AppVersion` (`ip.imageTag`: `values.image.tag` → `appVersion`), фолбэка на
+  `latest` в чарте нет. Чарт из `main` передаёт агенту флаги `agent.pull.*`
+  (`-pull-timeout`, `-registry-probe-timeout`, `-pull-stall-timeout`), которых нет
+  в образе прошлого релиза: такая пара — `CrashLoopBackOff` с
+  `flag provided but not defined: -pull-timeout` и все ноды `offline`. Поэтому
+  раскатка с `main` всегда пиннит `image.tag=sha-<тот же коммит>`, а релизная
+  пара — OCI-чарт релиза + его образ. OCI-чарт публикуется только с релизного
+  тега (`needs: [test, helm, image]`), пуш в `main` даёт только образ
+  (`sha-<12>` + `latest`); в Helm-релизе видны обе версии — chart и app version
+  (`app.kubernetes.io/version`). Между релизами `Chart.version` не бампайте:
+  `main` несёт номер ближайшего релиза, бамп обоих полей — в релизном коммите
+  (опубликованные чарт-теги 0.2.0/0.3.0/0.6.0 старые, нумерация не должна
+  убывать: следующая пара — 0.7.0/0.7.0).
 - **Outbound-канал: «сейчас» в UI отстаёт на syncInterval.** Hub отдаёт UI и метрикам
   последний pushed-снапшот (по умолчанию каждые 3 s, плюс TTL провайдера 2 s), а не делает
   запрос на каждый скрейп. Молчащий дольше `max(3*syncInterval, 10 s)` spoke считается
@@ -481,7 +486,3 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
    `gofmt -l $(git diff --name-only main... -- '*.go')` пусто, новых зависимостей нет
    (`go list -m all` сверяется с `main`).
 6. **Не форматировать чужие файлы** и не запускать `gofmt -w ./...` — это конфликты
-   у всех остальных веток.
-7. **Документация:** README/AGENTS/architecture в feature-ветке не правятся; в описании
-   PR — готовый «doc snippet» (раздел, строки, текст), применяет интегратор.
-8. **Мелкие PR и мерж по одному** через интеграционную ветку; порядок мержа — §9 плана.

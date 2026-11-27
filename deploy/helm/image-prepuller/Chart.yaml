@@ -5,14 +5,22 @@ description: >-
   cookie auth, multi-cluster registry, Prometheus), an optional headless spoke
   backend and an optional per-node agent DaemonSet.
 type: application
-# Chart version. Bump on chart changes (docs/DEPLOY.md). A released chart has
-# version == appVersion (the build workflow enforces chart version == git tag);
-# while they differ the chart is an unreleased build and image.tag falls back to
-# "latest" instead of a version that does not exist yet (see templates/_helpers.tpl).
-version: 0.6.0
-# Application version. On a release tag it equals the chart version and is the
-# default image tag; bump it together with version when cutting a release.
-appVersion: "0.2.0"
+# Chart version. Bumped together with appVersion when cutting a release: the
+# release tag vX.Y.Z requires version == appVersion == X.Y.Z and CI refuses to
+# publish (image or chart) otherwise. The OCI chart is published only from a
+# release tag, so a chart in the registry always names the image of its own
+# release; main carries the version of the upcoming release.
+#
+# The published chart tags so far are 0.2.0, 0.3.0 and 0.6.0 (chart-only numbers
+# from before the version lines were unified), so the next release is 0.7.0.
+version: 0.7.0
+# Application version. It is also the default image tag (templates/_helpers.tpl)
+# and becomes the chart's app version in the Helm release
+# (app.kubernetes.io/version). Bump it in the same commit that gets tagged:
+# between releases it names the image of the last release, which can be older
+# than the chart from main — pin image.tag=sha-<commit> for those installs
+# (docs/DEPLOY.md 14.2).
+appVersion: "0.7.0"
 kubeVersion: ">=1.25.0-0"
 home: https://github.com/vasyakrg/image-prepuller
 sources:

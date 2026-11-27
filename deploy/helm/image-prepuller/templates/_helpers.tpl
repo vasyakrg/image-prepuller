@@ -45,18 +45,13 @@ app.kubernetes.io/managed-by: {{ .ctx.Release.Service }}
 {{- end }}
 
 {{/*
-Resolved image tag. Precedence: values.image.tag, then Chart.AppVersion for a
-released chart (version == appVersion), then "latest" for an unreleased chart
-whose appVersion has no image yet. Never renders an unresolved placeholder.
+Resolved image tag: values.image.tag, else Chart.AppVersion. Chart and app share
+one version line — CI requires version == appVersion == release tag — so
+appVersion always names the image published by that release instead of a moving
+"latest". Never renders an unresolved placeholder.
 */}}
 {{- define "ip.imageTag" -}}
-{{- if .Values.image.tag -}}
-{{- .Values.image.tag -}}
-{{- else if eq .Chart.Version .Chart.AppVersion -}}
-{{- .Chart.AppVersion -}}
-{{- else -}}
-latest
-{{- end -}}
+{{- default .Chart.AppVersion .Values.image.tag -}}
 {{- end }}
 
 {{/* Image reference. */}}

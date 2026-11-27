@@ -9,11 +9,9 @@ fullnameOverride: ""
 
 image:
   repository: ghcr.io/vasyakrg/image-prepuller
-  # Empty -> a concrete tag is resolved, never a placeholder:
-  #   * released chart (Chart.version == Chart.appVersion) -> that version;
-  #   * unreleased chart from main -> "latest", the newest build published by
-  #     .github/workflows/ci.yaml;
-  #   * values.image.tag set -> used verbatim.
+  # Empty -> Chart.appVersion, i.e. the image published by the same release tag
+  # (chart version == appVersion == vX.Y.Z). Never a placeholder and never a
+  # moving "latest"; values.image.tag wins when set.
   # Production should pin an immutable tag: the sha-<commit> of the same build
   # that produced the chart (docs/DEPLOY.md 14.2).
   tag: ""

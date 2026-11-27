@@ -60,6 +60,18 @@
   `latest` (с предупреждением в NOTES), явный тег — как есть.
 ### Changed
 
+- **Релизы — по полноценным тегам: чарт и приложение версионируются одной версией.**
+  `Chart.version == appVersion`, и релизный тег обязан совпасть с обоими
+  (`v0.7.0` → `0.7.0`): helm-гейт CI ловит расхождение уже на PR, job'ы `image`/`chart`
+  — на теге. В Helm-релизе видны обе версии: chart `0.7.0` и app version `0.7.0`
+  (`app.kubernetes.io/version`, `helm list`). Версии объединены на `0.7.0` —
+  опубликованные чарт-теги 0.2.0/0.3.0/0.6.0 остаются как есть, нумерация не убывает.
+  Значение `image.tag` по умолчанию — `Chart.AppVersion`; фолбэк на `latest` для
+  «нерелизного» чарта и соответствующее предупреждение в `NOTES` удалены (вместо него
+  `NOTES` напоминает пиннить `image.tag=sha-<commit>` при раскатке с `main`).
+  OCI-чарт публикуется только с релизного тега и только после образа
+  (`chart: needs: [test, helm, image]`); пуш в `main` публикует только образ
+  (`sha-<12>` + `latest`). Чек-лист релиза — docs/DEPLOY.md §13.
 - **Один CI-workflow вместо двух.** На GitHub и в Gitea теперь один workflow
   ([`.github/workflows/ci.yaml`](.github/workflows/ci.yaml) и его зеркало
   [`.gitea/workflows/ci.yaml`](.gitea/workflows/ci.yaml)): сначала гейты `test` и

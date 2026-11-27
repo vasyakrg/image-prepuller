@@ -208,6 +208,11 @@ jobs:
           echo "rendered hub-cluster: $(grep -c '^kind:' /tmp/hub-cluster.yaml) objects"
           echo "rendered managed-cluster: $(grep -c '^kind:' /tmp/managed-cluster.yaml) objects"
           echo "rendered spoke-outbound: $(grep -c '^kind:' /tmp/spoke-outbound.yaml) objects"
+          # The default image tag is Chart.appVersion, never a moving "latest".
+          app_version="$(awk '$1 == "appVersion:" {gsub(/"/, "", $2); print $2}' deploy/helm/image-prepuller/Chart.yaml)"
+          grep -q "image-prepuller:${app_version}" /tmp/default.yaml
+          ! grep -q "image-prepuller:latest" /tmp/default.yaml || { echo "default render uses a moving latest tag"; exit 1; }
+          echo "default image tag: ${app_version}"
 
       - name: validate rendered YAML
         run: |
@@ -224,6 +229,22 @@ jobs:
                   raise SystemExit(path + ": no manifests rendered")
               print(path + ": " + str(len(docs)) + " manifests OK")
           PY
+
+      # Chart and application share one version line (release tag vX.Y.Z requires
+      # version == appVersion == X.Y.Z); catching a mismatch on the PR is cheaper
+      # than failing the release tag check below.
+      - name: chart version matches appVersion
+        run: |
+          version="$(awk '$1 == "version:" {print $2}' deploy/helm/image-prepuller/Chart.yaml)"
+          app_version="$(awk '$1 == "appVersion:" {gsub(/"/, "", $2); print $2}' deploy/helm/image-prepuller/Chart.yaml)"
+          if [ -z "${version}" ] || [ -z "${app_version}" ]; then
+            echo "could not read version/appVersion from Chart.yaml"; exit 1
+          fi
+          if [ "${version}" != "${app_version}" ]; then
+            echo "Chart.yaml version ${version} != appVersion ${app_version}";
+            echo "bump both together: chart and application are released as one tag";
+            exit 1
+          fi
 
   image:
     # Pull requests validate only; pushes and manual runs build and publish.
@@ -308,8 +329,12 @@ jobs:
           exit 1
 
   chart:
-    needs: [test, helm]
-    if: github.event_name != 'pull_request'
+    # The chart is published only from a release tag, and only after the image of
+    # the same version is up: version, appVersion and the tag are one number
+    # (v0.7.0 -> 0.7.0), so a chart in the registry always names the image of its
+    # own release.
+    needs: [test, helm, image]
+    if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: read
       packages: write
@@ -330,42 +355,31 @@ jobs:
           HELM_USERNAME: ${{ github.actor }}
           HELM_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
 
+      # Chart.yaml is the single source of truth for both versions; the release
+      # tag only has to agree with it.
+      - name: Check Chart.yaml version and appVersion against the tag
+        run: |
+          set -eu
+          chart_version="$(awk '$1 == "version:" {print $2}' deploy/helm/image-prepuller/Chart.yaml)"
+          chart_app_version="$(awk '$1 == "appVersion:" {gsub(/"/, "", $2); print $2}' deploy/helm/image-prepuller/Chart.yaml)"
+          tag_version="${GITHUB_REF_NAME#v}"
+          echo "Chart.yaml: version=${chart_version} appVersion=${chart_app_version}; tag: ${GITHUB_REF_NAME}"
+          if [ "${chart_version}" != "${tag_version}" ]; then
+            echo "Chart.yaml version ${chart_version} does not match the release tag ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+          if [ "${chart_app_version}" != "${tag_version}" ]; then
+            echo "Chart.yaml appVersion ${chart_app_version} does not match the release tag ${GITHUB_REF_NAME}"
+            echo "chart and application share one version line: bump Chart.yaml version and appVersion together"
+            exit 1
+          fi
+
       - name: Package and push the chart
         run: |
           set -eu
-          chart_version="$(helm show chart deploy/helm/image-prepuller | awk '$1 == "version:" {print $2}')"
-          if [ -z "${chart_version}" ]; then
-            echo "could not read .version from Chart.yaml"; exit 1
-          fi
-          echo "chart version: ${chart_version}"
-
-          release="false"
-          case "${GITHUB_REF}" in
-            refs/tags/v*)
-              # A release tag must match the chart version; Chart.yaml itself is
-              # the single source of truth, so no --version override is needed.
-              tag_version="${GITHUB_REF_NAME#v}"
-              if [ "${chart_version}" != "${tag_version}" ]; then
-                echo "Chart.yaml version ${chart_version} does not match release tag ${GITHUB_REF_NAME}"
-                exit 1
-              fi
-              release="true"
-              ;;
-          esac
-
           mkdir -p /tmp/chart
           helm package deploy/helm/image-prepuller --destination /tmp/chart
           tgz="$(ls /tmp/chart/image-prepuller-*.tgz)"
           echo "packaged: ${tgz}"
-
-          # A release tag is authoritative and may republish its own version.
-          # A branch build publishes the Chart.yaml version only when it is new,
-          # so main never overwrites an already released chart tag.
-          if [ "${release}" != "true" ] \
-            && helm show chart "${CHART_OCI_REPO}/image-prepuller" --version "${chart_version}" >/dev/null 2>&1; then
-            echo "image-prepuller ${chart_version} is already published; not overwriting it"
-            exit 0
-          fi
-
           helm push "${tgz}" "${CHART_OCI_REPO}"
           echo "pushed ${tgz} to ${CHART_OCI_REPO}"

@@ -14,10 +14,9 @@
 
 image:
   repository: ghcr.io/vasyakrg/image-prepuller
-  # Empty -> the chart resolves a concrete tag: the chart version for a released
-  # chart, "latest" for an unreleased build from main. For production pin the
-  # sha-<commit> built from the SAME commit as the chart: a released 0.2.0 image
-  # predates the agent.pull.* flags and exits with
+  # Empty -> Chart.appVersion, the image of the same release. For production pin
+  # the sha-<commit> built from the SAME commit as the chart: a chart from main
+  # with an older image exits with
   # "flag provided but not defined: -pull-timeout" (docs/DEPLOY.md 14.2).
   # Left empty on purpose here: the chart resolves it.
   tag: ""

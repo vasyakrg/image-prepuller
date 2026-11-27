@@ -7,6 +7,11 @@
 # Project-local Go caches (GOCACHE=$PWD/.gocache, GOMODCACHE=$PWD/.gomodcache)
 /.gocache/
 /.gomodcache/
+# Project-local Helm caches (HELM_CACHE_HOME=$PWD/.helmcache, ...) for sandboxes
+# whose $HOME is read-only
+/.helmcache/
+/.helmconfig/
+/.helmdata/
 .gopath/
 .worktrees/
 .tools/

@@ -12,12 +12,12 @@ Only workloads that carry that label are listed, shown and warmed; label them or
 set hub.workloadSelector="" to manage every workload in the cluster.
 {{- end }}
 {{- end }}
-{{- if eq (include "ip.imageTag" .) "latest" }}
+{{- if not .Values.image.tag }}
 
-WARNING: image.tag resolved to "latest" (chart {{ .Chart.Version }} is newer than
-appVersion {{ .Chart.AppVersion }}, so no released image exists for it yet).
-That is a moving reference: pin image.tag to an immutable sha-<commit> for
-production installs (docs/DEPLOY.md 14.2).
+Image tag comes from Chart.appVersion {{ .Chart.AppVersion }} — the image of the
+same release. If this chart was taken from main between releases, pin
+image.tag=sha-<commit of the same build> instead: the chart may pass flags the
+appVersion image does not know (docs/DEPLOY.md 14.2).
 {{- end }}
 
 {{- if .Values.hub.enabled }}

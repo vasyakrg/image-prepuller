@@ -15,9 +15,9 @@
 
 image:
   repository: ghcr.io/vasyakrg/image-prepuller
-  # Empty -> the chart resolves a concrete tag (chart version for a release,
-  # "latest" for an unreleased build). Pin the sha-<commit> of the same build as
-  # the master cluster so both clusters run identical code (docs/DEPLOY.md 14.2).
+  # Empty -> Chart.appVersion, the image of the same release. Pin the
+  # sha-<commit> of the same build as the master cluster so both clusters run
+  # identical code (docs/DEPLOY.md 14.2).
   tag: ""
   pullPolicy: IfNotPresent
 

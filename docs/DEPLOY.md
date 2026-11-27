@@ -626,12 +626,18 @@ helm upgrade --install prepuller oci://ghcr.io/vasyakrg/charts/image-prepuller \
 Чек-лист релиза:
 
 1. `bash hack/e2e-k3d.sh` — сценарий приёмки на k3d выше должен пройти локально.
-2. `Chart.yaml` `version`/`appVersion` совпадают с тегом (`v0.2.0` → `0.2.0`);
-   workflow валит job чарта при несовпадении.
-3. `git tag v0.2.0 && git push origin v0.2.0` — собирает
-   `ghcr.io/…:0.2.0` (amd64+arm64) и пушит чарт.
-4. Проверка: `docker buildx imagetools inspect ghcr.io/vasyakrg/image-prepuller:0.2.0`
-   и `helm show chart oci://ghcr.io/vasyakrg/charts/image-prepuller --version 0.2.0`.
+2. Поднимите **одну** версию в `Chart.yaml`: `version` и `appVersion` обязаны
+   совпадать (`0.7.0`/`0.7.0`) — helm-гейт CI валит PR на расхождении. Один номер
+   у чарта и приложения: `appVersion` — это и образ по умолчанию, и app version
+   в Helm-релизе (`helm list` покажет chart `0.7.0`, app version `0.7.0`).
+3. `git tag v0.7.0 && git push origin v0.7.0` — сначала гейты `test`+`helm`,
+   затем образ `ghcr.io/vasyakrg/image-prepuller:0.7.0` (amd64+arm64) и, только
+   после успешного пуша образа, OCI-чарт `0.7.0`. Чарт публикуется исключительно
+   с релизного тега, и job `chart` проверяет, что `version`/`appVersion`
+   совпадают с тегом. Пуш в `main` публикует только образ (`sha-<12>` + `latest`).
+4. Проверка: `docker buildx imagetools inspect ghcr.io/vasyakrg/image-prepuller:0.7.0`
+   и `helm show chart oci://ghcr.io/vasyakrg/charts/image-prepuller --version 0.7.0`
+   (в выводе `version: 0.7.0` и `appVersion: 0.7.0`).
 
 ## 14. Первый прод-кластер (Talos)
 
@@ -680,12 +686,11 @@ flag provided but not defined: -pull-timeout
 | чарт из этого репозитория на коммите + ```image.tag=sha-<same commit>``` | текущий код, гигиена pull'ов включена — **используйте это для первой раскатки** |
 | опубликованный OCI-чарт релиза + его образ | согласованная релизная пара; образ из релиза может быть старше кода |
 
-Если ```image.tag``` не задан, чарт подставляет конкретный тег сам, без
-незаполненных заглушек:
-
-- релизный чарт (```Chart.version == Chart.appVersion```) → эта версия;
-- чарт из ```main``` (версия уже поднята, ```appVersion``` ещё нет) → ```latest```,
-  то есть последняя опубликованная сборка; в ```NOTES``` установки будет предупреждение.
+Если ```image.tag``` не задан, чарт подставляет ```Chart.appVersion``` —
+версию образа того же релиза (чарт, приложение и тег нумеруются одним числом).
+Фолбэка на ```latest``` в чарте больше нет, поэтому чарт, собранный из
+```main``` между релизами, по умолчанию ставит образ **последнего релиза**, а он
+может быть старше кода, — в ```NOTES``` установки об этом напоминание.
 
 Берите тег ```sha-*``` того коммита, который деплоите; ```latest``` — движущаяся
 ссылка, для продакшена не годится. Правило согласованности простое: чарт и образ

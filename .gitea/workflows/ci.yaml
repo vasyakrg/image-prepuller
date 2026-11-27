@@ -196,6 +196,11 @@ jobs:
           echo "rendered hub-cluster: $(grep -c '^kind:' /tmp/hub-cluster.yaml) objects"
           echo "rendered managed-cluster: $(grep -c '^kind:' /tmp/managed-cluster.yaml) objects"
           echo "rendered spoke-outbound: $(grep -c '^kind:' /tmp/spoke-outbound.yaml) objects"
+          # The default image tag is Chart.appVersion, never a moving "latest".
+          app_version="$(awk '$1 == "appVersion:" {gsub(/"/, "", $2); print $2}' deploy/helm/image-prepuller/Chart.yaml)"
+          grep -q "image-prepuller:${app_version}" /tmp/default.yaml
+          ! grep -q "image-prepuller:latest" /tmp/default.yaml || { echo "default render uses a moving latest tag"; exit 1; }
+          echo "default image tag: ${app_version}"
 
       - name: validate rendered YAML
         run: |
@@ -213,6 +218,21 @@ jobs:
               print(path + ": " + str(len(docs)) + " manifests OK")
           PY
 
+      # Chart and application share one version line (release tag vX.Y.Z requires
+      # version == appVersion == X.Y.Z); catching a mismatch on the PR is cheaper
+      # than failing the release tag check below.
+      - name: chart version matches appVersion
+        run: |
+          version="$(awk '$1 == "version:" {print $2}' deploy/helm/image-prepuller/Chart.yaml)"
+          app_version="$(awk '$1 == "appVersion:" {gsub(/"/, "", $2); print $2}' deploy/helm/image-prepuller/Chart.yaml)"
+          if [ -z "${version}" ] || [ -z "${app_version}" ]; then
+            echo "could not read version/appVersion from Chart.yaml"; exit 1
+          fi
+          if [ "${version}" != "${app_version}" ]; then
+            echo "Chart.yaml version ${version} != appVersion ${app_version}";
+            echo "bump both together: chart and application are released as one tag";
+            exit 1
+          fi
   image:
     # PRs validate only; pushes build and publish.
     if: github.event_name != 'pull_request'
@@ -260,6 +280,17 @@ jobs:
           if [ "${REGISTRY_INSECURE:-false}" = "true" ]; then
             insecure="--allow-insecure-registry"
           fi
+          # sha-<12> always; latest follows main; a release tag adds its version
+          # (v0.7.0 -> 0.7.0) so image, chart and Helm app version agree.
+          tags="--tag ${registry}/${IMAGE}:${SHORT_SHA}"
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            tags="${tags} --tag ${registry}/${IMAGE}:latest"
+          fi
+          case "${GITHUB_REF}" in
+            refs/tags/v*)
+              tags="${tags} --tag ${registry}/${IMAGE}:${GITHUB_REF_NAME#v}"
+              ;;
+          esac
           docker buildx build $insecure \
             --platform linux/amd64,linux/arm64 \
             --build-arg VERSION="${VERSION}" \
@@ -269,8 +300,7 @@ jobs:
             --label "org.opencontainers.image.revision=${COMMIT}" \
             --cache-from "type=registry,ref=${registry}/${IMAGE}:buildcache" \
             --cache-to "type=registry,ref=${registry}/${IMAGE}:buildcache,mode=max" \
-            --tag "${registry}/${IMAGE}:${SHORT_SHA}" \
-            --tag "${registry}/${IMAGE}:latest" \
+            $tags \
             --push \
             .
         env:
@@ -305,10 +335,11 @@ jobs:
           SHORT_SHA: ${{ steps.meta.outputs.sha }}
 
   chart:
-    # Optional: publish the Helm chart as an OCI artifact. Skipped when
-    # CHART_OCI_REPO is empty or the event is a pull request.
-    if: github.event_name != 'pull_request' && vars.CHART_OCI_REPO != ''
-    needs: [test, helm]
+    # The chart is published only from a release tag, and only after the image of
+    # the same version is up: version, appVersion and the tag are one number
+    # (v0.7.0 -> 0.7.0). Skipped when CHART_OCI_REPO is empty.
+    if: startsWith(github.ref, 'refs/tags/v') && vars.CHART_OCI_REPO != ''
+    needs: [test, helm, image]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -321,6 +352,22 @@ jobs:
             --password-stdin
         env:
           REGISTRY: ${{ vars.REGISTRY }}
+
+      - name: Check Chart.yaml version and appVersion against the tag
+        run: |
+          set -eu
+          chart_version="$(awk '$1 == "version:" {print $2}' deploy/helm/image-prepuller/Chart.yaml)"
+          chart_app_version="$(awk '$1 == "appVersion:" {gsub(/"/, "", $2); print $2}' deploy/helm/image-prepuller/Chart.yaml)"
+          tag_version="${GITHUB_REF_NAME#v}"
+          echo "Chart.yaml: version=${chart_version} appVersion=${chart_app_version}; tag: ${GITHUB_REF_NAME}"
+          if [ "${chart_version}" != "${tag_version}" ]; then
+            echo "Chart.yaml version ${chart_version} does not match the release tag ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+          if [ "${chart_app_version}" != "${tag_version}" ]; then
+            echo "Chart.yaml appVersion ${chart_app_version} does not match the release tag ${GITHUB_REF_NAME}"
+            exit 1
+          fi
 
       - name: Package and push the chart
         run: |

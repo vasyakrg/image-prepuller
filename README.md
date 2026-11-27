@@ -361,8 +361,9 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
 Пошаговый runbook (DNS, TLS, проверки с ожидаемыми числами, особенности Talos:
 `imageFSCapacityBytes=0`, зеркала docker.io, порты 9443/9444 на нодах) — в
 [docs/DEPLOY.md §14](docs/DEPLOY.md#14-первый-прод-кластер-talos). Важно:
-`image.tag` — `sha-*` сборка того же коммита, что и чарт; релизный образ
-`0.2.0` не знает флагов `agent.pull.*` и падает в `CrashLoopBackOff` (см. §14.2).
+`image.tag` — `sha-*` сборка того же коммита, что и чарт; чарт из `main` с
+образом прошлого релиза может не знать новых флагов `agent.pull.*` и упасть в
+`CrashLoopBackOff` (см. §14.2).
 
 ## Флаги
 
