@@ -2,12 +2,12 @@
   "schema_version": 1,
   "diagram_type": "architecture",
   "meta": {
-    "title": "Image Prepuller: образ на каждом воркере — поды стартуют из кэша",
+    "title": "Image Prepuller: два кластера, тестовый деплоймент и образ, прогретый на всех воркерах",
     "quality_profile": "showcase",
     "output": "docs/diagrams/image-prepuller-overview.html",
     "viewBox": [
-      1360,
-      640
+      1340,
+      620
     ],
     "legend": {
       "mode": "hidden"
@@ -15,13 +15,139 @@
   },
   "components": [
     {
+      "id": "hub",
+      "type": "backend",
+      "label": "hub",
+      "sublabel": "Web UI · Prometheus",
+      "pos": [
+        656,
+        100
+      ],
+      "size": [
+        140,
+        80
+      ]
+    },
+    {
       "id": "registry",
       "type": "external",
       "label": "Container registry",
-      "sublabel": "ghcr.io · registry.internal",
+      "sublabel": "ghcr.io · слои",
       "pos": [
-        740,
-        20
+        656,
+        280
+      ],
+      "size": [
+        140,
+        80
+      ]
+    },
+    {
+      "id": "deployA",
+      "type": "backend",
+      "label": "Deployment api-gateway",
+      "sublabel": "image 1.14.2 · 2 реплики",
+      "pos": [
+        40,
+        100
+      ],
+      "size": [
+        230,
+        80
+      ]
+    },
+    {
+      "id": "spokeA",
+      "type": "backend",
+      "label": "spoke",
+      "sublabel": "K8sProvider · :8080",
+      "pos": [
+        382,
+        100
+      ],
+      "size": [
+        230,
+        80
+      ]
+    },
+    {
+      "id": "agentA",
+      "type": "backend",
+      "label": "node-agent",
+      "sublabel": "DaemonSet · на каждой ноде · CRI :9443",
+      "pos": [
+        40,
+        280
+      ],
+      "size": [
+        572,
+        80
+      ]
+    },
+    {
+      "id": "wA1",
+      "type": "backend",
+      "label": "talos-worker-01",
+      "sublabel": "present · 1.14.2",
+      "pos": [
+        40,
+        450
+      ],
+      "size": [
+        130,
+        110
+      ]
+    },
+    {
+      "id": "wA2",
+      "type": "backend",
+      "label": "talos-worker-02",
+      "sublabel": "present · 1.14.2",
+      "pos": [
+        187,
+        450
+      ],
+      "size": [
+        130,
+        110
+      ]
+    },
+    {
+      "id": "wA3",
+      "type": "backend",
+      "label": "talos-worker-03",
+      "sublabel": "present · 1.14.2",
+      "pos": [
+        334,
+        450
+      ],
+      "size": [
+        130,
+        110
+      ]
+    },
+    {
+      "id": "wA4",
+      "type": "security",
+      "label": "talos-worker-04",
+      "sublabel": "offline · NotReady",
+      "pos": [
+        482,
+        450
+      ],
+      "size": [
+        130,
+        110
+      ]
+    },
+    {
+      "id": "spokeB",
+      "type": "backend",
+      "label": "spoke",
+      "sublabel": "K8sProvider · :8080",
+      "pos": [
+        840,
+        100
       ],
       "size": [
         200,
@@ -29,145 +155,200 @@
       ]
     },
     {
-      "id": "hub",
+      "id": "deployB",
       "type": "backend",
-      "label": "hub",
-      "sublabel": "Web UI · матрица image × node",
+      "label": "Deployment api-gateway",
+      "sublabel": "image 1.14.2 · 2 реплики",
       "pos": [
-        24,
-        80
+        1070,
+        100
       ],
       "size": [
-        180,
-        90
+        230,
+        80
       ]
     },
     {
-      "id": "agent",
+      "id": "agentB",
       "type": "backend",
       "label": "node-agent",
       "sublabel": "DaemonSet · на каждой ноде · CRI :9443",
       "pos": [
-        384,
-        170
+        840,
+        280
       ],
       "size": [
-        912,
-        70
+        460,
+        80
       ]
     },
     {
-      "id": "worker01",
+      "id": "wB1",
       "type": "backend",
-      "label": "talos-worker-01",
-      "sublabel": "present · api-gateway 1.14.2",
+      "label": "talos-stage-01",
+      "sublabel": "present · 1.14.2",
       "pos": [
-        384,
+        840,
         450
       ],
       "size": [
-        210,
-        120
+        130,
+        110
       ]
     },
     {
-      "id": "worker02",
+      "id": "wB2",
       "type": "backend",
-      "label": "talos-worker-02",
-      "sublabel": "present · api-gateway 1.14.2",
+      "label": "talos-stage-02",
+      "sublabel": "present · 1.14.2",
       "pos": [
-        618,
+        1005,
         450
       ],
       "size": [
-        210,
-        120
+        130,
+        110
       ]
     },
     {
-      "id": "worker03",
+      "id": "wB3",
       "type": "backend",
-      "label": "talos-worker-03",
-      "sublabel": "present · api-gateway 1.14.2",
+      "label": "talos-stage-03",
+      "sublabel": "present · 1.14.2",
       "pos": [
-        852,
+        1170,
         450
       ],
       "size": [
-        210,
-        120
-      ]
-    },
-    {
-      "id": "worker04",
-      "type": "security",
-      "label": "talos-worker-04",
-      "sublabel": "offline · нода NotReady",
-      "pos": [
-        1086,
-        450
-      ],
-      "size": [
-        210,
-        120
+        130,
+        110
       ]
     }
   ],
   "boundaries": [
     {
       "kind": "region",
-      "label": "Кластер talos-prod-eu · 4 worker-ноды",
+      "label": "Кластер talos-prod-kz · 4 worker-ноды",
       "wraps": [
-        "agent",
-        "worker01",
-        "worker02",
-        "worker03",
-        "worker04"
+        "spokeA",
+        "deployA",
+        "agentA",
+        "wA1",
+        "wA2",
+        "wA3",
+        "wA4"
+      ],
+      "pad": 28
+    },
+    {
+      "kind": "region",
+      "label": "Кластер talos-stage-ru · 3 worker-ноды",
+      "wraps": [
+        "spokeB",
+        "deployB",
+        "agentB",
+        "wB1",
+        "wB2",
+        "wB3"
       ],
       "pad": 28
     }
   ],
   "connections": [
     {
-      "from": "registry",
-      "to": "agent",
-      "label": "pull слоёв",
-      "variant": "emphasis",
-      "labelAt": [
-        840,
-        120
-      ]
-    },
-    {
       "from": "hub",
-      "to": "agent",
-      "label": "snapshot · trigger pull",
+      "to": "spokeA",
+      "fromSide": "left",
+      "toSide": "right",
       "variant": "emphasis"
     },
     {
-      "from": "agent",
-      "to": "worker01",
+      "from": "hub",
+      "to": "spokeB",
+      "fromSide": "right",
+      "toSide": "left",
+      "variant": "emphasis"
+    },
+    {
+      "from": "registry",
+      "to": "agentA",
+      "fromSide": "left",
+      "toSide": "right"
+    },
+    {
+      "from": "registry",
+      "to": "agentB",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "from": "spokeA",
+      "to": "agentA",
+      "label": "snapshot · trigger pull",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "spokeB",
+      "to": "agentB",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "spokeA",
+      "to": "deployA",
+      "label": "list Deployments",
+      "fromSide": "left",
+      "toSide": "right"
+    },
+    {
+      "from": "spokeB",
+      "to": "deployB",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "from": "agentA",
+      "to": "wA1",
       "label": "pull · inventory",
       "fromSide": "bottom",
       "toSide": "top"
     },
     {
-      "from": "agent",
-      "to": "worker02",
+      "from": "agentA",
+      "to": "wA2",
       "fromSide": "bottom",
       "toSide": "top"
     },
     {
-      "from": "agent",
-      "to": "worker03",
+      "from": "agentA",
+      "to": "wA3",
       "fromSide": "bottom",
       "toSide": "top"
     },
     {
-      "from": "agent",
-      "to": "worker04",
+      "from": "agentA",
+      "to": "wA4",
       "label": "сбой: pull на ноде не идёт",
       "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "agentB",
+      "to": "wB1",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "agentB",
+      "to": "wB2",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "agentB",
+      "to": "wB3",
       "fromSide": "bottom",
       "toSide": "top"
     }
@@ -175,29 +356,29 @@
   "cards": [
     {
       "dot": "cyan",
-      "title": "Суть: образ лежит на каждой ноде",
+      "title": "Два кластера, один hub",
       "items": [
-        "hub читает Deployment, StatefulSet, DaemonSet и Node из Kubernetes API и строит слоты image × node",
-        "node-agent на каждой ноде тянет недостающие слои через CRI: кэш containerd свой у каждой ноды",
-        "матрица image × node показывает покрытие: PRESENT, MISSING, PULLING, FAILED, PAUSED_DISK, OFFLINE"
+        "hub держит для каждого кластера свою матрицу image × node и ходит в spoke по contract v2 (Bearer)",
+        "в кластере свой spoke с K8sProvider и свой node-agent DaemonSet: prod и stage не делят ни кэш, ни токен",
+        "тестовый Deployment api-gateway (image 1.14.2, 2 реплики) — то, под что греется кэш"
       ]
     },
     {
       "dot": "emerald",
-      "title": "Что это даёт команде",
+      "title": "Образ прогрет на всех воркерах",
       "items": [
-        "под стартует из локального кэша — без ожидания pull при выкатке и массовом рестарте",
-        "registry перестаёт быть узким местом: слои не тянутся одновременно с сотен подов",
-        "нода с прогретым образом отдаёт поды в офлайне — если тег иммутабельный и imagePullPolicy IfNotPresent"
+        "6 из 7 нод показывают PRESENT: под api-gateway стартует из локального кэша containerd, без pull при выкатке",
+        "coverage = present / total считается в провайдере по каждому кластеру, UI только отображает слоты",
+        "stage прогрет целиком, поэтому проверка новой версии не упирается в registry"
       ]
     },
     {
       "dot": "rose",
-      "title": "Пример отказа: talos-worker-04",
+      "title": "talos-worker-04 упала в prod",
       "items": [
-        "нода NotReady → агент недоступен → все её слоты image × node уходят в OFFLINE",
-        "покрытие падает до 3 из 4 нод, снапшот partial, ошибка видна на hub: prepuller_node_agent_errors_total",
-        "pull на упавшей ноде не идёт; остальные ноды не тронуты, после возврата ноды reconcile дотягивает слоты"
+        "нода NotReady → агент не отвечает → слот image × node уходит в OFFLINE, снапшот prod становится partial",
+        "видно на hub: prepuller_node_agent_errors_total{cluster=\"talos-prod-kz\",node=\"talos-worker-04\"}",
+        "stage не затронут; после возврата ноды reconcile дотягивает недостающий слой"
       ]
     }
   ]

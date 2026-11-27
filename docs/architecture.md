@@ -59,8 +59,9 @@ flowchart LR
     MH --> RG
 ```
 
-Интерактивная схема продукта — образ на каждом воркере, матрица `image × node`
-и пример отказа ноды:
+Интерактивная схема продукта — два кластера (`talos-prod-kz`, `talos-stage-ru`), наш
+софт в каждом, тестовый Deployment, матрица `image × node` с прогретым на всех воркерах
+образом и пример отказа ноды:
 [docs/diagrams/image-prepuller-overview.html](diagrams/image-prepuller-overview.html)
 (исходник — `docs/diagrams/image-prepuller-overview.json`, PNG для README —
 `docs/diagrams/image-prepuller-overview.png`). Mermaid-схемы ниже остаются
