@@ -644,8 +644,8 @@ k3d cluster delete prepuller
 
 | Артефакт | Ссылка для v1.1.0 | Digest |
 | --- | --- | --- |
-| image | `ghcr.io/vasyakrg/image-prepuller:1.1.0` (multi-arch amd64+arm64; плюс `sha-<12>`; `latest` следует за `main`) | записывается после публикации (п. 5) |
-| chart | `oci://ghcr.io/vasyakrg/charts/image-prepuller` версия `1.1.0` | записывается после публикации (п. 5) |
+| image | `ghcr.io/vasyakrg/image-prepuller:1.1.0` (multi-arch amd64+arm64; плюс `sha-<12>`; `latest` следует за `main`) | `sha256:4071ffe80f7038382ad588042eee1392253554e28d0590afa856653c642fdbbe` (OCI index) |
+| chart | `oci://ghcr.io/vasyakrg/charts/image-prepuller` версия `1.1.0` | `sha256:7fd59e97e9200e15fdc31d3f54820f2e23d9a5b145c8788edea19c87d557e209` |
 
 Digest'ы соответствуют публикации с тега `v1.1.0`; проверить самому:
 `docker buildx imagetools inspect ghcr.io/vasyakrg/image-prepuller:1.1.0` и
