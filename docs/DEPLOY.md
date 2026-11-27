@@ -642,12 +642,12 @@ k3d cluster delete prepuller
 Публикация стоит после гейтов: джобы `image`/`chart` объявлены с
 `needs: [test, helm]`, поэтому образ не собирается из красного коммита.
 
-| Артефакт | Ссылка для v1.0.0 |
-| --- | --- |
-| image | `ghcr.io/vasyakrg/image-prepuller:1.0.0` (multi-arch amd64+arm64; плюс `sha-<12>`; `latest` следует за `main`) |
-| chart | `oci://ghcr.io/vasyakrg/charts/image-prepuller` версия `1.0.0` |
+| Артефакт | Ссылка для v1.0.0 | Digest |
+| --- | --- | --- |
+| image | `ghcr.io/vasyakrg/image-prepuller:1.0.0` (multi-arch amd64+arm64; плюс `sha-<12>`; `latest` следует за `main`) | `sha256:4625b2600b15a1f4906bff97d3772d069628db6cf128c2100eb902bd4aec0596` (OCI index) |
+| chart | `oci://ghcr.io/vasyakrg/charts/image-prepuller` версия `1.0.0` | `sha256:220bbbe58b0147fc8901efffc0a3f66cb384122f953cb2404324e84cc392a8cb` |
 
-Digest конкретной публикации смотрите на GitHub Packages либо запросом
+Digest'ы соответствуют публикации с тега `v1.0.0`; проверить самому:
 `docker buildx imagetools inspect ghcr.io/vasyakrg/image-prepuller:1.0.0` и
 `helm show chart oci://ghcr.io/vasyakrg/charts/image-prepuller --version 1.0.0`.
 
