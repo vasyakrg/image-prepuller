@@ -12,8 +12,9 @@ import (
 )
 
 // Version is reported to the hub in Snapshot.AgentVersion and in the
-// prepuller_agent_build_info metric.
-const Version = "0.2.0-dev"
+// prepuller_agent_build_info metric. It follows the release line
+// (Chart.yaml appVersion): main carries the version of the upcoming release.
+const Version = "1.0.0"
 
 // Pull timing defaults. They are the answer to "a pull into a dead registry
 // must not hold a slot for ten minutes": the registry probe fails a black-holed

@@ -1,6 +1,14 @@
 # Overlay: MASTER cluster — hub (Web UI + API + Prometheus) plus a node agent on
 # every node. This is the cluster you open in the browser.
 #
+# On top of the chart defaults it fixes the Talos layout (ingress + cert-manager,
+# a control-plane toleration), documents both ways to register a managed cluster,
+# and spells out the two hub-side data features: the bounded pull-task history
+# (on, paginated through GET /api/v1/pull-tasks) and the optional PostgreSQL
+# statistics pipeline (off here; docs/DEPLOY.md 14.12). The chart generates the
+# Secrets it needs; the production alternative (a pre-created Secret) is spelled
+# out under secret: below.
+#
 # This repository is PUBLIC: real hostnames, IPs, issuer names and pinned image
 # tags belong in the private GitOps repository. Copy this file there and replace
 # the placeholders; do not commit the filled-in copy here.
@@ -22,6 +30,35 @@ image:
   tag: ""
   pullPolicy: IfNotPresent
 
+# The hub lists Nodes and workloads through the Kubernetes API, and "get" on
+# Secrets is what lets it resolve the imagePullSecrets of the workloads it warms.
+# A node agent pulls through CRI, which never applies a pod's imagePullSecrets,
+# so without that credential a private registry answers an anonymous 403 and the
+# image stays missing on every node whose kubelet has not pulled it by chance.
+# The chart grants only "get" (the controller never lists or writes Secrets);
+# this is also the chart default. Set it to false when cluster policy forbids
+# reading Secrets: such pulls then fail as registry-auth errors instead.
+rbac:
+  readSecrets: true
+
+secret:
+  # Chart-managed Secret, so this file carries no credentials: the auth password,
+  # session secret and cluster/agent tokens are generated on install and reused
+  # from the live Secret on upgrade (stable sessions, stable spoke tokens).
+  #
+  # Production instead owns the Secret outside this release: create it once with
+  # the keys auth-user, auth-pass, session-secret, cluster-token, agent-token and
+  # (for outbound clusters) the optional managed-clusters, then set
+  # create: false + existingSecret: <name>. Nothing sensitive then sits in values
+  # or in the Helm release history, and an upgrade can never silently rotate a
+  # value — a new session-secret logs everyone out, a new cluster-token cuts off
+  # the outbound spokes whose hub.managedClusters entry still carries the old one.
+  # Read an auto-generated value back with:
+  #   kubectl -n prepuller get secret prepuller-image-prepuller-secret \
+  #     -o jsonpath='{.data.cluster-token}' | base64 -d
+  create: true
+  existingSecret: ""
+
 hub:
   enabled: true
   replicaCount: 1
@@ -31,6 +68,22 @@ hub:
   # large batch of pulls. Turn it on after the snapshot has been checked
   # (docs/DEPLOY.md 14.7).
   autoWarm: false
+  # Bounded pull-task history served by GET /api/v1/pull-tasks with
+  # limit/offset/state, kept by the hub for every cluster (docs/DEPLOY.md 14.11).
+  # The provider snapshot only holds the last ~200 tasks, which is too little to
+  # explain an incident an hour later; the history is the hub's own JSONL file.
+  # It is enabled by the chart, explicit here because it needs a volume: the hub
+  # runs with readOnlyRootFilesystem, so without the mount below the store would
+  # fall back to memory only.
+  pullHistory:
+    enabled: true
+    # Tasks kept across all clusters; an active pull is never evicted.
+    limit: 2000
+    # Empty -> emptyDir (chart sizeLimit 256Mi): best effort, the file survives a
+    # container restart but not a pod reschedule. Set a pre-created PVC name for
+    # durable history; it is mounted read-write at /var/lib/prepuller, so it must
+    # be writable by uid/gid 65532 (the distroless nonroot image).
+    existingClaim: ""
   cookieSecure: true
   # The hub is the only component with an ingress; it exposes the UI/API.
   ingress:
@@ -58,16 +111,48 @@ hub:
   # (deploy/values/managed-cluster.yaml). Read it on the managed cluster with:
   #   kubectl -n prepuller get secret prepuller-image-prepuller-secret \
   #     -o jsonpath='{.data.cluster-token}' | base64 -d
-  # Then paste it here, e.g.:
+  # The chart renders this list as the "managed-clusters" key of its Secret. With
+  # a pre-created Secret (secret.create=false) it renders nothing, so put exactly
+  # this string under managed-clusters there instead; either way keep the real
+  # token out of the values file:
   #   managedClusters: "talos-prod-kz=<cluster token of the managed release>"
-  # Prefer a pre-created Secret in production (secret.existingSecret with the
-  # same "managed-clusters" key) instead of storing the token in a values file.
   managedClusters: "talos-prod-kz=<cluster token of the managed release>"
   # Direct ("push") / legacy mode: the hub calls the spoke itself, so the hub
   # must be able to reach that URL (shared cluster network or a route into the
   # managed cluster). Format: "<name>=<url>=<cluster-token>". Leave empty to use
   # outbound mode only.
   remoteClusters: ""
+  # Optional PostgreSQL statistics (docs/DEPLOY.md 14.12,
+  # docs/adr/0002-postgres-statistics.md). On every interval the hub samples each
+  # cluster and writes into the external database what Prometheus only shows as
+  # "now": image lifetimes on nodes, image-collector (GC) runs, the lag between
+  # an image being removed and pulled again, and a log of every pull task.
+  # Off by default: with no DSN there is no writer goroutine and no connection,
+  # and the hub never waits for PostgreSQL — a database outage is logged and the
+  # same diff is retried on the next sample, so UI, metrics and pulls are
+  # unaffected. Turn it on when you need history rather than a snapshot.
+  #
+  # enabled: true without a DSN fails the render on purpose: switching the
+  # pipeline on is an explicit operator decision, not a silent no-op.
+  stats:
+    enabled: false
+    # The DSN carries the database password: never put a real one here or in any
+    # values file — this repository is public and values are stored in the Helm
+    # release history. Leave dsn empty and use existingSecret below.
+    dsn: ""
+    # Secret with the DSN under hub.stats.secretKey. Create it once, e.g.:
+    #   kubectl -n prepuller create secret generic prepuller-pg \
+    #     --from-literal=stats-dsn='postgres://prepuller:<password>@<db-host>:5432/prepuller?sslmode=require'
+    # then set enabled: true. The schema is created on the first connection, so
+    # the user needs CREATE in the schema plus INSERT/SELECT/DELETE on the tables.
+    existingSecret: prepuller-pg
+    secretKey: stats-dsn
+    # Sampling interval, row retention and prune cadence (PREPULLER_STATS_*);
+    # snapshotTimeout and other knobs stay at the chart defaults. Sizes here are
+    # an example: 90 days of samples pruned once a day.
+    interval: 30s
+    retention: 2160h
+    pruneInterval: 24h
   # Only workloads opted in with this label are listed, shown in the UI and
   # warmed. Set it to "" to manage every workload in the cluster instead.
   workloadSelector: "prepull=true"

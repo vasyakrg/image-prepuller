@@ -17,7 +17,7 @@ node-agent на каждой ноде. Для in-memory демо без Kubernet
 - [10. Upgrade и откат](#10-upgrade-и-откат)
 - [11. Удаление](#11-удаление)
 - [12. e2e-смоук на k3d](#12-e2e-смоук-на-k3d)
-- [13. Релизные артефакты (v0.2.0)](#13-релизные-артефакты-v020)
+- [13. Релизные артефакты (v1.0.0)](#13-релизные-артефакты-v100)
 - [14. Первый прод-кластер (Talos)](#14-первый-прод-кластер-talos)
 
 ## 1. Что деплоится
@@ -634,7 +634,7 @@ k3d cluster delete prepuller
 > `Node.InternalIP:9443`), поэтому NetworkPolicy к нему не применяется; при
 > необходимости закройте порт 9443 фаерволом ноды.
 
-## 13. Релизные артефакты (v0.2.0)
+## 13. Релизные артефакты (v1.0.0)
 
 Образ и Helm-чарт публикуются в GHCR workflow `.github/workflows/ci.yaml`
 по тегу `v*` или пушу в `main` — на встроенном `GITHUB_TOKEN`
@@ -642,10 +642,14 @@ k3d cluster delete prepuller
 Публикация стоит после гейтов: джобы `image`/`chart` объявлены с
 `needs: [test, helm]`, поэтому образ не собирается из красного коммита.
 
-| Артефакт | Ссылка для v0.2.0 | Digest |
-| --- | --- | --- |
-| image | `ghcr.io/vasyakrg/image-prepuller:0.2.0` (multi-arch amd64+arm64; плюс `sha-<12>`; `latest` следует за `main`) | `sha256:5f5527aa5d070d1889b29894faf604e2347d036522256053237668b1913b7fca` |
-| chart | `oci://ghcr.io/vasyakrg/charts/image-prepuller` версия `0.2.0` | `sha256:ad84a3f3137cbdfa3e1d97b72f0476e82ad87c4355de56cc9c0d6ed96a27532f` |
+| Артефакт | Ссылка для v1.0.0 |
+| --- | --- |
+| image | `ghcr.io/vasyakrg/image-prepuller:1.0.0` (multi-arch amd64+arm64; плюс `sha-<12>`; `latest` следует за `main`) |
+| chart | `oci://ghcr.io/vasyakrg/charts/image-prepuller` версия `1.0.0` |
+
+Digest конкретной публикации смотрите на GitHub Packages либо запросом
+`docker buildx imagetools inspect ghcr.io/vasyakrg/image-prepuller:1.0.0` и
+`helm show chart oci://ghcr.io/vasyakrg/charts/image-prepuller --version 1.0.0`.
 
 Оба пакета **публичные** — pull образа или чарта не требует кредов (проверено
 анонимно). Если сделаете их приватными в настройках пакетов GitHub, добавьте
@@ -653,7 +657,7 @@ k3d cluster delete prepuller
 
 ```bash
 helm upgrade --install prepuller oci://ghcr.io/vasyakrg/charts/image-prepuller \
-  --version 0.2.0 --namespace prepuller --create-namespace \
+  --version 1.0.0 --namespace prepuller --create-namespace \
   --set secret.auth.user=admin --set secret.auth.password='...' \
   --set secret.sessionSecret="$(openssl rand -hex 32)"
 ```
@@ -669,17 +673,17 @@ helm upgrade --install prepuller oci://ghcr.io/vasyakrg/charts/image-prepuller \
 
 1. `bash hack/e2e-k3d.sh` — сценарий приёмки на k3d выше должен пройти локально.
 2. Поднимите **одну** версию в `Chart.yaml`: `version` и `appVersion` обязаны
-   совпадать (`0.7.0`/`0.7.0`) — helm-гейт CI валит PR на расхождении. Один номер
+   совпадать (`1.0.0`/`1.0.0`) — helm-гейт CI валит PR на расхождении. Один номер
    у чарта и приложения: `appVersion` — это и образ по умолчанию, и app version
-   в Helm-релизе (`helm list` покажет chart `0.7.0`, app version `0.7.0`).
-3. `git tag v0.7.0 && git push origin v0.7.0` — сначала гейты `test`+`helm`,
-   затем образ `ghcr.io/vasyakrg/image-prepuller:0.7.0` (amd64+arm64) и, только
-   после успешного пуша образа, OCI-чарт `0.7.0`. Чарт публикуется исключительно
+   в Helm-релизе (`helm list` покажет chart `1.0.0`, app version `1.0.0`).
+3. `git tag v1.0.0 && git push origin v1.0.0` — сначала гейты `test`+`helm`,
+   затем образ `ghcr.io/vasyakrg/image-prepuller:1.0.0` (amd64+arm64) и, только
+   после успешного пуша образа, OCI-чарт `1.0.0`. Чарт публикуется исключительно
    с релизного тега, и job `chart` проверяет, что `version`/`appVersion`
    совпадают с тегом. Пуш в `main` публикует только образ (`sha-<12>` + `latest`).
-4. Проверка: `docker buildx imagetools inspect ghcr.io/vasyakrg/image-prepuller:0.7.0`
-   и `helm show chart oci://ghcr.io/vasyakrg/charts/image-prepuller --version 0.7.0`
-   (в выводе `version: 0.7.0` и `appVersion: 0.7.0`).
+4. Проверка: `docker buildx imagetools inspect ghcr.io/vasyakrg/image-prepuller:1.0.0`
+   и `helm show chart oci://ghcr.io/vasyakrg/charts/image-prepuller --version 1.0.0`
+   (в выводе `version: 1.0.0` и `appVersion: 1.0.0`).
 
 ## 14. Первый прод-кластер (Talos)
 

@@ -11,16 +11,18 @@ type: application
 # release tag, so a chart in the registry always names the image of its own
 # release; main carries the version of the upcoming release.
 #
-# The published chart tags so far are 0.2.0, 0.3.0 and 0.6.0 (chart-only numbers
-# from before the version lines were unified), so the next release is 0.7.0.
-version: 0.8.0
+# 1.0.0 is the first release that carries the optional PostgreSQL statistics,
+# the paginated pull-task history and the node-scope/mock chart defaults. The
+# older published chart tags (0.2.0, 0.3.0, 0.6.0) came from before the version
+# lines were unified; numbering never goes down.
+version: 1.0.0
 # Application version. It is also the default image tag (templates/_helpers.tpl)
 # and becomes the chart's app version in the Helm release
 # (app.kubernetes.io/version). Bump it in the same commit that gets tagged:
 # between releases it names the image of the last release, which can be older
 # than the chart from main — pin image.tag=sha-<commit> for those installs
 # (docs/DEPLOY.md 14.2).
-appVersion: "0.8.0"
+appVersion: "1.0.0"
 kubeVersion: ">=1.25.0-0"
 home: https://github.com/vasyakrg/image-prepuller
 sources:

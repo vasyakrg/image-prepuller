@@ -2,6 +2,13 @@
 
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/), версии — [SemVer](https://semver.org/lang/ru/).
 
+## [1.0.0] — 2026-11-27 — Статистика, история задач и область действия
+
+Первый мажорный релиз: образ, OCI-чарт и `appVersion` нумеруются одним `1.0.0`.
+Сюда вошло всё, что накопилось после опубликованного `0.2.0` (включая теги
+`v0.8.0`/`v0.9.0`, для которых отдельные разделы не заводились), — ниже
+сгруппировано по смыслу.
+
 ### Added
 
 - **Статистика в PostgreSQL (ADR-002): образы, сборщик мусора, перепулы и лог задач.**
@@ -245,6 +252,11 @@
 
 ### Security
 
+- **`pgx` поднят `v5.7.6` → `v5.9.2` — закрыт `GO-2026-5004` (SQL-инъекция через
+  путаницу плейсхолдеров с dollar-quoted строковыми литералами).** `govulncheck`
+  показывал достижимый путь `stats.postgresStore.Prune` → `sql.Tx.Commit` →
+  `sanitize.SanitizeSQL`, из-за чего гейт `test` падал. Границы ADR-002 не менялись:
+  `pgx` по-прежнему импортируется только в `internal/stats/postgres.go`.
 - Уязвимости в графе модулей (Dependabot: 5 алертов; `govulncheck`: 10 достижимых путей)
   закрыты обновлением зависимостей: `google.golang.org/grpc` v1.80.0 → v1.83.2,
   `golang.org/x/net` v0.49.0 → v0.62.0 (HTTP/2 DoS в `net/http`: гонка HPACK-энкодера,
@@ -259,6 +271,16 @@
 
 ### Changed
 
+- **Релизная линия `1.0.0`.** `Chart.yaml` `version` и `appVersion` = `1.0.0`;
+  `internal/agent.Version` печатается `prepuller agent -version` и уходит в
+  `prepuller_agent_build_info` тем же номером; тег `v1.0.0` публикует образ и
+  OCI-чарт. Нумерация не убывает: старые опубликованные чарт-теги
+  (0.2.0/0.3.0/0.6.0) остаются, `main` несёт номер ближайшего релиза.
+- **Шаблоны overlay'ев обновлены под новые возможности.** `deploy/values/hub-cluster.yaml`
+  показывает production-Secret (`secret.existingSecret` и список ключей), RBAC на
+  Secrets для приватных реестров (`rbac.readSecrets`), `hub.pullHistory` и `hub.stats`
+  (DSN только из Secret, включение опционально); `deploy/values/managed-cluster.yaml` —
+  то же для spoke и явную пометку, что статистика и история задач живут на hub'е.
 - `Dockerfile`: builder-стадия запускается на нативной архитектуре раннера
   (`--platform=$BUILDPLATFORM`), Go кросс-компилирует под `TARGETARCH`. Сборка образа
   в CI перестала гонять компилятор arm64 под QEMU: multi-arch build на GitHub Actions
@@ -266,6 +288,9 @@
 
 ### Docs
 
+- **Релиз `1.0.0`:** `docs/DEPLOY.md` §13 (артефакты и чек-лист переведены на `1.0.0`),
+  install-примеры в `README.md` и версионные заметки в `AGENTS.md`; ADR-002 фиксирует
+  `pgx` `v5.9.2`.
 - **Runbook первого продового кластера (Talos)** — новый §14 в
   `docs/DEPLOY.md`: требования к кластеру, шаблон overlay
   `deploy/values/talos-example.yaml`, DNS/TLS, ожидаемые числа снапшота,

@@ -21,10 +21,28 @@ image:
   tag: ""
   pullPolicy: IfNotPresent
 
+# Needed by a live spoke exactly like by the hub: the spoke runs the same
+# K8sProvider against this cluster, lists Nodes/workloads and resolves the
+# imagePullSecrets of the workloads it warms. A node agent pulls through CRI,
+# which never applies a pod's imagePullSecrets, so without that credential a
+# private registry answers an anonymous 403 and the image stays missing on every
+# node whose kubelet has not pulled it by chance. The chart grants only "get"
+# (no list/watch) and this is also the chart default. Set it to false when
+# cluster policy forbids reading Secrets: such pulls then fail as registry-auth
+# errors instead.
+rbac:
+  readSecrets: true
+
 hub:
   # No Web UI, no API, no ingress in this cluster: the hub lives in the master
   # cluster. hub.enabled=false also drops the hub RBAC it would not use.
   enabled: false
+  # hub.stats and hub.pullHistory are hub-side features and are deliberately
+  # absent here: the PostgreSQL writer and the JSONL pull-task store live in the
+  # hub process, which is not installed on a managed cluster, so there is no DSN
+  # to set and no history volume to mount. The master cluster's hub records this
+  # cluster's tasks and samples too, once this release is registered in its
+  # hub.managedClusters (outbound) or hub.remoteClusters (direct).
 
 spoke:
   # Headless backend for exactly this cluster. This cluster's name plus this
@@ -49,6 +67,9 @@ spoke:
   # Exactly one replica in outbound mode: the hub command queue assumes a single
   # spoke replica.
   replicaCount: 1
+  # false -> live K8sProvider + node agents (the chart default). true would serve
+  # in-memory demo data and must never be used for a real rollout: the hub would
+  # show fake clusters, workloads and pulls instead of this cluster's state.
   mock: false
   service:
     type: ClusterIP
@@ -56,12 +77,21 @@ spoke:
     metricsPort: 9091
 
 secret:
-  # Cluster token of this spoke (PREPULLER_CLUSTER_TOKEN). The hub's
-  # hub.managedClusters entry must carry it in outbound mode. Empty -> random on
-  # install; then read it and paste it into the master overlay:
+  # Chart-managed Secret: the cluster and agent tokens are generated on install
+  # and reused on upgrade, so this file carries no credentials. GitOps/production
+  # instead pre-creates the Secret (keys auth-user, auth-pass, session-secret,
+  # cluster-token, agent-token) and sets create: false + existingSecret: <name>;
+  # credentials then never land in values or in the Helm release history and an
+  # upgrade cannot rotate them.
+  create: true
+  existingSecret: ""
+  # Cluster token of this spoke (PREPULLER_CLUSTER_TOKEN). In outbound mode the
+  # hub's hub.managedClusters entry must carry exactly the same value, so this
+  # token and the master overlay change together. Empty -> random on install;
+  # read it back on this cluster to fill the master side:
   #   kubectl -n prepuller get secret prepuller-image-prepuller-secret \
   #     -o jsonpath='{.data.cluster-token}' | base64 -d
-  # Set it explicitly here if your GitOps flow cannot read the Secret back.
+  # Set it explicitly here only if your GitOps flow cannot read the Secret back.
   clusterToken: ""
 
 agent:
