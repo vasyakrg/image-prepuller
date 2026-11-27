@@ -30,7 +30,6 @@
       "type": "backend",
       "label": "hub",
       "sublabel": "Web UI :8080 · /metrics :9090",
-      "tag": "кластер A",
       "pos": [
         280,
         190
@@ -44,8 +43,7 @@
       "id": "shop_api",
       "type": "backend",
       "label": "shop-api",
-      "sublabel": "shop/api:1.4.2 · IfNotPresent",
-      "tag": "прогрев",
+      "sublabel": "прогрев · shop/api:1.4.2",
       "pos": [
         280,
         70
@@ -59,8 +57,7 @@
       "id": "analytics_ui",
       "type": "backend",
       "label": "analytics-ui",
-      "sublabel": "ui:latest · Always",
-      "tag": "пропуск",
+      "sublabel": "пропуск · ui:latest",
       "pos": [
         280,
         320
@@ -75,7 +72,6 @@
       "type": "backend",
       "label": "node-agent",
       "sublabel": "CRI :9443 · ImageFS",
-      "tag": "node-a1",
       "pos": [
         570,
         320
@@ -90,7 +86,6 @@
       "type": "backend",
       "label": "spoke",
       "sublabel": "/internal/v1 :8081 · Bearer",
-      "tag": "кластер B",
       "pos": [
         820,
         190
@@ -104,8 +99,7 @@
       "id": "billing_worker",
       "type": "backend",
       "label": "billing-worker",
-      "sublabel": "billing@sha256:9f2c…",
-      "tag": "прогрев",
+      "sublabel": "прогрев · billing@sha256:9f2c…",
       "pos": [
         820,
         70
@@ -119,8 +113,7 @@
       "id": "legacy_admin",
       "type": "backend",
       "label": "legacy-admin",
-      "sublabel": "admin:latest · IfNotPresent",
-      "tag": "пропуск",
+      "sublabel": "пропуск · admin:latest",
       "pos": [
         820,
         320
@@ -135,7 +128,6 @@
       "type": "backend",
       "label": "node-agent",
       "sublabel": "CRI :9443 · ImageFS",
-      "tag": "node-b1",
       "pos": [
         1110,
         320
