@@ -120,6 +120,7 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 | `deploy/values/talos-example.yaml` | шаблон overlay для Talos-кластера: сокет CRI, toleration control-plane, ingress/cert-manager, `autoWarm=false`; реальные overlays кластеров — в приватном GitOps-репо |
 | `docs/DEPLOY.md` | чеклист деплоя: секреты, k3d-стенд, e2e-сценарий, общий runbook Talos-кластера (§14) |
 | `docs/architecture.md` | схемы Mermaid: топология, потоки, состояния, модель данных |
+| `docs/diagrams/` | интерактивная схема контура (archify): `image-prepuller-topology.html` + исходный `image-prepuller-topology.json`; генерируется из JSON, не правится руками |
 | `docs/alerts.md` | операторская памятка: что скрейпить, правила алертов, триангуляция «агент/токен/связь», пороги |
 | `docs/PLAN.md` | план Stage 2–3: workstreams, зоны записи, порядок мержа, гейты |
 
@@ -322,6 +323,9 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
   Новая зависимость без ADR не принимается.
 - Схемы — только Mermaid в markdown (рендерится в Gitea/GitHub/Obsidian); PNG-вставки и
   внешние редакторы не нужны. Меняя код, проверяйте, что диаграммы не врут.
+- Исключение — `docs/diagrams/`: интерактивные HTML-схемы, собранные из JSON
+  skill'ом `archify` (`node bin/archify.mjs deliver architecture <json> <html>`).
+  Правится только JSON, HTML пересобирается; JSON и HTML коммитятся парой.
 
 ## 11. Параллельная работа в нескольких worktree
 

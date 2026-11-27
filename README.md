@@ -103,6 +103,11 @@ flowchart TB
 containerd не нужны. В live-режиме hub поднимает `K8sProvider` (client-go) и берёт инвентарь
 образов ноды у node-agent'а по HTTP/JSON API v1; pull уходит в CRI через агент.
 
+Интерактивная схема того же контура на примере двух кластеров и приложений,
+помеченных для прогрева (и тех, что прогревать нельзя), —
+[docs/diagrams/image-prepuller-topology.html](docs/diagrams/image-prepuller-topology.html):
+зум, поиск, подсветка связей, тёмная тема, экспорт в PNG/SVG.
+
 ### Поток ручного прогрева
 
 ```mermaid
@@ -253,7 +258,7 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
 
 Пошаговый runbook (DNS, TLS, проверки с ожидаемыми числами, особенности Talos:
 `imageFSCapacityBytes=0`, зеркала docker.io, порты 9443/9444 на нодах) — в
-[docs/DEPLOY.md §14](docs/DEPLOY.md#14-first-production-cluster-talos). Важно:
+[docs/DEPLOY.md §14](docs/DEPLOY.md#14-первый-прод-кластер-talos). Важно:
 `image.tag` — `sha-*` сборка того же коммита, что и чарт; релизный образ
 `0.2.0` не знает флагов `agent.pull.*` и падает в `CrashLoopBackOff` (см. §14.2).
 

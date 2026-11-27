@@ -59,6 +59,14 @@ flowchart LR
     MH --> RG
 ```
 
+Интерактивная версия этой схемы на конкретном примере — два кластера, в каждом
+hub/spoke, node-agent и по два приложения, помеченных для прогрева или
+исключённых из него:
+[docs/diagrams/image-prepuller-topology.html](diagrams/image-prepuller-topology.html)
+(исходник — `docs/diagrams/image-prepuller-topology.json`). Mermaid-схемы ниже
+остаются каноническими для markdown-рендера; HTML-артефакт нужен для чтения
+схемы с зумом и подсветкой связей.
+
 ## 2. Компоненты и зависимости пакетов
 
 ```mermaid

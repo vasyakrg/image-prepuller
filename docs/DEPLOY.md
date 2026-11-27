@@ -1,97 +1,102 @@
-# DEPLOY: image-prepuller
+# Деплой: image-prepuller
 
-Runbook for deploying the hub, the spoke backend and the node-agent from this
-repository. The default release runs the **live** `K8sProvider` (client-go) in
-the hub and the node-agent HTTP/JSON API v1 on every node. Set `hub.mock=true`
-for an in-memory demo without a Kubernetes API.
+Runbook деплоя hub, spoke-бэкенда и node-agent из этого репозитория. Релиз по
+умолчанию поднимает **live** `K8sProvider` (client-go) в hub и HTTP/JSON API v1
+node-agent на каждой ноде. Для in-memory демо без Kubernetes API задайте
+`hub.mock=true`.
 
-- [1. What gets deployed](#1-what-gets-deployed)
-- [2. Prerequisites](#2-prerequisites)
-- [3. Secrets and environment variables](#3-secrets-and-environment-variables)
-- [4. Build the image](#4-build-the-image)
-- [5. Install with Helm](#5-install-with-helm)
-- [6. Verify the deployment](#6-verify-the-deployment)
-- [7. Add a spoke cluster](#7-add-a-spoke-cluster)
-- [8. Enable the agent DaemonSet](#8-enable-the-agent-daemonset)
-- [9. Typical failures](#9-typical-failures)
-- [10. Upgrade and rollback](#10-upgrade-and-rollback)
-- [11. Uninstall](#11-uninstall)
-- [12. k3d end-to-end smoke test](#12-k3d-end-to-end-smoke-test)
-- [13. Released artifacts (v0.2.0)](#13-released-artifacts-v020)
-- [14. First production cluster (Talos)](#14-first-production-cluster-talos)
+- [1. Что деплоится](#1-что-деплоится)
+- [2. Предварительные требования](#2-предварительные-требования)
+- [3. Секреты и переменные окружения](#3-секреты-и-переменные-окружения)
+- [4. Сборка образа](#4-сборка-образа)
+- [5. Установка через Helm](#5-установка-через-helm)
+- [6. Проверка деплоя](#6-проверка-деплоя)
+- [7. Добавление spoke-кластера](#7-добавление-spoke-кластера)
+- [8. DaemonSet агента](#8-daemonset-агента)
+- [9. Типичные отказы](#9-типичные-отказы)
+- [10. Upgrade и откат](#10-upgrade-и-откат)
+- [11. Удаление](#11-удаление)
+- [12. e2e-смоук на k3d](#12-e2e-смоук-на-k3d)
+- [13. Релизные артефакты (v0.2.0)](#13-релизные-артефакты-v020)
+- [14. Первый прод-кластер (Talos)](#14-первый-прод-кластер-talos)
 
-## 1. What gets deployed
+## 1. Что деплоится
 
-The chart `deploy/helm/image-prepuller` renders:
+Чарт `deploy/helm/image-prepuller` рендерит:
 
-| Object | Template | Enabled by default |
+| Объект | Шаблон | Включено по умолчанию |
 | --- | --- | --- |
-| ServiceAccount (hub/spoke + agent) | `serviceaccount.yaml` | yes |
-| ClusterRole + ClusterRoleBinding (read-only Nodes/workloads) | `rbac.yaml` | yes (`rbac.create`) |
-| Secret (auth, session secret, cluster token, agent token) | `secret.yaml` | yes |
-| Deployment + Service (hub) | `deployment-hub.yaml`, `service-hub.yaml` | yes |
-| Ingress (Traefik-compatible) | `ingress.yaml` | no (`ingress.enabled`) |
-| Deployment + Service (spoke) | `deployment-spoke.yaml`, `service-spoke.yaml` | no (`spoke.enabled`) |
-| DaemonSet (node-agent) | `daemonset-agent.yaml` | yes (`agent.enabled`) |
-| NetworkPolicy (agent) | `networkpolicy.yaml` | no (`networkPolicy.enabled`) |
+| ServiceAccount (hub/spoke + agent) | `serviceaccount.yaml` | да |
+| ClusterRole + ClusterRoleBinding (read-only Nodes/workload'ы) | `rbac.yaml` | да (`rbac.create`) |
+| Secret (auth, session secret, cluster token, agent token) | `secret.yaml` | да |
+| Deployment + Service (hub) | `deployment-hub.yaml`, `service-hub.yaml` | да |
+| Ingress (совместимый с Traefik) | `ingress.yaml` | нет (`ingress.enabled`) |
+| Deployment + Service (spoke) | `deployment-spoke.yaml`, `service-spoke.yaml` | нет (`spoke.enabled`) |
+| DaemonSet (node-agent) | `daemonset-agent.yaml` | да (`agent.enabled`) |
+| NetworkPolicy (agent) | `networkpolicy.yaml` | нет (`networkPolicy.enabled`) |
 
-One binary, three roles: `controller -role=hub` (Web UI + cookie auth +
-multi-cluster registry + Prometheus), `controller -role=spoke` (headless backend
-API with a Bearer token), `agent` (per-node CRI agent). Ports:
+Один бинарь, три роли: `controller -role=hub` (Web UI + cookie-авторизация +
+реестр кластеров + Prometheus), `controller -role=spoke` (headless backend API
+с Bearer-токеном), `agent` (CRI-агент на ноде). Порты:
 
-| Role | HTTP/API | Metrics | Node agent API |
+| Роль | HTTP/API | Метрики | Node agent API |
 | --- | --- | --- | --- |
 | hub | 8080 | 9090 | — |
 | spoke | 8081 | 9091 | — |
 | agent | 9443 | — | — |
 
-The image is multi-stage (`golang:1.26.11-alpine` builder, `distroless/static`
-runtime), `CGO_ENABLED=0`, runs as uid/gid 65532 with a read-only root
-filesystem. `/healthz` and `/readyz` are served by the controller in both hub
-and spoke roles; `/metrics` is served on the metrics port only.
+Как этот контур выглядит вживую — два кластера, в каждом hub/spoke, node-agent и
+приложения, помеченные для прогрева или исключённые из него, — на интерактивной
+схеме [docs/diagrams/image-prepuller-topology.html](diagrams/image-prepuller-topology.html).
 
-## 2. Prerequisites
+Образ multi-stage (`golang:1.26.11-alpine` builder, `distroless/static` runtime),
+`CGO_ENABLED=0`, работает под uid/gid 65532 с root filesystem только для чтения.
+`/healthz` и `/readyz` отдаёт controller в обеих ролях — hub и spoke; `/metrics`
+слушается только на порту метрик.
 
-- Kubernetes 1.25+ (the chart sets `kubeVersion: ">=1.25.0-0"`).
-- Helm 3.8+ (OCI support for chart publishing).
-- A container registry reachable from the cluster (Gitea registry, GHCR, Harbor,
-  …) and credentials to push to it.
-- `kubectl` with access to the target namespace.
-- Optional: an ingress controller (Traefik is what the chart is tested with) and
-  cert-manager for TLS. The chart renders a plain `networking.k8s.io/v1`
-  Ingress, so Traefik, nginx or any other controller works.
+## 2. Предварительные требования
 
-The chart has **no external chart dependencies** and does not use `vendor/`.
+- Kubernetes 1.25+ (в чарте `kubeVersion: ">=1.25.0-0"`).
+- Helm 3.8+ (поддержка OCI для публикации чарта).
+- Container registry, доступный из кластера (Gitea registry, GHCR, Harbor,
+  …), и креды для пуша в него.
+- `kubectl` с доступом к целевому namespace.
+- Опционально: ingress-контроллер (чарт тестируется на Traefik) и
+  cert-manager для TLS. Чарт рендерит обычный `networking.k8s.io/v1`
+  Ingress, поэтому подойдёт Traefik, nginx или любой другой контроллер.
 
-## 3. Secrets and environment variables
+У чарта **нет внешних зависимостей** и он не использует `vendor/`.
 
-The controller reads configuration from the environment; the chart maps all of
-it from a single Secret. Keys in the Secret:
+## 3. Секреты и переменные окружения
 
-| Secret key | Environment variable | Used by | Notes |
+Controller читает конфигурацию из окружения; чарт целиком берёт её из одного
+Secret. Ключи в Secret:
+
+| Ключ Secret | Переменная окружения | Кто использует | Примечания |
 | --- | --- | --- | --- |
-| `auth-user` | `PREPULLER_AUTH_USER` | hub | Required. The hub refuses to start without it. |
-| `auth-pass` | `PREPULLER_AUTH_PASS` | hub | Required. |
-| `session-secret` | `PREPULLER_SESSION_SECRET` | hub | Required for stable sessions. Random per install if empty → users are logged out on restart and multi-replica setups break. |
-| — | `PREPULLER_COOKIE_SECURE` | hub | Cookie `Secure` flag; set from `hub.cookieSecure` (default `true`; disable only for plain-HTTP local development). |
-| `cluster-token` | `PREPULLER_CLUSTER_TOKEN` | spoke | Bearer token expected by `/internal/v1/*`. Empty disables auth — dev only. |
-| `agent-token` | `PREPULLER_AGENT_TOKEN` | agent | Bearer token of the agent HTTP API v1. Empty disables agent auth. |
-| `users` | `PREPULLER_USERS` | hub | Optional multi-user list `name:password:role,...` (roles `viewer`/`operator`); multi-user auth works — the hub builds users from this list. |
-| — | `PREPULLER_REMOTE_CLUSTERS` | hub | Optional `name=url=token,...` list of extra spokes. |
-| — | `PREPULLER_LOGIN_ATTEMPTS_PER_MINUTE` | hub | Optional login rate limit (default 5/min); enforced by the hub. |
-| — | `PREPULLER_LOGIN_BLOCK` | hub | Optional block duration after too many attempts (Go duration, e.g. `5m`). |
-| — | `PREPULLER_NODE_NAME` | agent | Node name; the DaemonSet sets it from `spec.nodeName`. |
-| — | `PREPULLER_CRI_SOCKET` | agent | CRI socket path, default `/run/containerd/containerd.sock`. |
+| `auth-user` | `PREPULLER_AUTH_USER` | hub | Обязателен. Без него hub не стартует. |
+| `auth-pass` | `PREPULLER_AUTH_PASS` | hub | Обязателен. |
+| `session-secret` | `PREPULLER_SESSION_SECRET` | hub | Обязателен для стабильных сессий. Пусто → случайное значение на каждую установку: после рестарта пользователи разлогинены, multi-replica схемы ломаются. |
+| — | `PREPULLER_COOKIE_SECURE` | hub | Флаг `Secure` у cookie; ставится из `hub.cookieSecure` (по умолчанию `true`; выключать только для локальной разработки по plain-HTTP). |
+| `cluster-token` | `PREPULLER_CLUSTER_TOKEN` | spoke | Bearer-токен, который ожидают `/internal/v1/*`. Пусто отключает авторизацию — только для dev. |
+| `agent-token` | `PREPULLER_AGENT_TOKEN` | agent | Bearer-токен HTTP API v1 агента. Пусто отключает авторизацию агента. |
+| `users` | `PREPULLER_USERS` | hub | Опциональный список пользователей `name:password:role,...` (роли `viewer`/`operator`); multi-user авторизация работает — hub собирает пользователей из этого списка. |
+| — | `PREPULLER_REMOTE_CLUSTERS` | hub | Опциональный список дополнительных spoke `name=url=token,...`. |
+| — | `PREPULLER_LOGIN_ATTEMPTS_PER_MINUTE` | hub | Опциональный rate-limit логина (по умолчанию 5/мин); проверяется hub. |
+| — | `PREPULLER_LOGIN_BLOCK` | hub | Опциональная длительность блокировки после превышения попыток (Go duration, например `5m`). |
+| — | `PREPULLER_NODE_NAME` | agent | Имя ноды; DaemonSet ставит его из `spec.nodeName`. |
+| — | `PREPULLER_CRI_SOCKET` | agent | Путь к сокету CRI, по умолчанию `/run/containerd/containerd.sock`. |
 
-Two ways to provide them:
+Два способа их задать:
 
-**A. Let the chart generate them (quick start).** `secret.create=true` (default)
-and empty `secret.auth.password`, `secret.sessionSecret`, `secret.clusterToken`
-generate random values on install. On `helm upgrade` the chart reuses the values
-stored in the existing Secret (`lookup`), so sessions, the spoke token and the
-hub/agent token pair stay stable; set `secret.*` explicitly to take over. The
-Secret is annotated `helm.sh/resource-policy: keep`, so it also survives
-`helm uninstall`. Read them back:
+**A. Пусть чарт сгенерирует их сам (быстрый старт).** `secret.create=true`
+(по умолчанию) и пустые `secret.auth.password`, `secret.sessionSecret`,
+`secret.clusterToken` дают случайные значения при установке. На `helm upgrade`
+чарт переиспользует значения из существующего Secret (`lookup`), поэтому сессии,
+токен spoke и пара токенов hub/agent остаются стабильными; чтобы забрать
+управление, задайте `secret.*` явно. На Secret стоит аннотация
+`helm.sh/resource-policy: keep`, поэтому он переживает и `helm uninstall`.
+Прочитать значения обратно:
 
 ```bash
 kubectl -n prepuller get secret prepuller-image-prepuller-secret \
@@ -102,7 +107,7 @@ kubectl -n prepuller get secret prepuller-image-prepuller-secret \
   -o jsonpath='{.data.session-secret}' | base64 -d; echo
 ```
 
-**B. Bring your own Secret (production).** Create it first and set
+**B. Свой Secret (production).** Создайте его заранее и задайте
 `secret.create=false`, `secret.existingSecret=<name>`:
 
 ```bash
@@ -113,30 +118,32 @@ kubectl -n prepuller create secret generic prepuller-credentials \
   --from-literal=cluster-token="$(openssl rand -base64 32)"
 ```
 
-Registry credentials for pulling the image are separate: either create a
-`kubernetes.io/dockerconfigjson` Secret and set `imagePullSecrets`, or attach it
-to the ServiceAccount (`serviceAccount.annotations` / `kubectl patch sa`).
+Креды реестра для pull образа — отдельная история: либо создайте Secret
+`kubernetes.io/dockerconfigjson` и задайте `imagePullSecrets`, либо привяжите
+его к ServiceAccount (`serviceAccount.annotations` / `kubectl patch sa`).
 
-Secrets are never logged and never returned by the API. The only secret in the
-Helm release values is what you pass with `--set`; prefer `--set-file` or an
-external secret manager for production.
+Секреты не логируются и никогда не возвращаются API. Единственный секрет в
+values релиза Helm — тот, что передан через `--set`; для production
+предпочтительнее `--set-file` или внешний secret manager.
 
-> **GitOps note.** `helm template` and `--dry-run` cannot read the live Secret,
-> so they render fresh random values on every run. Pass `secret.*` explicitly or use
-> `secret.existingSecret` when committing rendered manifests.
+> **Замечание про GitOps.** `helm template` и `--dry-run` не могут прочитать
+> живой Secret, поэтому на каждом запуске рендерят свежие случайные значения.
+> Передавайте `secret.*` явно или используйте `secret.existingSecret`, если
+> коммитите отрендеренные манифесты.
 
-> **Multi-user auth, rate limit and audit.** `cmd/prepuller/main.go` wires
-> `auth.UsersFromEnv()`, `auth.RateLimitConfigFromEnv()` and the JSON auditor,
-> so `PREPULLER_USERS`, `PREPULLER_LOGIN_ATTEMPTS_PER_MINUTE` and
-> `PREPULLER_LOGIN_BLOCK` work as documented. Set `secret.users` to a
-> `name:password:role,...` list (roles `viewer`/`operator`); it is passed as
-> `PREPULLER_USERS`. The legacy `auth-user`/`auth-pass` pair is merged in as an
-> `operator`. `PREPULLER_COOKIE_SECURE` comes from `hub.cookieSecure` (default
-> true — disable only for plain-HTTP local development).
+> **Multi-user авторизация, rate-limit и аудит.** `cmd/prepuller/main.go`
+> подключает `auth.UsersFromEnv()`, `auth.RateLimitConfigFromEnv()` и
+> JSON-аудитор, поэтому `PREPULLER_USERS`, `PREPULLER_LOGIN_ATTEMPTS_PER_MINUTE`
+> и `PREPULLER_LOGIN_BLOCK` работают как описано. Задайте `secret.users`
+> списком `name:password:role,...` (роли `viewer`/`operator`) — он передаётся
+> как `PREPULLER_USERS`. Устаревшая пара `auth-user`/`auth-pass` добавляется
+> как `operator`. `PREPULLER_COOKIE_SECURE` берётся из `hub.cookieSecure`
+> (по умолчанию true — выключать только для локальной разработки по
+> plain-HTTP).
 
-## 4. Build the image
+## 4. Сборка образа
 
-Locally:
+Локально:
 
 ```bash
 docker build \
@@ -145,20 +152,20 @@ docker build \
   -t registry.example.com/ops/image-prepuller:dev .
 ```
 
-In CI, `.gitea/workflows/build-image.yaml` builds `linux/amd64` + `linux/arm64`
-with buildx, pushes `:sha` and `:latest`, caches layers in the registry
-(`type=registry`), runs a hub smoke test and lints/templates the chart. Required
-repository variables: `REGISTRY`, `IMAGE`; optional `CHART_OCI_REPO`,
-`REGISTRY_INSECURE`. Required secrets: `REGISTRY_USERNAME`,
+В CI `.gitea/workflows/build-image.yaml` собирает `linux/amd64` + `linux/arm64`
+через buildx, пушит `:sha` и `:latest`, кэширует слои в реестре
+(`type=registry`), гоняет смоук hub и делает lint/template чарта. Обязательные
+переменные репозитория: `REGISTRY`, `IMAGE`; опциональные — `CHART_OCI_REPO`,
+`REGISTRY_INSECURE`. Обязательные секреты: `REGISTRY_USERNAME`,
 `REGISTRY_PASSWORD`.
 
-> `cmd/prepuller/main.go` does not define `version`/`commit` variables yet, so
-> the Dockerfile does **not** pass `-X main.version`/`-X main.commit`; VERSION and
-> COMMIT are baked as OCI labels. When the integrator adds the variables, add
-> `-X main.version=${VERSION} -X main.commit=${COMMIT}` to the `-ldflags` line in
-> the Dockerfile.
+> `cmd/prepuller/main.go` пока не определяет переменные `version`/`commit`,
+> поэтому Dockerfile **не** передаёт `-X main.version`/`-X main.commit`;
+> VERSION и COMMIT запекаются как OCI-метки. Когда интегратор добавит
+> переменные, допишите `-X main.version=${VERSION} -X main.commit=${COMMIT}`
+> в строку `-ldflags` в Dockerfile.
 
-## 5. Install with Helm
+## 5. Установка через Helm
 
 ```bash
 helm upgrade --install prepuller deploy/helm/image-prepuller \
@@ -170,12 +177,12 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
   --set hub.clusterName=talos-prod-eu
 ```
 
-This default install runs the live provider: the hub lists Nodes and workloads
-through the in-cluster ServiceAccount and talks to the agent DaemonSet on each
-node's InternalIP:9443. For an in-memory demo without Kubernetes access add
-`--set hub.mock=true --set agent.enabled=false`.
+Эта установка по умолчанию поднимает live-провайдер: hub перечисляет Nodes и
+workload'ы через in-cluster ServiceAccount и ходит к DaemonSet агента по
+`Node.InternalIP:9443` каждой ноды. Для in-memory демо без доступа к Kubernetes
+добавьте `--set hub.mock=true --set agent.enabled=false`.
 
-Production example with an existing Secret, ingress and TLS:
+Production-пример с готовым Secret, ingress и TLS:
 
 ```bash
 helm upgrade --install prepuller deploy/helm/image-prepuller \
@@ -193,7 +200,7 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
   --set 'ingress.tls[0].hosts[0]=prepuller.example.com'
 ```
 
-Preview before applying:
+Предпросмотр перед применением:
 
 ```bash
 helm template prepuller deploy/helm/image-prepuller --namespace prepuller \
@@ -201,7 +208,7 @@ helm template prepuller deploy/helm/image-prepuller --namespace prepuller \
 kubectl apply --dry-run=server -f /tmp/rendered.yaml
 ```
 
-## 6. Verify the deployment
+## 6. Проверка деплоя
 
 ```bash
 kubectl -n prepuller rollout status deploy/prepuller-image-prepuller --timeout=120s
@@ -220,24 +227,24 @@ curl -fsS -c /tmp/cookies -X POST http://127.0.0.1:8080/api/v1/auth/login \
 curl -fsS -b /tmp/cookies http://127.0.0.1:8080/api/v1/clusters
 ```
 
-The UI is at `http://127.0.0.1:8080/` (or the ingress host). Prometheus should
-scrape the pod when `hub.metrics.annotations=true` (default): the pod carries
+UI доступен на `http://127.0.0.1:8080/` (или по хосту ingress'а). Prometheus
+скрейпит pod, когда `hub.metrics.annotations=true` (по умолчанию): на поде стоят
 `prometheus.io/scrape: "true"`, `prometheus.io/port: "9090"`,
 `prometheus.io/path: "/metrics"`.
 
-For a spoke release, check its own ports 8081/9091 the same way. The spoke API
-is protected by the Bearer token:
+Для релиза spoke проверяйте его собственные порты 8081/9091 так же. API spoke
+защищён Bearer-токеном:
 
 ```bash
 curl -fsS -H "Authorization: Bearer <cluster-token>" \
   http://127.0.0.1:8081/internal/v1/health
 ```
 
-## 7. Add a spoke cluster
+## 7. Добавление spoke-кластера
 
-A spoke is a separate release of the same chart with `spoke.enabled=true`.
-Deploy it in the cluster it manages (or in a shared cluster), then point the hub
-at it via `hub.remoteClusters`:
+Spoke — отдельный релиз того же чарта с `spoke.enabled=true`. Разверните его в
+кластере, которым он управляет (или в общем кластере), затем направьте на него
+hub через `hub.remoteClusters`:
 
 ```bash
 # 1. Deploy the spoke in cluster "kz".
@@ -260,20 +267,20 @@ helm upgrade prepuller deploy/helm/image-prepuller \
   --set "hub.remoteClusters=talos-prod-kz=https://prepuller-spoke.kz.internal=<token>"
 ```
 
-`PREPULLER_REMOTE_CLUSTERS` uses `name=url=token` entries separated by commas.
-The hub keeps the registration order; the first registered cluster is the UI
-default. In `hub.mock=true` mode three fake clusters are registered and remote
-spokes are ignored.
+`PREPULLER_REMOTE_CLUSTERS` использует записи `name=url=token`, разделённые
+запятыми. Hub сохраняет порядок регистрации; первый зарегистрированный кластер —
+кластер по умолчанию в UI. В режиме `hub.mock=true` регистрируются три фейковых
+кластера, а удалённые spoke игнорируются.
 
-## 8. The agent DaemonSet
+## 8. DaemonSet агента
 
-The agent serves the HTTP/JSON wire API v1 on port 9443 (`GET /healthz`,
+Агент отдаёт HTTP/JSON wire API v1 на порту 9443 (`GET /healthz`,
 `GET /agent/v1/snapshot`, `GET /agent/v1/images/{ref}`, `POST /agent/v1/pulls`).
-It is enabled by default; the live hub needs it on every node. It runs under a
-dedicated ServiceAccount with **no** Kubernetes API permissions and does not
-mount a ServiceAccount token.
+Включён по умолчанию; live-hub'у он нужен на каждой ноде. Работает под
+отдельным ServiceAccount **без** прав в Kubernetes API и не монтирует токен
+ServiceAccount.
 
-To tune or disable it:
+Чтобы настроить или выключить его:
 
 ```bash
 helm upgrade --install prepuller deploy/helm/image-prepuller \
@@ -288,44 +295,45 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
   --set agent.mock=true
 ```
 
-The DaemonSet mounts the CRI socket read-only, runs with a read-only root
-filesystem and drops all capabilities. It needs access to the socket: by default
-it runs as uid 0; on distros where the containerd socket is group-accessible,
-set `agent.securityContext.runAsUser=65532` and
-`agent.securityContext.runAsNonRoot=true` plus `supplementalGroups` for the
-containerd group. The NetworkPolicy allows ingress only from the release
-namespace and egress only to DNS and TCP 443.
+DaemonSet монтирует сокет CRI только для чтения, работает с root filesystem
+только для чтения и сбрасывает все capabilities. Сокет должен быть доступен:
+по умолчанию контейнер работает под uid 0; в дистрибутивах, где сокет containerd
+доступен по группе, задайте `agent.securityContext.runAsUser=65532` и
+`agent.securityContext.runAsNonRoot=true`, а также `supplementalGroups` с группой
+containerd. NetworkPolicy разрешает ingress только из namespace релиза, а
+egress — только к DNS и на TCP 443.
 
-The DaemonSet runs with `hostNetwork: true`: the hub dials the agent on
-`Node.InternalIP:9443`, and the CRI socket is host-local. NetworkPolicy does not
-apply to host-network pods — restrict port 9443 with the node firewall / cloud
-security groups if the network is not private. On k3s/k3d the CRI socket lives at
-`/run/k3s/containerd/containerd.sock`, so pass
-`--set agent.criSocket=/run/k3s/containerd/containerd.sock`; the default
-`/run/containerd/containerd.sock` is right for kubeadm/Docker/containerd nodes.
+DaemonSet работает с `hostNetwork: true`: hub ходит к агенту на
+`Node.InternalIP:9443`, а сокет CRI локальный для хоста. NetworkPolicy не
+действует на поды hostNetwork — если сеть не приватная, закройте порт 9443
+фаерволом ноды / security groups облака. На k3s/k3d сокет CRI лежит в
+`/run/k3s/containerd/containerd.sock`, поэтому передайте
+`--set agent.criSocket=/run/k3s/containerd/containerd.sock`; дефолтный
+`/run/containerd/containerd.sock` верен для нод kubeadm/Docker/containerd.
 
-### Pull hygiene
+### Гигиена pull'ов
 
-A pull into a dead registry used to hold an image x node slot for the whole
-`DefaultAgentPullTimeout` (10 min) and looked exactly like a slow download. The
-agent now bounds it in two steps (values under `agent.pull`):
+Раньше pull в мёртвый реестр держал слот image × node весь
+`DefaultAgentPullTimeout` (10 мин) и выглядел в точности как медленная загрузка.
+Теперь агент ограничивает его двумя ступенями (значения в `agent.pull`):
 
-| Value | Default | Effect |
+| Значение | По умолчанию | Эффект |
 | --- | --- | --- |
-| `agent.pull.registryProbe` | `true` | TCP-dial the registry before pulling; a black-holed registry fails in seconds with `502 registry unreachable` |
-| `agent.pull.registryProbeTimeout` | `5s` | Probe timeout |
-| `agent.pull.stallWatch` | `true` | Cancel a pull that stops growing the image filesystem (CRI has no progress callback) |
-| `agent.pull.stallTimeout` | `60s` | No-progress window before the pull is cancelled with `504 pull stalled` |
-| `agent.pull.timeout` | `10m` | Backstop for a genuinely slow download |
+| `agent.pull.registryProbe` | `true` | TCP-dial реестра перед pull; чёрная дыра падает за секунды с `502 registry unreachable` |
+| `agent.pull.registryProbeTimeout` | `5s` | Таймаут пробы |
+| `agent.pull.stallWatch` | `true` | Отменять pull, который перестал растить image filesystem (у CRI нет callback'а прогресса) |
+| `agent.pull.stallTimeout` | `60s` | Окно без прогресса до отмены pull с `504 pull stalled` |
+| `agent.pull.timeout` | `10m` | Страховка для честно долгой загрузки |
 
-Turn the probe off (`--set agent.pull.registryProbe=false`) when containerd pulls
-through a **registry mirror** or a **proxy configured in containerd**: the runtime can
-reach the image, while a direct dial from the agent cannot. The hub maps both answers onto failed pull tasks and
-returns `502`/`504` to the UI, so the slot is released instead of hanging.
+Выключайте пробу (`--set agent.pull.registryProbe=false`), когда containerd
+тянет через **registry mirror** или **прокси, настроенный в containerd**:
+runtime достаёт образ, а прямой dial из агента — нет. Hub сводит оба ответа к
+проваленным pull-задачам и отдаёт в UI `502`/`504`, поэтому слот освобождается,
+а не висит.
 
-The agent API is protected by the `agent-token` Secret key
-(`PREPULLER_AGENT_TOKEN`); empty disables auth. The hub must be given the same
-token when its K8sProvider client is wired in. Check the agent directly:
+API агента защищено ключом Secret `agent-token` (`PREPULLER_AGENT_TOKEN`);
+пусто отключает авторизацию. Клиенту K8sProvider в hub этот же токен нужно
+передать при сборке провайдера. Проверка агента напрямую:
 
 ```bash
 kubectl -n prepuller port-forward ds/prepuller-image-prepuller-agent 9443:9443
@@ -334,29 +342,29 @@ curl -fsS -H "Authorization: Bearer <agent-token>" \
   http://127.0.0.1:9443/agent/v1/snapshot
 ```
 
-## 9. Typical failures
+## 9. Типичные отказы
 
-| Symptom | Cause | Fix |
+| Симптом | Причина | Что делать |
 | --- | --- | --- |
-| `CrashLoopBackOff`, logs `auth config error` | `PREPULLER_AUTH_USER`/`_PASS` empty | Fill `secret.auth.user`/`password` or the existing Secret. |
-| `CrashLoopBackOff`, logs `live Kubernetes provider: ...` | The live path cannot build a Kubernetes client (no in-cluster config/RBAC) | Check the pod ServiceAccount and `rbac.create=true`; for a demo set `hub.mock=true`. |
-| 403 `forbidden` on nodes/deployments | ClusterRole/RBAC missing or `rbac.create=false` | Keep `rbac.create=true` or bind the hub ServiceAccount to equivalent read-only rules. |
-| Nodes show `offline`/`degraded` in the UI | Agent DaemonSet not running, socket not mounted, wrong socket path, or agent token mismatch | Check `kubectl -n <ns> get ds` and agent logs. On k3s/k3d set `agent.criSocket=/run/k3s/containerd/containerd.sock`. Confirm hub and agent share `agent-token` (compare `printenv PREPULLER_AGENT_TOKEN` in both pods); after rotating the Secret, `kubectl -n <ns> rollout restart deploy/<hub>` and the DaemonSet so pods pick up the new value. |
-| `ImagePullBackOff` | Wrong `image.repository`/`tag`, or no registry credentials | Check the tag in the registry; add `imagePullSecrets` or attach the pull secret to the ServiceAccount. |
-| `CreateContainerConfigError` | Referenced Secret/key missing | `kubectl -n prepuller describe pod ...`; check `secret.existingSecret` and its keys. |
-| `read-only file system` errors | The image writes outside `/tmp`; the rootfs is read-only | Expected for hub/spoke (they keep state in memory). For the agent, mount a writable `emptyDir` where it needs scratch space. |
-| Pods restart / users logged out after upgrade | `session-secret` regenerated | Use `secret.existingSecret` (or keep the generated Secret — it has `resource-policy: keep`). |
-| 401 on the UI API | Session cookie invalid or auth misconfigured | Re-login; check `PREPULLER_SESSION_SECRET` is stable across replicas. |
-| Spoke returns 401 | Token mismatch between hub and spoke | Set the same `cluster-token` on both sides. |
-| Spoke unreachable, hub shows `offline` | DNS/Ingress/NetworkPolicy blocks the hub→spoke path | `kubectl run curl --rm -it --image=curlimages/curl -- curl -v <spoke-url>/internal/v1/health`; check DNS, Ingress host, TLS. |
-| Agent pod stuck `ContainerCreating`, event `hostPath type check failed: ... is not a socket file` | `agent.criSocket` points at a missing path for this distro (k3s keeps it under `/run/k3s`) | Set `agent.criSocket` to the real socket (`docker exec <node> ls -l /run/containerd/containerd.sock /run/k3s/containerd/containerd.sock`). |
-| Agent `CrashLoopBackOff`, `agent config error` or CRI dial errors | CRI socket path wrong, not mounted, or containerd rejects the connection | Check `agent.criSocket` and agent logs; for a smoke test set `agent.mock=true` (in-memory images). |
-| Hub can reach the agent from a `kubectl exec` probe but nodes still show offline | Old hub pod kept the previous `agent-token` after the Secret changed | `kubectl -n <ns> rollout restart deploy/<hub>` (or redeploy) so the env is re-read. |
-| Agent `CrashLoopBackOff`, `flag provided but not defined: -pull-timeout` | Chart from `main` renders `agent.pull.*` flags that the released `0.2.0` image does not know | Pin `image.tag` to a `sha-<commit>` build of the same commit ([14.2](#142-pin-the-image-tag-to-the-commit-not-to-the-release)) or install the released OCI chart `0.2.0` with image `0.2.0` |
-| Ingress 404 with Traefik | Wrong `ingressClassName` or host | Set `ingress.className=traefik` and the real host; check `kubectl get ingress`. |
-| `helm install` fails: `secret.create=false requires secret.existingSecret` | Guard in `secret.yaml` | Create the Secret or set `secret.create=true`. |
+| `CrashLoopBackOff`, в логах `auth config error` | `PREPULLER_AUTH_USER`/`_PASS` пусты | Заполните `secret.auth.user`/`password` или готовый Secret. |
+| `CrashLoopBackOff`, в логах `live Kubernetes provider: ...` | live-путь не может собрать Kubernetes-клиент (нет in-cluster конфига/RBAC) | Проверьте ServiceAccount пода и `rbac.create=true`; для демо задайте `hub.mock=true`. |
+| 403 `forbidden` на nodes/deployments | нет ClusterRole/RBAC или `rbac.create=false` | Оставьте `rbac.create=true` или привяжите ServiceAccount hub к эквивалентным read-only правилам. |
+| Ноды в UI показываются как `offline`/`degraded` | DaemonSet агента не запущен, сокет не смонтирован, неверный путь к сокету или несовпадение токена агента | Проверьте `kubectl -n <ns> get ds` и логи агента. На k3s/k3d задайте `agent.criSocket=/run/k3s/containerd/containerd.sock`. Убедитесь, что hub и агент используют один `agent-token` (сравните `printenv PREPULLER_AGENT_TOKEN` в обоих подах); после ротации Secret сделайте `kubectl -n <ns> rollout restart deploy/<hub>` и для DaemonSet, чтобы поды подхватили новое значение. |
+| `ImagePullBackOff` | Неверные `image.repository`/`tag` или нет кредов реестра | Проверьте тег в реестре; добавьте `imagePullSecrets` или привяжите pull-секрет к ServiceAccount. |
+| `CreateContainerConfigError` | Нет упомянутого Secret/ключа | `kubectl -n prepuller describe pod ...`; проверьте `secret.existingSecret` и его ключи. |
+| ошибки `read-only file system` | Образ пишет вне `/tmp`; rootfs только для чтения | Ожидаемо для hub/spoke (состояние держат в памяти). Агенту смонтируйте writable `emptyDir` там, где нужен scratch. |
+| Поды перезапускаются / пользователей разлогинило после upgrade | `session-secret` перегенерирован | Используйте `secret.existingSecret` (или сохраняйте сгенерированный Secret — у него `resource-policy: keep`). |
+| 401 на API UI | Сессионная cookie невалидна или авторизация настроена неверно | Перелогиньтесь; проверьте, что `PREPULLER_SESSION_SECRET` одинаков на всех репликах. |
+| Spoke отвечает 401 | Несовпадение токена между hub и spoke | Задайте один и тот же `cluster-token` с обеих сторон. |
+| Spoke недоступен, hub показывает `offline` | DNS/Ingress/NetworkPolicy перекрывают путь hub→spoke | `kubectl run curl --rm -it --image=curlimages/curl -- curl -v <spoke-url>/internal/v1/health`; проверьте DNS, хост в Ingress, TLS. |
+| Под агента завис в `ContainerCreating`, событие `hostPath type check failed: ... is not a socket file` | `agent.criSocket` указывает на отсутствующий в этом дистрибутиве путь (k3s держит его в `/run/k3s`) | Задайте реальный сокет в `agent.criSocket` (`docker exec <node> ls -l /run/containerd/containerd.sock /run/k3s/containerd/containerd.sock`). |
+| Агент в `CrashLoopBackOff`, `agent config error` или ошибки dial к CRI | Неверный путь к сокету CRI, он не смонтирован или containerd отклоняет соединение | Проверьте `agent.criSocket` и логи агента; для смоука задайте `agent.mock=true` (in-memory образы). |
+| Hub достаёт агента из пробы `kubectl exec`, но ноды всё равно offline | Старый под hub сохранил прежний `agent-token` после смены Secret | `kubectl -n <ns> rollout restart deploy/<hub>` (или передеплой), чтобы окружение перечиталось. |
+| Агент в `CrashLoopBackOff`, `flag provided but not defined: -pull-timeout` | Чарт из `main` рендерит флаги `agent.pull.*`, которых не знает релизный образ `0.2.0` | Пришпильте `image.tag` к сборке `sha-<commit>` того же коммита ([14.2](#142-привязать-тег-образа-к-коммиту-а-не-к-релизу)) или ставьте релизный OCI-чарт `0.2.0` с образом `0.2.0` |
+| Ingress отдаёт 404 на Traefik | Неверный `ingressClassName` или хост | Задайте `ingress.className=traefik` и реальный хост; проверьте `kubectl get ingress`. |
+| `helm install` падает: `secret.create=false requires secret.existingSecret` | Guard в `secret.yaml` | Создайте Secret или задайте `secret.create=true`. |
 
-## 10. Upgrade and rollback
+## 10. Upgrade и откат
 
 ```bash
 helm upgrade prepuller deploy/helm/image-prepuller \
@@ -368,13 +376,13 @@ helm rollback prepuller <revision> -n prepuller
 kubectl -n prepuller rollout status deploy/prepuller-image-prepuller
 ```
 
-The Secret is kept across upgrades (`helm.sh/resource-policy: keep`), so sessions
-and spoke tokens survive an upgrade. A rollback of the release does not roll back
-the image tag if you changed it with `--set image.tag`; pass the previous tag
-explicitly. The hub holds all state in memory: a rollback restarts pods and
-clears in-memory sessions/registry except what is configured via values.
+Secret переживает upgrade (`helm.sh/resource-policy: keep`), поэтому сессии и
+токены spoke не теряются. Откат релиза не откатывает тег образа, если вы меняли
+его через `--set image.tag`; передайте предыдущий тег явно. Hub держит всё
+состояние в памяти: откат перезапускает поды и очищает in-memory
+сессии/реестр, кроме того, что задано через values.
 
-## 11. Uninstall
+## 11. Удаление
 
 ```bash
 helm uninstall prepuller -n prepuller
@@ -382,15 +390,16 @@ helm uninstall prepuller -n prepuller
 kubectl -n prepuller delete secret prepuller-image-prepuller-secret
 ```
 
-Uninstalling the hub does not touch spoke releases; remove them separately.
-## 12. k3d end-to-end smoke test
+Удаление hub не трогает релизы spoke; их удаляют отдельно.
 
-The Stage 2/3 acceptance scenario from `docs/PLAN.md` §9. Run it before a release when a
-local Docker daemon and `k3d` are available. The hub runs the **live** `K8sProvider`;
-the agent DaemonSet talks to the node containerd over CRI.
+## 12. e2e-смоук на k3d
 
-Automated variant — the same steps with assertions, a throw-away cluster and a
-cleanup trap:
+Сценарий приёмки Stage 2/3 из `docs/PLAN.md` §9. Прогоняйте его перед релизом,
+когда есть локальный Docker daemon и `k3d`. Hub работает на **live**
+`K8sProvider`; DaemonSet агента общается с containerd ноды по CRI.
+
+Автоматический вариант — те же шаги с проверками, одноразовым кластером и
+cleanup-ловушкой:
 
 ```bash
 bash hack/e2e-k3d.sh              # build image, create cluster, run scenario, delete cluster
@@ -398,10 +407,11 @@ KEEP=1 bash hack/e2e-k3d.sh       # keep the cluster for debugging
 E2E_SKIP_BUILD=1 bash hack/e2e-k3d.sh   # reuse the already built image
 ```
 
-The script never touches your default kubeconfig: it writes an isolated one into a temp
-dir and refuses to continue if `kubectl` points at anything but `k3d-<cluster>`. It is
-deliberately **not** part of GitHub Actions — run it locally before pushing to `main`.
-Manual runbook below, in case you need to poke at individual steps:
+Скрипт никогда не трогает ваш kubeconfig по умолчанию: он пишет изолированный
+во временный каталог и отказывается продолжать, если `kubectl` смотрит не на
+`k3d-<cluster>`. В GitHub Actions его **сознательно** нет — гоняйте локально
+перед пушем в `main`. Ручной runbook ниже на случай, если нужно ковыряться в
+отдельных шагах:
 
 ```bash
 # 1. Cluster + local image (no registry push needed).
@@ -456,27 +466,29 @@ curl -fsS http://localhost:9090/metrics | grep -E 'prepuller_(pull_tasks|pull_ta
 k3d cluster delete prepuller
 ```
 
-> `agent.mock=true` is only for UI demos: the agent then serves in-memory images instead of
-> talking to containerd. `hub.mock=true` runs the whole stack on the in-memory provider
-> without a Kubernetes API.
+> `agent.mock=true` только для UI-демо: агент тогда отдаёт in-memory образы
+> вместо похода в containerd. `hub.mock=true` поднимает весь стек на in-memory
+> провайдере без Kubernetes API.
 
-> The agent pod uses `hostNetwork: true` (the hub dials `Node.InternalIP:9443`), so the
-> NetworkPolicy does not apply to it; restrict port 9443 with the node firewall when needed.
+> Под агента работает с `hostNetwork: true` (hub ходит на
+> `Node.InternalIP:9443`), поэтому NetworkPolicy к нему не применяется; при
+> необходимости закройте порт 9443 фаерволом ноды.
 
-## 13. Released artifacts (v0.2.0)
+## 13. Релизные артефакты (v0.2.0)
 
-The image and the Helm chart are published to GHCR by
-`.github/workflows/build-image.yaml` on a `v*` tag or a push to `main` — on the
-built-in `GITHUB_TOKEN` (`packages: write`), so no extra repository secrets are needed.
+Образ и Helm-чарт публикуются в GHCR workflow
+`.github/workflows/build-image.yaml` по тегу `v*` или пушу в `main` — на
+встроенном `GITHUB_TOKEN` (`packages: write`), поэтому дополнительных секретов
+репозитория не нужно.
 
-| Artifact | Reference for v0.2.0 | Digest |
+| Артефакт | Ссылка для v0.2.0 | Digest |
 | --- | --- | --- |
-| image | `ghcr.io/vasyakrg/image-prepuller:0.2.0` (multi-arch amd64+arm64; plus `sha-<12>`; `latest` follows `main`) | `sha256:5f5527aa5d070d1889b29894faf604e2347d036522256053237668b1913b7fca` |
-| chart | `oci://ghcr.io/vasyakrg/charts/image-prepuller` version `0.2.0` | `sha256:ad84a3f3137cbdfa3e1d97b72f0476e82ad87c4355de56cc9c0d6ed96a27532f` |
+| image | `ghcr.io/vasyakrg/image-prepuller:0.2.0` (multi-arch amd64+arm64; плюс `sha-<12>`; `latest` следует за `main`) | `sha256:5f5527aa5d070d1889b29894faf604e2347d036522256053237668b1913b7fca` |
+| chart | `oci://ghcr.io/vasyakrg/charts/image-prepuller` версия `0.2.0` | `sha256:ad84a3f3137cbdfa3e1d97b72f0476e82ad87c4355de56cc9c0d6ed96a27532f` |
 
-Both packages are **public** — pulling an image or chart needs no credentials (verified
-anonymously). If you flip them to private in the GitHub package settings, add
-`imagePullSecrets` for the pods and `helm registry login ghcr.io` before install.
+Оба пакета **публичные** — pull образа или чарта не требует кредов (проверено
+анонимно). Если сделаете их приватными в настройках пакетов GitHub, добавьте
+`imagePullSecrets` для подов и `helm registry login ghcr.io` перед установкой.
 
 ```bash
 helm upgrade --install prepuller oci://ghcr.io/vasyakrg/charts/image-prepuller \
@@ -485,75 +497,76 @@ helm upgrade --install prepuller oci://ghcr.io/vasyakrg/charts/image-prepuller \
   --set secret.sessionSecret="$(openssl rand -hex 32)"
 ```
 
-> GHCR packages are **private by default**, even for a public repository. To pull without
-> credentials, open the package settings on GitHub (`Packages → image-prepuller` and
-> `Packages → charts/image-prepuller`) and switch visibility to public — the
-> `org.opencontainers.image.source` label added by the workflow links the package to the
-> repository. Keep them private and use `imagePullSecrets` / `helm registry login`
-> instead.
+> Пакеты GHCR **по умолчанию приватные**, даже для публичного репозитория.
+> Чтобы тянуть без кредов, откройте настройки пакета на GitHub
+> (`Packages → image-prepuller` и `Packages → charts/image-prepuller`) и
+> переключите видимость на public — метка `org.opencontainers.image.source`,
+> которую добавляет workflow, связывает пакет с репозиторием. Если оставляете
+> приватными, используйте `imagePullSecrets` / `helm registry login`.
 
-Release checklist:
+Чек-лист релиза:
 
-1. `bash hack/e2e-k3d.sh` — the k3d acceptance scenario above must pass locally.
-2. `Chart.yaml` `version`/`appVersion` match the tag (`v0.2.0` → `0.2.0`); the workflow
-   fails the chart job on a mismatch.
-3. `git tag v0.2.0 && git push origin v0.2.0` — builds `ghcr.io/…:0.2.0` (amd64+arm64)
-   and pushes the chart.
-4. Verify: `docker buildx imagetools inspect ghcr.io/vasyakrg/image-prepuller:0.2.0` and
-   `helm show chart oci://ghcr.io/vasyakrg/charts/image-prepuller --version 0.2.0`.
+1. `bash hack/e2e-k3d.sh` — сценарий приёмки на k3d выше должен пройти локально.
+2. `Chart.yaml` `version`/`appVersion` совпадают с тегом (`v0.2.0` → `0.2.0`);
+   workflow валит job чарта при несовпадении.
+3. `git tag v0.2.0 && git push origin v0.2.0` — собирает
+   `ghcr.io/…:0.2.0` (amd64+arm64) и пушит чарт.
+4. Проверка: `docker buildx imagetools inspect ghcr.io/vasyakrg/image-prepuller:0.2.0`
+   и `helm show chart oci://ghcr.io/vasyakrg/charts/image-prepuller --version 0.2.0`.
 
-## 14. First production cluster (Talos)
+## 14. Первый прод-кластер (Talos)
 
-The first rollout was verified on a three-node Talos cluster (Talos v1.13,
-Kubernetes v1.36, Cilium, Traefik, cert-manager) by installing a throw-away
-release, exercising it and removing it afterwards. The numbers in 14.6 come from
-that run; they drift with the workloads, so treat them as sanity ranges.
+Первая раскатка проверена на трёхузловом кластере Talos (Talos v1.13,
+Kubernetes v1.36, Cilium, Traefik, cert-manager): ставился одноразовый релиз,
+прогонялся и удалялся. Числа в 14.6 взяты из того прогона; они плывут вместе с
+workload'ами, так что считайте их ориентировочными диапазонами.
 
-**This repository is public.** The overlay of a real cluster (hostname, node
-addresses, secret store, pinned tags) lives in the private GitOps repository of
-the platform, never here. This repository ships only the template
-[deploy/values/talos-example.yaml](../deploy/values/talos-example.yaml); copy it
-into the GitOps repository and fill in real values there.
+**Этот репозиторий публичный.** Overlay реального кластера (hostname, адреса
+нод, secret store, пришпиленные теги) живёт в приватном GitOps-репозитории
+платформы, а не здесь. Здесь лежит только шаблон
+[deploy/values/talos-example.yaml](../deploy/values/talos-example.yaml);
+скопируйте его в GitOps-репозиторий и заполните реальными значениями уже там.
 
-### 14.1 What the target cluster must provide
+### 14.1 Что должен предоставить целевой кластер
 
-| Requirement | Notes |
+| Требование | Примечания |
 | --- | --- |
-| Kubernetes with CRI v1 | the agent talks to containerd over the CRI gRPC socket |
-| containerd socket on the node | upstream ```/run/containerd/containerd.sock```; k3s/k3d use ```/run/k3s/containerd/containerd.sock``` |
-| control-plane taint tolerated | without a matching ```agent.tolerations``` entry every control-plane slot stays ```offline``` and the snapshot is permanently ```partial``` |
-| hub -> ```Node.InternalIP:9443``` reachable | the agent is ```hostNetwork```; the hub calls it directly, no Service in between |
-| Prometheus scraping the node IPs | the agent serves ```/metrics``` on ```:9444``` without auth (14.8) |
-| read-only access to Nodes and workloads | the chart ships the RBAC; no cluster-admin, no PVC, no local registry |
-| ingress + TLS (optional) | any Ingress controller plus cert-manager, or the cluster's own ```IngressRoute``` convention |
-| registry reachable from the nodes | if containerd pulls through a mirror, set ```agent.pull.registryProbe=false``` (the probe dials upstream directly, containerd does not) |
+| Kubernetes с CRI v1 | агент общается с containerd по gRPC-сокету CRI |
+| сокет containerd на ноде | upstream ```/run/containerd/containerd.sock```; k3s/k3d используют ```/run/k3s/containerd/containerd.sock``` |
+| toleration для control-plane taint | без соответствующей записи ```agent.tolerations``` каждый слот control-plane навсегда остаётся ```offline```, а снапшот — постоянно ```partial``` |
+| достижимость hub → ```Node.InternalIP:9443``` | агент работает с ```hostNetwork```; hub ходит к нему напрямую, без Service |
+| Prometheus скрейпит IP-адреса нод | агент отдаёт ```/metrics``` на ```:9444``` без авторизации (14.8) |
+| read-only доступ к Nodes и workload'ам | RBAC даёт чарт; не нужен cluster-admin, PVC или локальный registry |
+| ingress + TLS (опционально) | любой Ingress-контроллер плюс cert-manager либо собственная конвенция ```IngressRoute``` кластера |
+| реестр, доступный с нод | если containerd тянет через mirror, задайте ```agent.pull.registryProbe=false``` (проба делает dial в upstream напрямую, containerd — нет) |
 
-### 14.2 Pin the image tag to the commit, not to the release
+### 14.2 Привязать тег образа к коммиту, а не к релизу
 
-The chart passes ```agent.pull.*``` flags (```-pull-timeout```,
-```-registry-probe-timeout```, ```-pull-stall-timeout```) that the released **0.2.0
-image** does not know. Mixing the chart from ```main``` with ```image.tag=0.2.0```
-makes the agent exit immediately:
+Чарт передаёт агенту флаги ```agent.pull.*``` (```-pull-timeout```,
+```-registry-probe-timeout```, ```-pull-stall-timeout```), которых не знает
+релизный **образ 0.2.0**. Смесь чарта из ```main``` с ```image.tag=0.2.0```
+роняет агент сразу при старте:
 
 ```
 flag provided but not defined: -pull-timeout
 ```
 
-so the DaemonSet sits in ```CrashLoopBackOff``` and every node shows ```offline```.
-Two consistent combinations exist:
+в итоге DaemonSet висит в ```CrashLoopBackOff```, а все ноды показывают
+```offline```. Есть две согласованные комбинации:
 
-| Combination | What you get |
+| Комбинация | Что получаете |
 | --- | --- |
-| chart from this repo at a commit + ```image.tag=sha-<same commit>``` | current code, pull hygiene on — **use this for the first rollout** |
-| published OCI chart ```0.2.0``` + image ```0.2.0``` | consistent released pair, but no preflight probe / stall watchdog |
+| чарт из этого репозитория на коммите + ```image.tag=sha-<same commit>``` | текущий код, гигиена pull'ов включена — **используйте это для первой раскатки** |
+| опубликованный OCI-чарт ```0.2.0``` + образ ```0.2.0``` | согласованная релизная пара, но без preflight-пробы и stall watchdog |
 
-Take the ```sha-*``` tag of the commit you deploy; never fall back to ```latest```.
+Берите тег ```sha-*``` того коммита, который деплоите; никогда не откатывайтесь
+на ```latest```.
 
-### 14.3 Namespace and credentials
+### 14.3 Namespace и креды
 
-The agent pod is not ```restricted```-compatible: ```hostNetwork```, a ```hostPath```
-socket and uid 0 to read it. Label the namespace so a future Pod Security
-default change does not block the DaemonSet:
+Под агента несовместим с ```restricted```: ```hostNetwork```, сокет
+```hostPath``` и uid 0, чтобы его прочитать. Пометьте namespace, чтобы будущее
+ужесточение Pod Security по умолчанию не заблокировало DaemonSet:
 
 ```bash
 kubectl create namespace prepuller
@@ -562,17 +575,16 @@ kubectl label namespace prepuller \
   pod-security.kubernetes.io/enforce-version=latest
 ```
 
-Two ways to feed the chart its Secret:
+Два способа отдать чарту его Secret:
 
-**A. Let the chart generate it** (quick, fine for the first rollout): keep
-```secret.create=true``` and nothing else; read the password back afterwards
-(section 3).
+**A. Пусть чарт сгенерирует его сам** (быстро, годится для первой раскатки):
+оставьте только ```secret.create=true```; пароль прочитайте потом (раздел 3).
 
-**B. External secret** (the usual GitOps convention): store the item in the
-platform's secret store, materialise a Secret in namespace ```prepuller``` and set
-```secret.create=false```, ```secret.existingSecret=<secret-name>``` in the overlay.
-The Secret must carry ```auth-user```, ```auth-pass```, ```session-secret```,
-```cluster-token``` and ```agent-token```:
+**B. Внешний секрет** (обычная конвенция GitOps): храните запись в secret store
+платформы, материализуйте Secret в namespace ```prepuller``` и задайте в overlay
+```secret.create=false```, ```secret.existingSecret=<secret-name>```. В Secret
+должны быть ```auth-user```, ```auth-pass```, ```session-secret```,
+```cluster-token``` и ```agent-token```:
 
 ```yaml
 apiVersion: external-secrets.io/v1
@@ -592,29 +604,29 @@ spec:
         key: <secret-item-name>
 ```
 
-Keep ```session-secret``` stable: it signs the UI cookies, so a new value logs
-every user out on upgrade.
+Держите ```session-secret``` стабильным: им подписываются cookie UI, поэтому
+новое значение разлогинит всех пользователей при upgrade.
 
-### 14.4 DNS and TLS
+### 14.4 DNS и TLS
 
-Point a hostname at the ingress controller (A/CNAME record; a wildcard is not
-required):
+Направьте hostname на ingress-контроллер (A/CNAME-запись; wildcard не
+обязателен):
 
 ```bash
 dig +short <prepuller.example.com>
 ```
 
-@@"deploy/values/talos-example.yaml"@@ enables the chart Ingress with the
-platform's ```ClusterIssuer```; cert-manager's ingress-shim then issues the
-certificate for ```ingress.tls```. Watch it:
+[deploy/values/talos-example.yaml](../deploy/values/talos-example.yaml) включает Ingress чарта с
+```ClusterIssuer``` платформы; ingress-shim cert-manager'а выпускает сертификат
+для ```ingress.tls```. Следить:
 
 ```bash
 kubectl -n prepuller get certificate -w
 kubectl -n prepuller get order,challenge
 ```
 
-If the cluster prefers a native ```IngressRoute```, set ```ingress.enabled=false``` and
-apply these two objects instead:
+Если кластер предпочитает нативный ```IngressRoute```, задайте
+```ingress.enabled=false``` и примените два этих объекта:
 
 ```yaml
 apiVersion: cert-manager.io/v1
@@ -647,9 +659,9 @@ spec:
     secretName: prepuller-tls
 ```
 
-### 14.5 Install
+### 14.5 Установка
 
-Preview first — the template overlay is plain values, no secrets:
+Сначала предпросмотр — в overlay-шаблоне обычные values, без секретов:
 
 ```bash
 helm template prepuller deploy/helm/image-prepuller -n prepuller \
@@ -657,7 +669,7 @@ helm template prepuller deploy/helm/image-prepuller -n prepuller \
 kubectl apply --dry-run=server -f /tmp/prepuller.yaml
 ```
 
-Then the release itself:
+Затем сам релиз:
 
 ```bash
 helm upgrade --install prepuller deploy/helm/image-prepuller \
@@ -665,19 +677,20 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
   -f deploy/values/talos-example.yaml
 ```
 
-What the template changes relative to the chart defaults (all documented inline):
+Что шаблон меняет относительно дефолтов чарта (всё описано инлайном):
 
-- ```image.tag``` — a ```sha-*``` build of the same commit (14.2);
-- ```hub.clusterName``` — the name the UI shows, e.g. ```talos-prod```;
-- ```hub.autoWarm=false``` — the reconciler is enabled after the first snapshot is
-  verified (14.7);
-- ```agent.tolerations``` for ```node-role.kubernetes.io/control-plane``` — without it
-  control-plane nodes never get an agent and the snapshot stays partial;
-- ```agent.pull.*``` left at defaults;
-- ```ingress.*``` — host, class, cert-manager issuer;
-- ```agent.metrics.enabled=true``` — the metrics Service on ```:9444``` (14.8).
+- ```image.tag``` — сборка ```sha-*``` того же коммита (14.2);
+- ```hub.clusterName``` — имя, которое показывает UI, например ```talos-prod```;
+- ```hub.autoWarm=false``` — reconciler включается после проверки первого
+  снапшота (14.7);
+- ```agent.tolerations``` для ```node-role.kubernetes.io/control-plane``` — без
+  него ноды control-plane никогда не получат агента, и снапшот останется
+  partial;
+- ```agent.pull.*``` оставлены на дефолтах;
+- ```ingress.*``` — хост, класс, issuer cert-manager;
+- ```agent.metrics.enabled=true``` — Service метрик на ```:9444``` (14.8).
 
-A published OCI chart works with the same overlay:
+Опубликованный OCI-чарт работает с тем же overlay:
 
 ```bash
 helm upgrade --install prepuller oci://ghcr.io/vasyakrg/charts/image-prepuller \
@@ -685,7 +698,7 @@ helm upgrade --install prepuller oci://ghcr.io/vasyakrg/charts/image-prepuller \
   -f deploy/values/talos-example.yaml
 ```
 
-### 14.6 Verify
+### 14.6 Проверка
 
 ```bash
 kubectl -n prepuller rollout status deploy/prepuller-image-prepuller --timeout=120s
@@ -695,7 +708,7 @@ kubectl -n prepuller logs ds/prepuller-image-prepuller-agent --tail=5
 # -> backend=cri:/run/containerd/containerd.sock api=v1 auth=true on every node
 ```
 
-Then log in and compare the snapshot against the cluster's own expectations:
+Затем залогиньтесь и сравните снапшот с ожиданиями самого кластера:
 
 ```bash
 kubectl -n prepuller port-forward svc/prepuller-image-prepuller 8080:8080 &
@@ -707,17 +720,18 @@ curl -fsS -b /tmp/pc 'http://127.0.0.1:8080/api/v1/snapshot?cluster=<cluster-nam
   | jq '{syncStatus, partial, summary, nodes: [.nodes[] | {name, agentUp, cachedImageCount, imageFSUsedBytes, imageFSCapacityBytes}]}'
 ```
 
-Sanity ranges from the reference run (3 nodes, ~90 distinct images):
+Ориентировочные диапазоны из эталонного прогона (3 ноды, ~90 уникальных
+образов):
 
-| Signal | Expected |
+| Сигнал | Ожидание |
 | --- | --- |
 | ```clusters[0]``` | ```online=true```, ```readyWorkers=3```, ```totalWorkers=3```, ```totalWorkloads``` ~90, ```coveragePercent``` ~50, ```syncStatus=ok``` |
-| ```summary``` | Deployments ~70, StatefulSets ~10, DaemonSets ~10, ~90 unique images, ~190 of ~375 slots present |
-| ```nodes[]``` | ```agentUp=true``` everywhere; ```cachedImageCount``` differs per node (a control-plane node caches much less) |
-| ```imageFSUsedBytes``` | GiB-scale and node-specific; ```imageFSCapacityBytes``` may be ```0``` — see 14.7 |
-| ```syncStatus=ok```, ```partial=false``` | every agent answered |
+| ```summary``` | Deployments ~70, StatefulSets ~10, DaemonSets ~10, ~90 уникальных образов, ~190 из ~375 слотов present |
+| ```nodes[]``` | ```agentUp=true``` везде; ```cachedImageCount``` различается по нодам (нода control-plane кэширует намного меньше) |
+| ```imageFSUsedBytes``` | масштаба GiB и зависит от ноды; ```imageFSCapacityBytes``` может быть ```0``` — см. 14.7 |
+| ```syncStatus=ok```, ```partial=false``` | ответили все агенты |
 
-The node-agent API is reachable on ```Node.InternalIP:9443``` (host network):
+API node-agent доступно на ```Node.InternalIP:9443``` (host network):
 
 ```bash
 kubectl -n prepuller port-forward ds/prepuller-image-prepuller-agent 9443:9443 &
@@ -725,7 +739,7 @@ curl -fsS -H "Authorization: Bearer $(kubectl -n prepuller get secret prepuller-
   http://127.0.0.1:9443/agent/v1/snapshot | jq '{node, imageCount: (.images | length), imageFSUsedBytes}'
 ```
 
-Pull path smoke test (a small image is enough; the timeout behaviour matters):
+Смоук pull-пути (достаточно маленького образа; важно поведение по таймаутам):
 
 ```bash
 # Black-holed target: the preflight dial gives up after 5 s -> 502.
@@ -747,54 +761,58 @@ curl -fsS -b /tmp/pc 'http://127.0.0.1:8080/api/v1/pull-tasks?cluster=<cluster-n
   | jq '.tasks[] | {image, state, durationMs}'
 ```
 
-In the live provider a pull is synchronous through the agent, so the ```202```
-answer often already carries the terminal state (```state=succeeded```) — still poll
-```/api/v1/pull-tasks``` in a script instead of trusting the response body.
+В live-провайдере pull синхронный через агента, поэтому ответ ```202``` часто уже
+несёт терминальное состояние (```state=succeeded```) — в скрипте всё равно
+поллите ```/api/v1/pull-tasks```, а не полагайтесь на тело ответа.
 
-### 14.7 Cluster-specific gotchas
+### 14.7 Подводные камни кластера
 
-- **Control-plane agent.** Control-plane nodes are tainted; the DaemonSet needs
-  the toleration from the overlay, otherwise every control-plane slot is
-  ```offline``` and ```partial=true``` forever.
-- **```imageFSCapacityBytes=0``` on Talos.** containerd's ```ImageFsInfo``` reports used
-  bytes only, so the disk guard (```agent.diskPauseRatio```, ```ShouldPause```) can
-  never trip: a zero capacity is treated as "not paused" (fail-open). Used bytes
-  are still exported (```prepuller_node_imagefs_used_bytes```) — alert on the
-  **node** disk (```node_filesystem_avail_bytes```) instead of relying on pull
-  pauses. The stall watchdog is unaffected: it watches growth of the same
-  used-bytes value.
-- **Ports 9443 and 9444 on every node.** The agent uses ```hostNetwork``` and a
-  NetworkPolicy cannot fence a host-network pod; keep the ports behind the node
-  firewall if the node network is not private. ```9443``` requires the
-  ```agent-token``` Bearer token, ```9444``` is counters only and anonymous (14.8).
-- **Rolling updates.** ```maxUnavailable: 10%``` rounds down to 1 on a small
-  cluster, so an agent upgrade restarts one node's agent at a time and the
-  snapshot is briefly ```partial``` — expected.
-- **Registry mirrors.** If containerd pulls ```docker.io``` through mirrors while a
-  direct dial from the node is blocked, set ```agent.pull.registryProbe=false```
-  (the probe dials the registry directly, containerd does not).
-- **Auto-warm.** The overlay ships ```hub.autoWarm=false```. Enable it only after
-  the snapshot looks right: on the reference cluster at ~50% coverage the first
-  reconcile scheduled ~185 pulls, throttled by the reconciler defaults (2 in
-  flight per node, 4 in total, backoff 30 s -> 15 min). Watch
-  ```prepuller_pull_total``` and ```activePulls``` before leaving it on.
-- **One hub replica.** Sessions and the task list live in memory; there is no
-  PVC and no leader election. Keep ```hub.replicaCount=1``` (and the same
-  ```session-secret``` if you ever go higher).
+- **Агент на control-plane.** Ноды control-plane помечены taint; DaemonSet
+  требует toleration из overlay, иначе каждый слот control-plane навсегда
+  ```offline``` и ```partial=true```.
+- **```imageFSCapacityBytes=0``` на Talos.** ```ImageFsInfo``` в containerd отдаёт
+  только used bytes, поэтому disk-guard (```agent.diskPauseRatio```,
+  ```ShouldPause```) никогда не срабатывает: нулевая ёмкость считается
+  «не пауза» (fail-open). Used bytes всё равно экспортируются
+  (```prepuller_node_imagefs_used_bytes```) — алертите на диск **ноды**
+  (```node_filesystem_avail_bytes```), а не полагайтесь на паузы pull'ов.
+  Stall watchdog это не затрагивает: он смотрит рост того же значения used
+  bytes.
+- **Порты 9443 и 9444 на каждой ноде.** Агент использует ```hostNetwork```, а
+  NetworkPolicy не может огородить host-network под; если сеть нод не приватная,
+  держите порты за фаерволом ноды. ```9443``` требует Bearer-токен
+  ```agent-token```, ```9444``` — только счётчики и без авторизации (14.8).
+- **Раскатки обновлений.** ```maxUnavailable: 10%``` на маленьком кластере
+  округляется вниз до 1, поэтому upgrade агента перезапускает агент по одной
+  ноде, и снапшот ненадолго становится ```partial``` — это ожидаемо.
+- **Registry mirror'ы.** Если containerd тянет ```docker.io``` через mirror'ы, а
+  прямой dial с ноды заблокирован, задайте
+  ```agent.pull.registryProbe=false``` (проба делает dial в реестр напрямую,
+  containerd — нет).
+- **Авто-прогрев.** В overlay ```hub.autoWarm=false```. Включайте только после
+  того, как снапшот выглядит правильно: на эталонном кластере при покрытии ~50%
+  первая сверка поставила ~185 pull'ов, ограниченных дефолтами reconciler'а
+  (2 в полёте на ноду, 4 всего, backoff 30 s -> 15 min). Смотрите
+  ```prepuller_pull_total``` и ```activePulls```, прежде чем оставлять
+  включённым.
+- **Одна реплика hub.** Сессии и список задач живут в памяти; нет PVC и нет
+  leader election. Держите ```hub.replicaCount=1``` (и тот же
+  ```session-secret```, если когда-нибудь поднимете выше).
 
-### 14.8 Metrics and alerts
+### 14.8 Метрики и алерты
 
-Two endpoints, both on the node network:
+Два эндпоинта, оба в сети нод:
 
-| Endpoint | Port | Auth | What it answers |
+| Эндпоинт | Порт | Авторизация | Что отвечает |
 | --- | --- | --- | --- |
-| hub ```/metrics``` | 9090 | none (cluster-internal) | cluster snapshot, slots, pull tasks, agent error reasons; one snapshot per cluster per scrape, bounded at 3 s |
-| node-agent ```/metrics``` | 9444 | none | local agent health: request counters by endpoint/status, last contact per endpoint, CRI status, pull counters, ImageFS |
+| hub ```/metrics``` | 9090 | нет (внутри кластера) | снапшот кластера, слоты, pull-задачи, причины ошибок агента; один снапшот на кластер за скрейп, ограничен 3 s |
+| node-agent ```/metrics``` | 9444 | нет | локальное здоровье агента: счётчики запросов по эндпоинту/статусу, последний контакт по эндпоинту, статус CRI, счётчики pull'ов, ImageFS |
 
-The chart renders a ClusterIP Service for the agent metrics port when
-```agent.metrics.enabled=true```; because the agent is ```hostNetwork```, the Service
-endpoints are the node IPs, so a ServiceMonitor (or the plain ```prometheus.io/*```
-annotations the chart also sets) works without extra plumbing:
+Чарт рендерит ClusterIP Service для порта метрик агента при
+```agent.metrics.enabled=true```; поскольку агент работает с ```hostNetwork```,
+endpoints Service — это IP-адреса нод, поэтому ServiceMonitor (или обычные
+аннотации ```prometheus.io/*```, которые чарт тоже ставит) работает без
+дополнительной обвязки:
 
 ```yaml
 apiVersion: monitoring.coreos.com/v1
@@ -816,16 +834,16 @@ spec:
       scrapeTimeout: 15s     # the hub bounds each snapshot at 3 s, keep headroom
 ```
 
-Keeping ```scrapeTimeout``` at 15 s matters: with a default 10 s the hub could miss
-its deadline while it waits for a dead agent, and the whole target would drop
-out exactly during an incident.
+Держать ```scrapeTimeout``` на 15 s важно: при дефолтных 10 s hub может не
+уложиться в собственный дедлайн, пока ждёт мёртвого агента, и вся цель выпадет
+ровно во время инцидента.
 
-The alert rules for these series ship in this repository as a ```PrometheusRule```
-template (```prometheusRule.enabled```) and are explained, together with a
-triangulation matrix for "is it the agent, the token or the link?", in
+Правила алертов для этих серий лежат в этом репозитории шаблоном
+```PrometheusRule``` (```prometheusRule.enabled```) и разобраны вместе с
+матрицей триангуляции «агент, токен или связь?» в
 [docs/alerts.md](alerts.md).
 
-### 14.9 Upgrade, rollback, uninstall
+### 14.9 Upgrade, откат, удаление
 
 ```bash
 # same overlay, new sha tag
@@ -840,7 +858,6 @@ kubectl delete secret prepuller-image-prepuller-secret -n prepuller   # kept by 
 kubectl delete namespace prepuller
 ```
 
-Deleting the namespace also removes the Ingress, the Certificate and the
-DaemonSet; the containerd image cache on the nodes is **not** touched by an
-uninstall. If Flux owns the release later, remove the HelmRelease instead and let
-Flux prune.
+Удаление namespace уносит также Ingress, Certificate и DaemonSet; image-кэш
+containerd на нодах при uninstall **не** трогается. Если позже релизом владеет
+Flux, удалите HelmRelease и дайте Flux сделать prune.
