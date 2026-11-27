@@ -440,21 +440,23 @@ flowchart TD
    `provider.ErrAgentPullStalled` (HTTP 504), задача сразу `failed`, слот
    освобождается; `DefaultAgentPullTimeout` (10 min) остаётся страховкой для
    действительно долгих загрузок. Подробности — AGENTS.md §8.
-
 ## 9. Метрики
 
 ```mermaid
 flowchart LR
-    SCR["Prometheus scrape<br/>GET /metrics"] --> MH["metrics.Handler(reg)"]
-    MH --> IDS["reg.AllIDs() (sorted)"]
-    IDS --> LOOP["для каждого cluster id"]
-    LOOP --> SNAP["ровно один Provider.Snapshot(ctx)"]
-    SNAP --> CL["cluster_up · sync_partial · last_sync_timestamp"]
-    SNAP --> ND["node_ready · disk_paused · imagefs used/capacity/free · images_cached"]
+    SCR["Prometheus scrape<br/>GET /metrics"] --> MH["metrics.Handler(reg)<br/>stateful collector"]
+    MH --> PAR["каждый кластер — своя горутина"]
+    PAR --> SNAP["ровно один Provider.Snapshot(ctx)<br/>на кластер за скрейп"]
+    PAR --> DL{"общий дедлайн 3 s?"}
+    DL -->|успел| OUT["text/plain; version=0.0.4"]
+    DL -->|не успел| TMO["snapshot_scrape_timeout_total++<br/>последний успешный снапшот"]
+    TMO --> OUT
+    SNAP --> CL["cluster_up · sync_partial · last_sync_timestamp · snapshot_age"]
+    SNAP --> ND["node_ready · agent_up · last_seen · agent_errors{reason}<br/>disk_paused · imagefs used/capacity/free · images_cached"]
     SNAP --> TS["pull_tasks{state} · pull_task_duration_seconds · agent_info"]
     SNAP --> IMG["image_present · workload_policy_violation"]
-    LOOP --> CNT["Provider.PullCounters()<br/>pull_total"]
-    CL --> OUT["text/plain; version=0.0.4"]
+    PAR --> CNT["Provider.PullCounters()<br/>pull_total"]
+    CL --> OUT
     ND --> OUT
     TS --> OUT
     IMG --> OUT
@@ -464,16 +466,46 @@ flowchart LR
 Экспозиция собирается руками (`strings.Builder`), без `prometheus/client_golang` —
 эта зависимость запрещена ADR-001, как и любые UI/роутинг-фреймворки. Внешние
 зависимости модуля ограничены агентом (grpc+cri-api) и K8s-провайдером (client-go).
-Скрейп делает ровно один `Snapshot()` на кластер: `collectClusters()` — единственная
-точка вызова, все билдеры получают готовый снимок. Это зафиксировано тестом
-`TestHandlerCallsSnapshotOncePerCluster`. Тяжёлый live-снапшот дополнительно кэшируется
-внутри провайдера (`K8sProvider` — TTL 2s), а не в метриках.
+
+**Скрейп не слепнет при аварии.** `Handler` создаёт один stateful-коллектор на всё
+время жизни процесса: каждый `Provider.Snapshot` вызывается в своей горутине, все
+кластеры параллельно, общий дедлайн `snapshotDeadline = 3 s`
+(`internal/metrics/prometheus.go`). Не успевший кластер получает
+`prepuller_snapshot_scrape_timeout_total{cluster}` и в вывод идёт его последний
+успешный снапшот из коллектора — со своим `LastSyncAt`, поэтому
+`prepuller_snapshot_age_seconds` растёт (это и есть сигнал «hub ослеп»). Кластер,
+который ни разу не отвечал, не получает ни одной серии, кроме счётчика таймаутов:
+нули выглядели бы как здоровый кластер. `PullCounters` качается в той же горутине и
+в тот же дедлайн; не успел — берутся прошлые counters. Брошенная горутина пишет в
+буферизованный канал, а после возврата хендлера `r.Context()` отменяется, поэтому
+снапшот провайдера быстро отпускает мьютекс. Инвариант «ровно один `Snapshot()` на
+кластер за скрейп» сохранён (`TestHandlerCallsSnapshotOncePerCluster`). До этого
+изменения partition стоил 5 s × число нод и ронял весь скрейп по `scrape_timeout`.
 
 Семантика: `prepuller_cluster_up=0` при `syncStatus=offline` или `partial=true`;
-`prepuller_cluster_last_sync_timestamp_seconds` отсутствует, если `LastSyncAt` неизвестен
-(нулевое время), и никогда не подменяется текущим временем. `pull_task_duration_seconds` —
-gauge со средним по терминальным задачам (гистограмма в text 0.0.4 без client_golang
-потребовала бы bucket-серий и нескольких sample с одинаковым label-set, что невалидно).
+`prepuller_cluster_last_sync_timestamp_seconds` отсутствует, если `LastSyncAt`
+неизвестен (нулевое время), и никогда не подменяется текущим временем;
+`prepuller_node_last_seen_timestamp_seconds` отсутствует при нулевом `LastSeen`.
+`pull_task_duration_seconds` — gauge со средним по терминальным задачам
+(гистограмма в text 0.0.4 без client_golang потребовала бы bucket-серий и
+нескольких sample с одинаковым label-set, что невалидно).
+
+**Ошибки агента на hub:** `prepuller_node_agent_errors_total{cluster,node,reason}`
+заполняет `K8sProvider` — единственный, кто реализует опциональную capability
+`provider.AgentErrorCounter` (в замороженный интерфейс `Provider` её сознательно не
+добавляли). `provider.ClassifyAgentError` сводит ошибку инвентаря к закрытому набору
+`unauthorized|protocol|timeout|unavailable`; эмитятся только реально наблюдавшиеся
+reason'ы. У mock и remote кластеров серии нет — это норма.
+
+**Метрики node-agent (отдельный порт).** Агент поднимает второй листенер
+(`-metrics-addr`, по умолчанию `:9444`, без авторизации) и отдаёт только
+счётчики/gauge'и, которые уже знает: запросы по `endpoint`/`code`, время последнего
+контакта по каждому endpoint (инициализируется стартом процесса, поэтому «к агенту
+никто не ходил» алертится сразу), статус CRI по последнему снапшоту, pull-счётчики
+по результату, ImageFS и число образов из последнего успешного снапшота. На скрейпе
+агент не ходит в CRI и в сеть, поэтому скрейп не может заблокироваться. Вместе с
+`prepuller_node_agent_up` и `prepuller_node_last_seen_timestamp_seconds` это даёт
+триангуляцию «агент умер / токен / связь hub→агент» — таблица в `docs/alerts.md`.
 
 ## 10. Расширение до живого кластера (Stage 2–3)
 

@@ -1,0 +1,23 @@
+{{- if and .Values.agent.enabled .Values.agent.metrics.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ default (printf "%s-agent-metrics" (include "ip.fullname" .)) .Values.agent.metrics.service.name | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "ip.labels" (dict "ctx" . "component" "agent") | nindent 4 }}
+spec:
+  # The agent DaemonSet is hostNetwork, so every Service endpoint is the
+  # node's own IP:port, not a pod IP behind a bridge. A headless Service adds
+  # nothing here: one endpoint per node is exactly the cardinality the
+  # prepuller_agent_* series need, and a ClusterIP Service keeps normal Service
+  # discovery (kube-proxy just forwards to the node IPs) without a port-forward
+  # per node. Keep type ClusterIP unless the node network requires otherwise.
+  type: {{ .Values.agent.metrics.service.type }}
+  selector:
+    {{- include "ip.selectorLabels" (dict "ctx" . "component" "agent") | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.agent.metrics.port }}
+      targetPort: {{ .Values.agent.metrics.port }}
+      protocol: TCP
+{{- end }}

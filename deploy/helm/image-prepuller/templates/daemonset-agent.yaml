@@ -15,9 +15,10 @@ spec:
     metadata:
       labels:
         {{- include "ip.labels" (dict "ctx" . "component" "agent") | nindent 8 }}
-      {{- with .Values.podAnnotations }}
+      {{- $annotations := include "ip.podAnnotations" (dict "ctx" . "metrics" .Values.agent.metrics.annotations "metricsPort" .Values.agent.metrics.port) }}
+      {{- if trim $annotations }}
       annotations:
-        {{- toYaml . | nindent 8 }}
+        {{- $annotations | nindent 8 }}
       {{- end }}
     spec:
       # The hub reaches the agent on the node InternalIP:agent.port, and the CRI
@@ -44,6 +45,11 @@ spec:
             - agent
             - -cri-socket={{ .Values.agent.criSocket }}
             - -listen-addr=:{{ .Values.agent.port }}
+            {{- if .Values.agent.metrics.enabled }}
+            - -metrics-addr=:{{ .Values.agent.metrics.port }}
+            {{- else }}
+            - -metrics-addr=
+            {{- end }}
             - -disk-pause-ratio={{ .Values.agent.diskPauseRatio }}
             - -pull-timeout={{ .Values.agent.pull.timeout }}
             - -registry-probe-timeout={{ .Values.agent.pull.registryProbeTimeout }}
@@ -74,6 +80,11 @@ spec:
             - name: http
               containerPort: {{ .Values.agent.port }}
               protocol: TCP
+            {{- if .Values.agent.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.agent.metrics.port }}
+              protocol: TCP
+            {{- end }}
           # Agent wire API v1 exposes GET /healthz next to /agent/v1/*.
           livenessProbe:
             httpGet:

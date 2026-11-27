@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -59,10 +60,82 @@ func newTestRegistry(t *testing.T, clusters map[string]*fakeProvider) *provider.
 	return reg
 }
 
+// newRegistry registers arbitrary providers (the error-counter capability is
+// optional, so tests need providers that are not plain *fakeProvider).
+func newRegistry(t *testing.T, clusters map[string]provider.Provider) *provider.Registry {
+	t.Helper()
+	reg := provider.NewRegistry()
+	for id, p := range clusters {
+		reg.Register(provider.ClusterEntry{ID: id, Name: id, Role: "remote", Provider: p})
+	}
+	return reg
+}
+
+// errorCountingProvider is a fakeProvider that also implements the optional
+// provider.AgentErrorCounter capability, like K8sProvider does.
+type errorCountingProvider struct {
+	*fakeProvider
+	errors map[provider.AgentErrorKey]uint64
+}
+
+func (p *errorCountingProvider) AgentErrors() map[provider.AgentErrorKey]uint64 {
+	out := make(map[provider.AgentErrorKey]uint64, len(p.errors))
+	for key, count := range p.errors {
+		out[key] = count
+	}
+	return out
+}
+
+// blockingProvider models a provider stuck in a network call: Snapshot ignores
+// the context until the test releases it. calls counts invocations before the
+// block, so the one-call-per-scrape invariant is still observable.
+type blockingProvider struct {
+	*fakeProvider
+	block chan struct{}
+	gate  atomic.Bool
+	calls atomic.Int32
+}
+
+func (p *blockingProvider) Snapshot(ctx context.Context) model.Snapshot {
+	p.calls.Add(1)
+	if p.gate.Load() {
+		<-p.block
+	}
+	return p.fakeProvider.Snapshot(ctx)
+}
+
+// seriesValue returns the numeric value of the first sample whose line starts
+// with prefix.
+func seriesValue(t *testing.T, body, prefix string) (float64, bool) {
+	t.Helper()
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			t.Fatalf("malformed sample %q", line)
+		}
+		value, err := strconv.ParseFloat(fields[1], 64)
+		if err != nil {
+			t.Fatalf("parse sample %q: %v", line, err)
+		}
+		return value, true
+	}
+	return 0, false
+}
+
 func scrape(t *testing.T, reg *provider.Registry) string {
 	t.Helper()
+	return scrapeHandler(t, Handler(reg))
+}
+
+// scrapeHandler serves one scrape through an existing handler. The collector is
+// stateful, so partition tests must reuse the handler created once at startup.
+func scrapeHandler(t *testing.T, h http.Handler) string {
+	t.Helper()
 	rec := httptest.NewRecorder()
-	Handler(reg).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("metrics status = %d, want 200", rec.Code)
 	}
@@ -88,6 +161,7 @@ func fixedSnapshot() model.Snapshot {
 				ImageFSUsedBytes:     100,
 				ImageFSCapacityBytes: 1000,
 				CachedImageCount:     2,
+				LastSeen:             time.Unix(1700000500, 0).UTC(),
 				CachedImages: []model.CachedImage{
 					{Image: "ghcr.io/acme/api:1", SizeBytes: 10},
 					{Image: "ghcr.io/acme/web:1", SizeBytes: 20},
@@ -199,6 +273,10 @@ func TestNewSeriesHaveHelpAndType(t *testing.T) {
 		"prepuller_agent_info",
 		"prepuller_cluster_last_sync_timestamp_seconds",
 		"prepuller_cluster_sync_partial",
+		"prepuller_node_last_seen_timestamp_seconds",
+		"prepuller_node_agent_errors_total",
+		"prepuller_snapshot_age_seconds",
+		"prepuller_snapshot_scrape_timeout_total",
 		"prepuller_build_info",
 		// pre-existing families keep their headers.
 		"prepuller_cluster_up",
@@ -264,6 +342,12 @@ func TestOfflineClusterMetrics(t *testing.T) {
 	if strings.Contains(body, `prepuller_cluster_last_sync_timestamp_seconds{cluster="offline"}`) {
 		t.Error("offline cluster must not report a last sync timestamp when LastSyncAt is zero")
 	}
+	if strings.Contains(body, `prepuller_snapshot_age_seconds{cluster="offline"}`) {
+		t.Error("cluster that never synced must not report a snapshot age")
+	}
+	if strings.Contains(body, `prepuller_node_last_seen_timestamp_seconds{cluster="offline"}`) {
+		t.Error("cluster without agent timestamps must not report last_seen series")
+	}
 }
 
 func TestOutputStableForMultipleClusters(t *testing.T) {
@@ -275,6 +359,11 @@ func TestOutputStableForMultipleClusters(t *testing.T) {
 	reg := newTestRegistry(t, providers)
 	first := scrape(t, reg)
 	second := scrape(t, reg)
+	// prepuller_snapshot_age_seconds legitimately grows between two scrapes, so
+	// it is excluded from the byte-for-byte comparison; everything else must be
+	// stable, including the family/series order.
+	first = withoutSnapshotAge(first)
+	second = withoutSnapshotAge(second)
 	if first != second {
 		t.Fatal("metrics output is not stable between scrapes")
 	}
@@ -292,5 +381,182 @@ func TestOutputStableForMultipleClusters(t *testing.T) {
 		if i > 0 && p < positions[i-1] {
 			t.Fatalf("cluster order is not stable: positions = %v", positions)
 		}
+	}
+}
+
+// withoutSnapshotAge drops the one family whose value grows with wall-clock time.
+func withoutSnapshotAge(body string) string {
+	lines := strings.Split(body, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.HasPrefix(line, "prepuller_snapshot_age_seconds{") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
+}
+
+func TestNodeLastSeenSeries(t *testing.T) {
+	reg := newTestRegistry(t, map[string]*fakeProvider{"alpha": {snap: fixedSnapshot()}})
+	body := scrape(t, reg)
+
+	want := `prepuller_node_last_seen_timestamp_seconds{cluster="alpha",node="worker-1"} 1700000500`
+	if !strings.Contains(body, want) {
+		t.Fatalf("missing series %q", want)
+	}
+	// worker-2 has no LastSeen: a zero timestamp must be omitted, not emitted as 0.
+	if strings.Contains(body, `prepuller_node_last_seen_timestamp_seconds{cluster="alpha",node="worker-2"}`) {
+		t.Fatal("zero LastSeen must be omitted")
+	}
+	if !strings.Contains(body, "# TYPE prepuller_node_last_seen_timestamp_seconds gauge") {
+		t.Fatal("missing TYPE for prepuller_node_last_seen_timestamp_seconds")
+	}
+}
+
+func TestNodeAgentErrorsSeries(t *testing.T) {
+	counting := &errorCountingProvider{
+		fakeProvider: &fakeProvider{snap: fixedSnapshot()},
+		errors: map[provider.AgentErrorKey]uint64{
+			{Node: "worker-1", Reason: provider.ReasonUnavailable}:  3,
+			{Node: "worker-1", Reason: provider.ReasonUnauthorized}: 1,
+			{Node: "worker-2", Reason: provider.ReasonTimeout}:      2,
+		},
+	}
+	reg := newRegistry(t, map[string]provider.Provider{"alpha": counting})
+	body := scrape(t, reg)
+
+	// Only observed reasons are emitted, in the documented stable order.
+	want := []string{
+		`prepuller_node_agent_errors_total{cluster="alpha",node="worker-1",reason="unauthorized"} 1`,
+		`prepuller_node_agent_errors_total{cluster="alpha",node="worker-1",reason="unavailable"} 3`,
+		`prepuller_node_agent_errors_total{cluster="alpha",node="worker-2",reason="timeout"} 2`,
+	}
+	positions := make([]int, len(want))
+	for i, series := range want {
+		positions[i] = strings.Index(body, series)
+		if positions[i] < 0 {
+			t.Fatalf("missing series %q", series)
+		}
+	}
+	// Stable reason order: unauthorized, protocol, timeout, unavailable.
+	if positions[0] > positions[1] {
+		t.Fatalf("reason order is not stable: %v", positions)
+	}
+	for _, unwanted := range []string{
+		`reason="protocol"`,
+	} {
+		if strings.Contains(body, unwanted) {
+			t.Fatalf("unexpected sample %q: reasons that were never observed must be omitted", unwanted)
+		}
+	}
+}
+
+func TestNodeAgentErrorsAbsentForProvidersWithoutCapability(t *testing.T) {
+	// MockProvider/RemoteProvider do not implement AgentErrorCounter: the family
+	// header is present (self-documenting) but no samples are emitted.
+	reg := newTestRegistry(t, map[string]*fakeProvider{"alpha": {snap: fixedSnapshot()}})
+	body := scrape(t, reg)
+
+	if !strings.Contains(body, "# TYPE prepuller_node_agent_errors_total counter") {
+		t.Fatal("missing TYPE for prepuller_node_agent_errors_total")
+	}
+	if strings.Contains(body, "prepuller_node_agent_errors_total{") {
+		t.Fatal("provider without AgentErrorCounter must not emit agent-error samples")
+	}
+}
+
+func TestSnapshotAgeSeries(t *testing.T) {
+	snap := fixedSnapshot()
+	snap.LastSyncAt = time.Now().Add(-90 * time.Second)
+	reg := newTestRegistry(t, map[string]*fakeProvider{"alpha": {snap: snap}})
+	body := scrape(t, reg)
+
+	age, ok := seriesValue(t, body, `prepuller_snapshot_age_seconds{cluster="alpha"}`)
+	if !ok {
+		t.Fatal("missing prepuller_snapshot_age_seconds for a synced cluster")
+	}
+	if age < 88 || age > 95 {
+		t.Fatalf("snapshot age = %v, want about 90s", age)
+	}
+}
+
+func TestSnapshotScrapeTimeoutServesCachedSnapshot(t *testing.T) {
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+
+	alpha := &blockingProvider{fakeProvider: &fakeProvider{snap: fixedSnapshot()}, block: block}
+	// never blocks from the very first scrape, so the collector has no snapshot
+	// to fall back to for it.
+	never := &blockingProvider{fakeProvider: &fakeProvider{snap: fixedSnapshot()}, block: block}
+	never.gate.Store(true)
+
+	reg := newRegistry(t, map[string]provider.Provider{"alpha": alpha, "never": never})
+	h := Handler(reg)
+
+	// First scrape: alpha answers, never burns the deadline.
+	first := scrapeHandler(t, h)
+	for _, want := range []string{
+		`prepuller_cluster_up{cluster="alpha",role="remote"} 1`,
+		`prepuller_node_ready{cluster="alpha",node="worker-1"} 1`,
+		`prepuller_snapshot_scrape_timeout_total{cluster="alpha"} 0`,
+		`prepuller_snapshot_scrape_timeout_total{cluster="never"} 1`,
+	} {
+		if !strings.Contains(first, want) {
+			t.Fatalf("first scrape: missing %q", want)
+		}
+	}
+	// A cluster that never answered gets no data series at all: zeroes would
+	// render a blind hub as healthy.
+	for _, unwanted := range []string{
+		`prepuller_cluster_up{cluster="never"`,
+		`prepuller_node_ready{cluster="never"`,
+		`prepuller_snapshot_age_seconds{cluster="never"}`,
+	} {
+		if strings.Contains(first, unwanted) {
+			t.Fatalf("first scrape: unexpected series %q for a never-snapshotted cluster", unwanted)
+		}
+	}
+
+	// Second scrape: the partition now hits alpha too. The scrape stays bounded
+	// by snapshotDeadline and serves alpha's last successful snapshot.
+	alpha.gate.Store(true)
+	started := time.Now()
+	second := scrapeHandler(t, h)
+	elapsed := time.Since(started)
+	if elapsed < snapshotDeadline-500*time.Millisecond {
+		t.Fatalf("scrape returned after %v, want it to wait for the %v deadline", elapsed, snapshotDeadline)
+	}
+	if elapsed > snapshotDeadline+4*time.Second {
+		t.Fatalf("scrape took %v, want it bounded by snapshotDeadline=%v", elapsed, snapshotDeadline)
+	}
+	t.Logf("scrape under a dead link returned in %v", elapsed)
+
+	for _, want := range []string{
+		// Cached previous series, including the last sync timestamp.
+		`prepuller_cluster_up{cluster="alpha",role="remote"} 1`,
+		`prepuller_node_ready{cluster="alpha",node="worker-1"} 1`,
+		`prepuller_node_last_seen_timestamp_seconds{cluster="alpha",node="worker-1"} 1700000500`,
+		`prepuller_cluster_last_sync_timestamp_seconds{cluster="alpha"} 1700000000`,
+		`prepuller_snapshot_scrape_timeout_total{cluster="alpha"} 1`,
+		`prepuller_snapshot_scrape_timeout_total{cluster="never"} 2`,
+	} {
+		if !strings.Contains(second, want) {
+			t.Fatalf("second scrape: missing %q", want)
+		}
+	}
+	if age, ok := seriesValue(t, second, `prepuller_snapshot_age_seconds{cluster="alpha"}`); !ok || age <= 0 {
+		t.Fatalf("second scrape: stale snapshot must still report a rising age, got %v (present=%v)", age, ok)
+	}
+	if strings.Contains(second, `prepuller_cluster_up{cluster="never"`) {
+		t.Fatal("second scrape: a cluster that never synced must not produce placeholder series")
+	}
+
+	// Exactly one Snapshot call per cluster per scrape, blocked ones included.
+	if got := alpha.calls.Load(); got != 2 {
+		t.Fatalf("alpha Snapshot calls = %d, want 2 (one per scrape)", got)
+	}
+	if got := never.calls.Load(); got != 2 {
+		t.Fatalf("never Snapshot calls = %d, want 2 (one per scrape)", got)
 	}
 }

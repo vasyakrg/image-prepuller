@@ -70,6 +70,7 @@ func (p *K8sProvider) nodeFromK8s(ctx context.Context, node *corev1.Node) k8sNod
 	if err != nil {
 		// Agent absent or unreachable: the kubelet view is still valid, but the
 		// image cache is unknown, so slots stay offline.
+		p.recordAgentError(node.Name, err)
 		return k8sNode{info: info}
 	}
 

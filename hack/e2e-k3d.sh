@@ -44,6 +44,7 @@ COOKIE_JAR="$TMP/cookies.txt"
 BASE=""
 METRICS=""
 PF_PID=""
+APF_PID=""
 STARTED_AT=$SECONDS
 
 log()  { printf '\n=== %s\n' "$*"; }
@@ -55,6 +56,7 @@ cleanup() {
   local rc=$?
   set +e
   if [ -n "$PF_PID" ]; then kill "$PF_PID" 2>/dev/null; wait "$PF_PID" 2>/dev/null; fi
+  if [ -n "$APF_PID" ]; then kill "$APF_PID" 2>/dev/null; wait "$APF_PID" 2>/dev/null; fi
   rm -rf "$TMP"
   if [ "$KEEP" = "1" ]; then
     printf '\nKEEP=1: кластер %s и namespace %s оставлены\n' "$CLUSTER" "$NAMESPACE"
@@ -269,6 +271,8 @@ for series in prepuller_build_info prepuller_cluster_up prepuller_cluster_sync_p
               prepuller_cluster_last_sync_timestamp_seconds prepuller_agent_info \
               prepuller_node_agent_up prepuller_node_ready \
               prepuller_node_imagefs_capacity_bytes prepuller_images_cached_total \
+              prepuller_node_last_seen_timestamp_seconds prepuller_snapshot_age_seconds \
+              prepuller_snapshot_scrape_timeout_total \
               prepuller_workload_policy_violation prepuller_pull_tasks; do
   grep -q "^$series" "$TMP/metrics.txt" || missing="$missing $series"
 done
@@ -289,5 +293,32 @@ else
 fi
 grep -q 'cluster="'"$CLUSTER_ID"'"' "$TMP/metrics.txt" || fail "метрики без метки cluster=\"$CLUSTER_ID\""
 ok "метрики размечены cluster=\"$CLUSTER_ID\""
+
+log "13. метрики node-agent (:9444)"
+AGENT_METRICS_PORT="${E2E_AGENT_METRICS_PORT:-$(pick_free_port 19444)}"
+kubectl -n "$NAMESPACE" port-forward "svc/$RELEASE-image-prepuller-agent-metrics" \
+  "$AGENT_METRICS_PORT:9444" >/dev/null 2>&1 &
+APF_PID=$!
+sleep 2
+kill -0 "$APF_PID" 2>/dev/null || fail "port-forward метрик агента не поднялся (задайте E2E_AGENT_METRICS_PORT)"
+curl -fsS "http://127.0.0.1:$AGENT_METRICS_PORT/metrics" -o "$TMP/agent-metrics.txt" \
+  || fail "метрики агента недоступны на :$AGENT_METRICS_PORT"
+kill "$APF_PID" 2>/dev/null || true
+wait "$APF_PID" 2>/dev/null || true
+APF_PID=""
+missing=''
+for series in prepuller_agent_up prepuller_agent_build_info \
+              prepuller_agent_last_contact_timestamp_seconds \
+              prepuller_agent_requests_total prepuller_agent_cri_up \
+              prepuller_agent_pull_total prepuller_agent_pull_in_flight \
+              prepuller_agent_imagefs_used_bytes prepuller_agent_images_cached_total; do
+  grep -q "^$series" "$TMP/agent-metrics.txt" || missing="$missing $series"
+done
+[ -z "$missing" ] || fail "нет серий метрик агента:$missing"
+grep -q '^prepuller_agent_cri_up{.*} 1$' "$TMP/agent-metrics.txt" \
+  || fail "агент не отчитался о живом CRI"
+grep -q '^prepuller_agent_last_contact_timestamp_seconds{.*endpoint="snapshot".*} ' "$TMP/agent-metrics.txt" \
+  || fail "нет last_contact для snapshot"
+ok "метрики агента на месте ($(grep -c '^prepuller_agent_' "$TMP/agent-metrics.txt") строк)"
 
 printf '\n=== PASS за %ss (кластер %s будет удалён%s)\n' "$((SECONDS - STARTED_AT))" "$CLUSTER" "$([ "$KEEP" = "1" ] && echo ', KEEP=1 — оставлен')"

@@ -151,6 +151,10 @@ type agentTransport struct {
 	taskSeq   atomic.Uint64
 
 	counters sync.Map // "image|node|result" -> *atomic.Uint64
+
+	// agentErrors counts inventory failures per (node, reason); see
+	// agent_errors.go. Optional Provider capability, exposed by K8sProvider.
+	agentErrors agentErrorCounters
 }
 
 // newAgentTransport builds the default inventory/pull transport.
@@ -703,7 +707,9 @@ func (a *agentTransport) request(ctx context.Context, node, method, path string,
 	if err != nil {
 		// The cached address may be stale (node re-registered with a new IP).
 		a.forgetAddress(node)
-		return nil, fmt.Errorf("%w: node %q: %v", ErrAgentUnavailable, node, err)
+		// %w keeps context.DeadlineExceeded/context.Canceled in the chain so
+		// ClassifyAgentError can distinguish a timeout from an unreachable agent.
+		return nil, fmt.Errorf("%w: node %q: %w", ErrAgentUnavailable, node, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 

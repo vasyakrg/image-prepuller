@@ -233,27 +233,29 @@ DaemonSet; spoke, ingress и NetworkPolicy — отдельными блокам
 `REGISTRY`/`IMAGE` и `REGISTRY_USERNAME`/`REGISTRY_PASSWORD` остался в
 [`.gitea/workflows/build-image.yaml`](.gitea/workflows/build-image.yaml) как зеркало.
 
-### Первый кластер: t8s-nsk
+### Первый кластер (Talos)
 
-Целевой кластер первой очереди — **t8s-nsk** (Talos v1.13.10, Kubernetes v1.36.0,
-Cilium, Traefik, cert-manager). Для него в репозитории лежит готовый overlay
-[`deploy/values/t8s-nsk.yaml`](deploy/values/t8s-nsk.yaml): Talos-путь к сокету
-containerd, toleration для control-plane (`cp-1`), ingress
-`prepuller.t8s-nsk.bildme.ru` с сертификатом от `letsencrypt-prod`,
-`autoWarm=false` на первый раскат.
+Первая раскатка проверена на Talos-кластере (Talos v1.13, Kubernetes v1.36,
+Cilium, Traefik, cert-manager). В репозитории лежит только **шаблон** overlay —
+[`deploy/values/talos-example.yaml`](deploy/values/talos-example.yaml):
+Talos-путь к сокету containerd, toleration для control-plane, ingress с
+сертификатом от платформенного `ClusterIssuer`, `autoWarm=false` на первый раскат.
+
+**Репозиторий публичный.** Реальные значения (домен, адреса нод, секрет-стор,
+`sha-*` тег сборки) живут в приватном GitOps-репозитории платформы; overlay
+конкретного кластера сюда не коммитится — скопируйте шаблон туда и заполните.
 
 ```bash
 helm upgrade --install prepuller deploy/helm/image-prepuller \
   --namespace prepuller --create-namespace \
-  -f deploy/values/t8s-nsk.yaml
+  -f <private-overlay>.yaml
 ```
 
 Пошаговый runbook (DNS, TLS, проверки с ожидаемыми числами, особенности Talos:
-`imageFSCapacityBytes=0`, зеркала docker.io, порт 9443 на нодах) — в
-[docs/DEPLOY.md §14](docs/DEPLOY.md#14-first-cluster-t8s-nsk-talos). Важно:
-`image.tag` в overlay — это `sha-*` сборка того же коммита, что и чарт;
-релизный образ `0.2.0` не знает флагов `agent.pull.*` и падает в
-`CrashLoopBackOff` (см. §14.2).
+`imageFSCapacityBytes=0`, зеркала docker.io, порты 9443/9444 на нодах) — в
+[docs/DEPLOY.md §14](docs/DEPLOY.md#14-first-production-cluster-talos). Важно:
+`image.tag` — `sha-*` сборка того же коммита, что и чарт; релизный образ
+`0.2.0` не знает флагов `agent.pull.*` и падает в `CrashLoopBackOff` (см. §14.2).
 
 ## Флаги
 
@@ -272,6 +274,7 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
 | --- | --- | --- |
 | `-mock` | `false` | In-memory CRI-бэкенд (4 образа, ImageFS 58/100 GiB), containerd не нужен |
 | `-listen-addr` | `:9443` | Адрес HTTP/JSON API агента |
+| `-metrics-addr` | `:9444` | Отдельный порт Prometheus-метрик агента (без авторизации); пусто — сервер метрик выключен |
 | `-node-name` | имя хоста | Имя ноды в снапшотах и pull-задачах |
 | `-cri-socket` | `/run/containerd/containerd.sock` | Unix-сокет CRI |
 | `-token` | `""` | Bearer-токен для `/agent/v1/*`; пусто — без проверки |
@@ -306,6 +309,7 @@ stalled`. Hub превращает 504 в `provider.ErrAgentPullStalled` → HTT
 | `PREPULLER_CLUSTER_TOKEN` | spoke | нет | Bearer-токен для `/internal/v1/*`; пустое значение = API без авторизации |
 | `PREPULLER_REMOTE_CLUSTERS` | hub | нет | Дополнительные spoke: `name=url=token,name2=url2=token2` |
 | `PREPULLER_AGENT_TOKEN` | agent + hub + spoke | нет | Bearer-токен агентского API: его проверяет агент (`-token`) и им же hub/spoke ходят в `GET /agent/v1/snapshot` и `POST /agent/v1/pulls`; пусто — без авторизации |
+| `PREPULLER_AGENT_METRICS_ADDR` | agent | нет | Адрес Prometheus-метрик агента, по умолчанию `:9444`; пусто — выключить сервер метрик |
 
 \* нужен либо `PREPULLER_USERS`, либо legacy-пара `PREPULLER_AUTH_USER`/`_PASS`.
 
@@ -375,8 +379,8 @@ Node-agent (HTTP/JSON, API v1; `/healthz` открыт, остальное — B
 
 ## Метрики
 
-Экспортируются на отдельном порту (`-metrics-addr`, по умолчанию `:9090`) в текстовом
-формате Prometheus:
+Hub и spoke экспортируют метрики на отдельном порту (`-metrics-addr`, по умолчанию
+`:9090`) в текстовом формате Prometheus:
 
 | Метрика | Тип | Метки |
 | --- | --- | --- |
@@ -394,8 +398,12 @@ Node-agent (HTTP/JSON, API v1; `/healthz` открыт, остальное — B
 | `prepuller_node_ready` | gauge | `cluster`, `node` |
 | `prepuller_images_cached_total` | gauge | `cluster`, `node` |
 | `prepuller_agent_info` | gauge | `cluster`, `node`, `version` |
+| `prepuller_node_last_seen_timestamp_seconds` | gauge | `cluster`, `node` (нет серии при нулевом `LastSeen`) |
+| `prepuller_node_agent_errors_total` | counter | `cluster`, `node`, `reason` (`unauthorized`/`protocol`/`timeout`/`unavailable`) |
 | `prepuller_cluster_last_sync_timestamp_seconds` | gauge | `cluster` |
 | `prepuller_cluster_sync_partial` | gauge | `cluster` |
+| `prepuller_snapshot_age_seconds` | gauge | `cluster` (сколько секунд прошло с последней успешной синхронизации) |
+| `prepuller_snapshot_scrape_timeout_total` | counter | `cluster` (скрейп не дождался снапшота) |
 | `prepuller_build_info` | gauge | `version`, `commit`, `go_version` |
 
 С contract-v2 `prepuller_pull_total` заполняется и для удалённых кластеров:
@@ -405,6 +413,30 @@ Node-agent (HTTP/JSON, API v1; `/healthz` открыт, остальное — B
 снимка. `prepuller_cluster_up=0` и `prepuller_cluster_sync_partial=1` для offline/partial
 кластеров; `..._last_sync_timestamp_seconds` отсутствует, если `LastSyncAt` неизвестен, и
 никогда не подменяется текущим временем.
+
+Скрейп ограничен по времени (`3 s` на все кластеры), чтобы авария связи с агентом не
+обнуляла весь таргет: не успевший кластер отдаёт последний успешный снапшот, а
+`prepuller_snapshot_age_seconds` растёт — это и есть сигнал «hub ослеп».
+`prepuller_node_agent_errors_total` заполняет только `K8sProvider` (опциональная
+capability `provider.AgentErrorCounter`), поэтому у mock/remote кластеров серии нет.
+
+Node-agent отдаёт свои метрики **на отдельном порту** (`-metrics-addr`, по умолчанию
+`:9444`, без авторизации, только счётчики и gauge'и; на скрейпе агент не ходит в CRI):
+
+| Метрика агента | Тип | Метки |
+| --- | --- | --- |
+| `prepuller_agent_up` | gauge | `node` (dead-man: серия исчезает вместе с агентом) |
+| `prepuller_agent_build_info` | gauge | `node`, `version`, `go_version` |
+| `prepuller_agent_start_time_seconds` | gauge | `node` |
+| `prepuller_agent_last_contact_timestamp_seconds` | gauge | `node`, `endpoint` (`healthz`/`snapshot`/`images`/`pulls`; инициализируется временем старта) |
+| `prepuller_agent_requests_total` | counter | `node`, `endpoint`, `code` |
+| `prepuller_agent_cri_up` | gauge | `node` (последний снапшот смог поговорить с CRI) |
+| `prepuller_agent_pull_in_flight` | gauge | `node` |
+| `prepuller_agent_pull_total` | counter | `node`, `result` (`success`/`cri_error`/`stalled`/`registry_unreachable`/`disk_paused`) |
+| `prepuller_agent_imagefs_used_bytes`, `..._capacity_bytes`, `prepuller_agent_images_cached_total` | gauge | `node` (значения последнего успешного снапшота) |
+
+Готовые правила алертов, пороги и матрица «кто виноват: агент, токен или связь» —
+[docs/alerts.md](docs/alerts.md) и шаблон `PrometheusRule` в чарте (`prometheusRule.enabled`).
 
 ## Структура репозитория
 

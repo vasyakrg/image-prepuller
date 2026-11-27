@@ -160,6 +160,22 @@ agent:
   criSocket: /run/containerd/containerd.sock
   # HTTP/JSON listen address of the agent (cmd/prepuller/agent.go -listen-addr).
   port: 9443
+  # Prometheus metrics of the agent: hand-written text exposition 0.0.4 on a
+  # separate port, no auth. Scrapes must never be able to block the hub's
+  # snapshot traffic, so metrics do not share agent.port.
+  metrics:
+    enabled: true
+    # Metrics listen port (the agent serves /metrics here).
+    port: 9444
+    # Adds prometheus.io/scrape|port|path pod annotations so a Prometheus that
+    # discovers pods picks the agent up without a ServiceMonitor.
+    annotations: true
+    service:
+      # The agent is hostNetwork, so the Service endpoints are node IPs. A
+      # headless Service is not needed: each endpoint is already one node.
+      type: ClusterIP
+      # Defaults to <fullname>-agent-metrics.
+      name: ""
   diskPauseRatio: 0.78
   # Pull hygiene: a pull into a dead registry must not hold an image x node slot
   # for ten minutes (cmd/prepuller/agent.go, internal/agent/server.go).
@@ -220,3 +236,26 @@ ingress:
 # namespace, egress limited to DNS and TCP 443 (registries).
 networkPolicy:
   enabled: false
+
+# PrometheusRule with the prepuller alerts (prometheus-operator CRD). Enable it
+# only when the CRD is installed and the operator's rule selector matches this
+# namespace; thresholds are values so a cluster can tune them without forking
+# the chart. See docs/alerts.md.
+prometheusRule:
+  enabled: false
+  # Extra labels on the PrometheusRule object, e.g. release: kube-prometheus-stack,
+  # so the operator's ruleSelector picks it up.
+  labels: {}
+  # Extra annotations on the PrometheusRule object (not on the individual alerts).
+  annotations: {}
+  thresholds:
+    # Seconds without a hub request to the agent /agent/v1/snapshot endpoint.
+    agentNoContact: 180
+    # Seconds an agent may stay down while its node is Ready.
+    nodeAgentDown: 120
+    # Seconds a cluster snapshot may stay partial.
+    clusterPartial: 600
+    # Seconds since the hub's last successful sync with the cluster.
+    snapshotAge: 120
+    # ImageFS used ratio (0..1) that raises the node disk alert.
+    imagefsUsedRatio: 0.85

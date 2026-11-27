@@ -63,6 +63,7 @@ type Server struct {
 	cfg     Config
 	cri     CRI
 	handler http.Handler
+	metrics *Metrics
 }
 
 // NewServer builds the agent HTTP server. cri is the CRI backend, real or fake.
@@ -70,21 +71,32 @@ func NewServer(cfg Config, cri CRI) (*Server, error) {
 	if cri == nil {
 		return nil, errors.New("agent: nil CRI backend")
 	}
-	s := &Server{cfg: cfg.withDefaults(), cri: cri}
+	cfg = cfg.withDefaults()
+	s := &Server{cfg: cfg, cri: cri, metrics: NewMetrics(cfg.NodeName, Version)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+healthzPath, s.handleHealth)
 	mux.HandleFunc("GET "+snapshotPath, s.withAuth(s.handleSnapshot))
 	mux.HandleFunc("GET "+imagesPath+"{ref...}", s.withAuth(s.handleImageStatus))
 	mux.HandleFunc("POST "+pullsPath, s.withAuth(s.handlePull))
-	s.handler = mux
+	s.handler = s.observe(mux)
 	return s, nil
 }
 
 // Handler exposes the router for tests and for embedding behind another server.
 func (s *Server) Handler() http.Handler { return s.handler }
 
-// Serve listens on cfg.ListenAddr and serves until ctx is canceled, then
-// shuts down gracefully.
+// Metrics exposes the recorder for tests and for embedding.
+func (s *Server) Metrics() *Metrics { return s.metrics }
+
+// MetricsHandler serves the Prometheus exposition on the separate, unauth
+// listener from Config.MetricsAddr.
+func (s *Server) MetricsHandler() http.Handler { return s.metrics.Handler() }
+
+// Serve listens on cfg.ListenAddr and, when cfg.MetricsAddr is set, serves the
+// metrics exposition on that second unauthenticated listener. Both listeners
+// shut down together on ctx cancel. A metrics listen error is returned at
+// startup: losing the metrics endpoint silently is worse than a crashloop the
+// DaemonSet shows.
 func (s *Server) Serve(ctx context.Context) error {
 	ln, err := net.Listen("tcp", s.cfg.ListenAddr)
 	if err != nil {
@@ -94,22 +106,51 @@ func (s *Server) Serve(ctx context.Context) error {
 		Handler:           s.handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	errCh := make(chan error, 1)
+
+	errCh := make(chan error, 2)
+	var metricsSrv *http.Server
+	if s.cfg.MetricsAddr != "" {
+		metricsLn, err := net.Listen("tcp", s.cfg.MetricsAddr)
+		if err != nil {
+			_ = ln.Close()
+			return fmt.Errorf("agent: listen metrics %s: %w", s.cfg.MetricsAddr, err)
+		}
+		metricsSrv = &http.Server{
+			Handler:           s.MetricsHandler(),
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+		go func() { errCh <- metricsSrv.Serve(metricsLn) }()
+	}
+
 	go func() { errCh <- srv.Serve(ln) }()
 	select {
 	case <-ctx.Done():
-		shutCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
-		if err := srv.Shutdown(shutCtx); err != nil {
-			return fmt.Errorf("agent: shutdown: %w", err)
-		}
-		return nil
+		return s.shutdown(srv, metricsSrv)
 	case err := <-errCh:
+		// One listener failed: stop the other one instead of leaving it
+		// serving half of the agent.
+		_ = s.shutdown(srv, metricsSrv)
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
 		return fmt.Errorf("agent: serve: %w", err)
 	}
+}
+
+// shutdown stops the API server and, when enabled, the metrics server.
+func (s *Server) shutdown(api, metricsSrv *http.Server) error {
+	shutCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	var firstErr error
+	for _, srv := range []*http.Server{api, metricsSrv} {
+		if srv == nil {
+			continue
+		}
+		if err := srv.Shutdown(shutCtx); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("agent: shutdown: %w", err)
+		}
+	}
+	return firstErr
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -124,9 +165,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	snap, err := BuildSnapshot(r.Context(), s.cri, s.cfg)
 	if err != nil {
+		s.metrics.ObserveSnapshot(false, 0, 0, 0)
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
+	s.metrics.ObserveSnapshot(true, int64(snap.CachedImageCount), snap.ImageFS.UsedBytes, snap.ImageFS.CapacityBytes)
 	writeJSON(w, http.StatusOK, snap)
 }
 
@@ -167,6 +210,7 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if ShouldPause(fs.UsedBytes, fs.CapacityBytes, s.cfg.DiskPauseRatio) {
+		s.metrics.PullFinished("disk_paused")
 		writeError(w, http.StatusConflict, fmt.Sprintf(
 			"auto-prepull paused: imagefs usage %.1f%% >= %.1f%% threshold",
 			UsedRatio(fs.UsedBytes, fs.CapacityBytes)*100, s.cfg.DiskPauseRatio*100))
@@ -177,20 +221,26 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 	// the whole PullTimeout; the probe answers reachability only.
 	if !s.cfg.DisableRegistryProbe {
 		if err := ProbeRegistry(r.Context(), image, s.cfg.RegistryProbeTimeout); err != nil {
+			s.metrics.PullFinished("registry_unreachable")
 			writeError(w, http.StatusBadGateway, err.Error())
 			return
 		}
 	}
 
+	s.metrics.PullStarted()
 	imageRef, err := s.pullImage(r.Context(), image)
 	if err != nil {
 		status := http.StatusBadGateway
+		result := "cri_error"
 		if errors.Is(err, errPullStalled) || errors.Is(err, context.DeadlineExceeded) {
 			status = http.StatusGatewayTimeout
+			result = "stalled"
 		}
+		s.metrics.PullFinished(result)
 		writeError(w, status, err.Error())
 		return
 	}
+	s.metrics.PullFinished("success")
 	writeJSON(w, http.StatusOK, PullResult{
 		APIVersion: WireAPIVersion,
 		Image:      image,
@@ -291,6 +341,63 @@ func (s *Server) imageFSUsed(ctx context.Context) (int64, bool) {
 		return 0, false
 	}
 	return fs.UsedBytes, true
+}
+
+// observe records every API request and its status code. The middleware is
+// outside the mux, so the 401 produced by withAuth is counted too: a sudden
+// spike of 401 is token rotation, a flat line of 0 is a dead link.
+func (s *Server) observe(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec := &statusRecorder{ResponseWriter: w}
+		next.ServeHTTP(rec, r)
+		s.metrics.ObserveRequest(endpointForPath(r.URL.Path), rec.Status())
+	})
+}
+
+// statusRecorder captures the status code written by a handler without
+// changing any of the ResponseWriter behavior the handlers rely on.
+type statusRecorder struct {
+	http.ResponseWriter
+	code int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	if r.code == 0 {
+		r.code = code
+	}
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Write(body []byte) (int, error) {
+	if r.code == 0 {
+		r.code = http.StatusOK
+	}
+	return r.ResponseWriter.Write(body)
+}
+
+// Status reports the captured code; a handler that wrote nothing is a 200.
+func (r *statusRecorder) Status() int {
+	if r.code == 0 {
+		return http.StatusOK
+	}
+	return r.code
+}
+
+// endpointForPath maps an API path to the small endpoint label set of the
+// agent metrics. The images route is a subtree, everything else is exact.
+func endpointForPath(path string) string {
+	switch {
+	case path == healthzPath:
+		return endpointHealthz
+	case path == snapshotPath:
+		return endpointSnapshot
+	case strings.HasPrefix(path, imagesPath):
+		return endpointImages
+	case path == pullsPath:
+		return endpointPulls
+	default:
+		return endpointOther
+	}
 }
 
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {

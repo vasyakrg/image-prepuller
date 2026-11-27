@@ -116,10 +116,11 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 | `.gitea/workflows/build-image.yaml` | Сборка и публикация образа (buildx, amd64+arm64) и Helm-чарта в реестр |
 | `.github/workflows/pr-agent.yml` | Ревью pull request'ов моделью (PR-Agent): `review` на открытие PR, `command` на комментарий со слэшем (только владелец), `doctor` вручную. Секреты — `OPENAI_API_BASE`/`OPENAI_KEY`; подробности в `docs/pr-agent.md` |
 | `Dockerfile` | multi-stage образ: golang:1.26.11 builder → distroless nonroot (65532) |
-| `deploy/helm/image-prepuller/` | Helm-чарт: hub, spoke, agent DaemonSet, RBAC, NetworkPolicy, ingress |
-| `deploy/values/t8s-nsk.yaml` | overlay первого продового кластера t8s-nsk (Talos): сокет CRI, toleration control-plane, ingress/cert-manager, `autoWarm=false` |
-| `docs/DEPLOY.md` | чеклист деплоя: секреты, k3d-стенд, e2e-сценарий, runbook t8s-nsk (§14) |
+| `deploy/helm/image-prepuller/` | Helm-чарт: hub, spoke, agent DaemonSet, RBAC, NetworkPolicy, ingress, Service метрик агента, шаблон `PrometheusRule` |
+| `deploy/values/talos-example.yaml` | шаблон overlay для Talos-кластера: сокет CRI, toleration control-plane, ingress/cert-manager, `autoWarm=false`; реальные overlays кластеров — в приватном GitOps-репо |
+| `docs/DEPLOY.md` | чеклист деплоя: секреты, k3d-стенд, e2e-сценарий, общий runbook Talos-кластера (§14) |
 | `docs/architecture.md` | схемы Mermaid: топология, потоки, состояния, модель данных |
+| `docs/alerts.md` | операторская памятка: что скрейпить, правила алертов, триангуляция «агент/токен/связь», пороги |
 | `docs/PLAN.md` | план Stage 2–3: workstreams, зоны записи, порядок мержа, гейты |
 
 ## 5. Инварианты, которые нельзя ломать
@@ -200,9 +201,38 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 
 ## 8. Подводные камни
 
-- **`metrics.Handler` делает ровно один `Snapshot()` на кластер за скрейп** (`collectClusters` —
+- **`metrics.Handler` делает ровно один `Snapshot()` на кластер за скрейп** (`(*collector).collect` —
   единственная точка вызова; тест `TestHandlerCallsSnapshotOncePerCluster`). Кэш тяжёлого
   снапшота живёт в провайдере (`K8sProvider` — TTL 2s), а не в метриках.
+- **`metrics.Handler` не блокируется дольше 3 s и не слепнет при partition.** `Handler`
+  создаёт stateful-коллектор один раз: каждый `Provider.Snapshot` зовётся в своей горутине, все
+  кластеры параллельно, общий дедлайн `snapshotDeadline = 3 s` (`internal/metrics/prometheus.go`).
+  Не успел — инкремент `prepuller_snapshot_scrape_timeout_total{cluster}`, в вывод идёт последний
+  успешный снапшот кластера (со своим `LastSyncAt`, поэтому `prepuller_snapshot_age_seconds`
+  растёт — это и есть сигнал «hub ослеп»); кластер, который ни разу не отвечал, не получает
+  ни одной серии (никаких нулей), кроме счётчика таймаутов. `PullCounters` качается в той же
+  горутине и в тот же дедлайн; не успел — берутся прошлые counters. Брошенная горутина пишет
+  в буферизованный канал и получает отменённый после возврата хендлера `r.Context()`, поэтому
+  не течёт и быстро отпускает мьютекс провайдера. Замер: мёртвый провайдер — скрейп
+  возвращается за 3.00 s (было 5 s × ноды и провал всего скрейпа по `scrape_timeout`).
+- **Ошибки node-agent видны на hub: `prepuller_node_agent_errors_total{cluster,node,reason}`.**
+  `provider.ClassifyAgentError` сводит ошибку инвентаря к закрытому набору
+  `unauthorized|protocol|timeout|unavailable`; счётчики — в `K8sProvider.AgentErrors()`
+  (опциональный `provider.AgentErrorCounter`, в замороженный `Provider` его сознательно не
+  добавляли). Эмитятся только реально наблюдавшиеся reason'ы. `MockProvider`/`RemoteProvider`
+  capability не реализуют — серий нет, это норма. Транспорт оборачивает ошибку
+  `http.Client.Do` через `%w`, иначе `context.DeadlineExceeded` терялся и любой таймаут
+  классифицировался бы как `unavailable`. `prepuller_node_last_seen_timestamp_seconds` не
+  эмитится при нулевом `LastSeen`, `prepuller_snapshot_age_seconds` — при нулевом `LastSyncAt`
+  (для ни разу не синхронизировавшегося кластера используйте `prepuller_cluster_up`).
+- **Метрики агента — отдельный порт `:9444` без авторизации** (`-metrics-addr`,
+  `PREPULLER_AGENT_METRICS_ADDR`; пусто выключает листенер). На скрейпе агент не ходит в CRI и
+  в сеть: `prepuller_agent_cri_up` и ImageFS/кэш — значения последнего успешного снапшота,
+  `prepuller_agent_last_contact_timestamp_seconds{endpoint}` инициализируются временем старта
+  процесса (поэтому «к агенту никто не ходит» алертится сразу), `prepuller_agent_up` — dead-man
+  (серия исчезает вместе с процессом). `prepuller_agent_requests_total{code}` считает и 401 от
+  `withAuth`, что и отличает ротацию токена от сетевой аварии. Порт открыт на всех нодах
+  (`hostNetwork`), NetworkPolicy его не закрывает — это ожидаемо, см. `docs/alerts.md`.
 - **`K8sProvider` без node-agent**: слоты `offline`, `syncStatus=degraded`, `partial=true` —
   это ожидаемо (агент не отдал инвентарь), а не баг. Pull в live-режиме идёт через агент.
 - **K8sProvider ходит в агент по HTTP на :9443** (`WithAgentPort/Token/Timeout/Scheme`, адрес —
@@ -230,15 +260,15 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
   `-pull-stall-timeout`), которых нет в релизном образе `0.2.0`:
   `image.tag=0.2.0` + чарт из `main` — это `CrashLoopBackOff` с
   `flag provided but not defined: -pull-timeout` и все ноды `offline`. Ставьте
-  `image.tag=sha-<тот же коммит>` (как в `deploy/values/t8s-nsk.yaml`) либо
+  `image.tag=sha-<тот же коммит>` (как в `deploy/values/talos-example.yaml`) либо
   релизную пару OCI-чарт `0.2.0` + образ `0.2.0`.
-- **t8s-nsk (Talos): `imageFSCapacityBytes=0`.** `ImageFsInfo` в containerd на
-  Talos отдаёт только used, поэтому disk-guard агента (`ShouldPause`/`UsedRatio`)
-  не срабатывает никогда (нулевая ёмкость = «не пауза», fail-open).
+- **Talos: `imageFSCapacityBytes=0`.** `ImageFsInfo` в containerd на Talos отдаёт
+  только used, поэтому disk-guard агента (`ShouldPause`/`UsedRatio`) не
+  срабатывает никогда (нулевая ёмкость = «не пауза», fail-open).
   `prepuller_node_imagefs_used_bytes` при этом есть — алертить надо на диск ноды,
   а не на паузу pull'ов; stall watchdog не страдает (он тоже смотрит на used).
-  На t8s-nsk control-plane `cp-1` с taint `NoSchedule` — агенту нужна
-  toleration, иначе слоты cp-1 вечно `offline` и `partial=true`.
+  Control-plane ноды с taint `NoSchedule` требуют toleration в DaemonSet, иначе
+  их слоты вечно `offline` и `partial=true`.
 - **`RemoteProvider.PullCounters()` ходит в `GET /internal/v1/counters`** (contract v2);
   при недоступном spoke возвращает `nil` — это по-прежнему значит «метрик нет», а не «ноль».
 - **Транспорт hub→spoke ретраит только идемпотентные state-changing вызовы** (pull, workload-pull, cancel, reconcile): 3 попытки, backoff 150 ms → 2 s, таймаут 5 s на попытку. `Snapshot`, `counters` и `health` ходят одним запросом, чтобы мёртвый spoke не тормозил UI и скрейп. `ErrSpokeUnavailable`/`ErrSpokeUnauthorized` → `502` (`pullErrorStatus`), `ErrTaskNotActive` → `409`.

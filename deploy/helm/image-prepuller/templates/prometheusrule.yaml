@@ -1,0 +1,164 @@
+{{- if .Values.prometheusRule.enabled }}
+{{- $thresholds := .Values.prometheusRule.thresholds }}
+# PrometheusRule for prometheus-operator. Rendering it requires the
+# monitoring.coreos.com/v1 CRD; without the operator the object would be
+# rejected. Thresholds come from values (see docs/alerts.md).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ printf "%s-rules" (include "ip.fullname" .) | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "ip.labels" (dict "ctx" . "component" "monitoring") | nindent 4 }}
+    {{- with .Values.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.prometheusRule.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  groups:
+    - name: prepuller
+      rules:
+        # Dead-man switch. The job label must match the scrape config that
+        # collects the agent /metrics; if that scrape job is removed from
+        # Prometheus entirely, up{job="prepuller-agent"} disappears and this
+        # alert cannot fire, so keep job and scrape config in sync.
+        - alert: PrepullerAgentDown
+          expr: up{job="prepuller-agent"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: Prepuller agent scrape target is down
+            description: An agent /metrics target has been unreachable for 2m. Check the DaemonSet pod on that node first.
+
+        # The agent answers scrapes but the hub stopped talking to it: the
+        # hub -> agent link (NetworkPolicy, token, node address, hub restarts)
+        # is broken while the process itself is alive.
+        - alert: PrepullerAgentNotContacted
+          expr: 'time() - prepuller_agent_last_contact_timestamp_seconds{endpoint="snapshot"} > {{ $thresholds.agentNoContact }}'
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Agent is alive but receives no hub snapshot requests
+            description: No /agent/v1/snapshot request for more than {{ $thresholds.agentNoContact }}s. Check the hub -> agent path, not the agent process.
+
+        # Auth failures are token rotation/configuration, not a network fault:
+        # the agent replies 401/403 to the hub's bearer token.
+        - alert: PrepullerAgentUnauthorized
+          expr: increase(prepuller_agent_requests_total{code=~"401|403"}[10m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: Agent rejects hub requests with 401/403
+            description: The hub's agent token no longer matches the agent. Rotate PREPULLER_AGENT_TOKEN on both sides.
+
+        - alert: PrepullerAgentCRIDown
+          expr: prepuller_agent_cri_up == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: Agent cannot reach the node CRI
+            description: The agent is up but its CRI client has been unhealthy for 5m; image inventory and pulls are degraded.
+
+        # A stalled pull is cancelled by the agent watchdog and counted; a
+        # sustained rate means a registry or containerd problem, not one slow image.
+        - alert: PrepullerAgentPullStalled
+          expr: increase(prepuller_agent_pull_total{result="stalled"}[15m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: Agent cancelled a stalled image pull
+            description: ImageFS stopped growing during a pull and the watchdog cancelled it. Check the registry and containerd.
+
+        # "and on" keeps the alert silent for cordoned or NotReady nodes:
+        # an absent agent on such a node is expected, not an outage.
+        - alert: PrepullerNodeAgentDown
+          expr: prepuller_node_agent_up == 0 and on(cluster,node) prepuller_node_ready == 1
+          for: {{ $thresholds.nodeAgentDown }}s
+          labels:
+            severity: critical
+          annotations:
+            summary: Node agent is down on a Ready node
+            description: The hub cannot reach the node agent for {{ $thresholds.nodeAgentDown }}s while the node is Ready. Check the DaemonSet pod, tolerations and node networking.
+
+        - alert: PrepullerNodeAgentAuthErrors
+          expr: increase(prepuller_node_agent_errors_total{reason="unauthorized"}[15m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: Hub gets 401 from node agents
+            description: The hub's agent token is rejected by node agents. Check PREPULLER_AGENT_TOKEN on the hub and the agents.
+
+        # Expected while an agent is deliberately absent (nodeSelector,
+        # tolerations, a node being drained); alert only on a long partial sync.
+        - alert: PrepullerClusterPartial
+          expr: prepuller_cluster_sync_partial == 1
+          for: {{ $thresholds.clusterPartial }}s
+          labels:
+            severity: warning
+          annotations:
+            summary: Cluster snapshot has been partial for a long time
+            description: Some node agents do not report inventory for {{ $thresholds.clusterPartial }}s. A deliberately excluded node is fine; anything else is a broken agent.
+
+        - alert: PrepullerClusterDown
+          expr: prepuller_cluster_up == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: Prepuller cluster backend is down
+            description: The hub cannot get a consistent snapshot of the cluster for 2m (spoke unreachable or provider failing).
+
+        # Hub age of the last successful sync. The hub bounds each snapshot at
+        # 3s, so a growing age is a stuck collector, not a slow scrape.
+        - alert: PrepullerSnapshotStale
+          expr: 'prepuller_snapshot_age_seconds > {{ $thresholds.snapshotAge }}'
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Hub snapshot is stale
+            description: No successful snapshot for more than {{ $thresholds.snapshotAge }}s; the hub is serving old data.
+
+        # The hub gives up on a snapshot after its own timeout: the scrape is
+        # blind and the UI shows stale state even though the process is up.
+        - alert: PrepullerSnapshotScrapeTimeouts
+          expr: increase(prepuller_snapshot_scrape_timeout_total[15m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: Hub snapshot scrapes are timing out
+            description: The hub hit its own snapshot bound; part of the cluster is unreachable from the hub.
+
+        # Capacity is 0 on runtimes that do not report ImageFS capacity (e.g.
+        # containerd on some immutable distros). The series is then absent and
+        # this alert cannot fire; use a node-disk alert instead. The guard keeps
+        # the expression from dividing by zero.
+        - alert: PrepullerNodeImageFSHigh
+          expr: 'prepuller_node_imagefs_capacity_bytes > 0 and (prepuller_node_imagefs_used_bytes / prepuller_node_imagefs_capacity_bytes) > {{ $thresholds.imagefsUsedRatio }}'
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Node ImageFS usage is high
+            description: ImageFS is above {{ $thresholds.imagefsUsedRatio }} of capacity. Clean up unused images or grow the disk.
+
+        # internal/provider emits result="error" for failed pulls; "failed" is
+        # tolerated in the regex so the alert survives a result-value rename.
+        - alert: PrepullerPullFailures
+          expr: sum by (cluster) (increase(prepuller_pull_total{result=~"error|failed"}[15m])) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: Image pulls are failing
+            description: At least one pull failed in 15m. Check the agent logs and the registry.
+{{- end }}

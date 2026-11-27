@@ -1,0 +1,81 @@
+# Template overlay for the first production cluster running Talos.
+#
+# This repository is PUBLIC: real cluster data (hostname, node addresses, secret
+# store, pinned sha-* tags) belongs in the private GitOps repository. Copy this
+# file there and replace the placeholders; do not commit the filled-in copy here.
+#
+# Usage:
+#   helm upgrade --install prepuller deploy/helm/image-prepuller \
+#     --namespace prepuller --create-namespace -f <private-overlay>.yaml
+#
+# Walkthrough, expected numbers and Talos gotchas: docs/DEPLOY.md section 14.
+
+image:
+  repository: ghcr.io/vasyakrg/image-prepuller
+  # Pin a sha-* tag built from the SAME commit as the chart: the released 0.2.0
+  # image predates the agent.pull.* flags and exits with
+  # "flag provided but not defined: -pull-timeout" (docs/DEPLOY.md 14.2).
+  tag: sha-<commit>
+  pullPolicy: IfNotPresent
+
+hub:
+  replicaCount: 1
+  mock: false
+  clusterName: talos-prod
+  # Keep the reconciler off for the first rollout: the first pass schedules a
+  # large batch of pulls. Turn it on after the snapshot has been checked
+  # (docs/DEPLOY.md 14.7).
+  autoWarm: false
+  cookieSecure: true
+
+agent:
+  enabled: true
+  # Talos keeps containerd on the upstream path.
+  criSocket: /run/containerd/containerd.sock
+  diskPauseRatio: 0.78
+  metrics:
+    # Anonymous /metrics on :9444 (counters only). The chart renders a Service
+    # whose endpoints are the node IPs because the agent is hostNetwork.
+    enabled: true
+  pull:
+    # docker.io is normally reachable directly from the nodes; if containerd
+    # pulls through a mirror and the direct dial is blocked, set this to false.
+    registryProbe: true
+    registryProbeTimeout: 5s
+    stallWatch: true
+    stallTimeout: 60s
+    timeout: 10m
+  # Control-plane nodes carry a taint and the hub expects an agent on every
+  # node: without this toleration their slots stay offline and the snapshot is
+  # permanently partial.
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+
+ingress:
+  enabled: true
+  className: traefik
+  annotations:
+    # cert-manager's ingress-shim creates the Certificate for ingress.tls.
+    cert-manager.io/cluster-issuer: <cluster-issuer>
+  hosts:
+    - host: prepuller.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: prepuller-tls
+      hosts:
+        - prepuller.example.com
+
+# Alert rules for these series (docs/alerts.md). Enable only when
+# prometheus-operator manages them in the cluster.
+prometheusRule:
+  enabled: false
+
+# The agent runs with hostNetwork=true, so a NetworkPolicy never applies to it;
+# restrict TCP 9443 (agent API) and 9444 (agent metrics) on the node firewall if
+# the node network is not private.
+networkPolicy:
+  enabled: false

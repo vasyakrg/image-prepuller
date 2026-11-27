@@ -35,6 +35,9 @@ type Config struct {
 	CRISocket      string
 	ListenAddr     string
 	DiskPauseRatio float64
+	// MetricsAddr is the separate, unauthenticated listen address for the
+	// Prometheus exposition. Empty disables the metrics server.
+	MetricsAddr string
 	// Mock serves an in-memory CRI backend; CRISocket is then ignored.
 	Mock bool
 	// Token enables Bearer authentication on the agent API. Empty disables it
@@ -128,7 +131,11 @@ func (a *Agent) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	log.Printf("agent %s: backend=%s listen=%s api=%s auth=%v",
-		a.cfg.NodeName, backend, a.cfg.ListenAddr, WireAPIVersion, a.cfg.Token != "")
+	metricsAddr := a.cfg.MetricsAddr
+	if metricsAddr == "" {
+		metricsAddr = "disabled"
+	}
+	log.Printf("agent %s: backend=%s listen=%s metrics=%s api=%s auth=%v",
+		a.cfg.NodeName, backend, a.cfg.ListenAddr, metricsAddr, WireAPIVersion, a.cfg.Token != "")
 	return srv.Serve(ctx)
 }

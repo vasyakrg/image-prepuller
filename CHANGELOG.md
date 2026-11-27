@@ -4,6 +4,29 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Node-agent отдаёт Prometheus-метрики на отдельном порту `:9444`**
+  (`-metrics-addr`/`PREPULLER_AGENT_METRICS_ADDR`, без авторизации; на скрейпе агент не
+  ходит в CRI и в сеть, а отдаёт уже собранные данные): `prepuller_agent_up` (dead-man),
+  `prepuller_agent_last_contact_timestamp_seconds{endpoint}`,
+  `prepuller_agent_requests_total{endpoint,code}` (включая 401 от ротации токена),
+  `prepuller_agent_cri_up`, `prepuller_agent_pull_total{result}`,
+  `prepuller_agent_pull_in_flight`, ImageFS и `prepuller_agent_images_cached_total`.
+  Чарт добавляет Service `agent.metrics.*` (endpoints = IP нод, агент `hostNetwork`) и
+  pod-аннотации `prometheus.io/*`.
+- **Hub видит причины отказов агентов и не слепнет при partition:**
+  `prepuller_node_last_seen_timestamp_seconds`, `prepuller_node_agent_errors_total{reason}`
+  (`provider.ClassifyAgentError`, опциональная capability `provider.AgentErrorCounter`,
+  интерфейс `Provider` не менялся), `prepuller_snapshot_age_seconds` и
+  `prepuller_snapshot_scrape_timeout_total`. Скрейп ограничен 3 s на все кластеры:
+  не успевший кластер отдаёт последний успешный снапшот, а не роняет весь таргет
+  (раньше partition стоил 5 s × ноды и проваливал скрейп по `scrape_timeout`).
+- **Алерты в репозитории:** шаблон `PrometheusRule` (`prometheusRule.enabled`, 13 правил,
+  пороги через `prometheusRule.thresholds`) и операторская памятка
+  [`docs/alerts.md`](docs/alerts.md) с матрицей «агент / токен / связь».
+- CI: полный `helm template` рендерится и с `prometheusRule.enabled=true`.
+
 ### Fixed
 
 - Pull в недоступный реестр больше не держит слот image×node до 10 минут. Node-agent
@@ -41,24 +64,28 @@
 
 ### Docs
 
-- **Runbook первого продового кластера t8s-nsk (Talos)** — новый §14 в
-  `docs/DEPLOY.md`: факты живого кластера (Kubernetes 1.36.0, Talos v1.13.10,
-  Cilium, Traefik, cert-manager + Selectel DNS-01), overlay
-  `deploy/values/t8s-nsk.yaml`, DNS/TLS, ожидаемые числа снапшота, smoke-проверки
-  pull-пути и особенности окружения. Проверено установкой одноразового релиза в
-  живом кластере (агенты по CRI на всех трёх нодах, 92 workload'а, 190/375 слотов).
-- Раздел «Первый кластер: t8s-nsk» в `README.md` и запись в `AGENTS.md` §4/§8.
+- **Runbook первого продового кластера (Talos)** — новый §14 в
+  `docs/DEPLOY.md`: требования к кластеру, шаблон overlay
+  `deploy/values/talos-example.yaml`, DNS/TLS, ожидаемые числа снапшота,
+  smoke-проверки pull-пути и особенности окружения. Проверено установкой
+  одноразового релиза в живом кластере (агенты по CRI на всех нодах, ~90
+  workload'ов, 190 из 375 слотов).
+- Раздел «Первый кластер (Talos)» в `README.md` и запись в `AGENTS.md` §4/§8.
+- **Публичный репозиторий не хранит данные кластеров:** реальный overlay (домен,
+  адреса нод, секрет-стор, `sha-*` тег) остаётся в приватном GitOps-репозитории
+  платформы, здесь — только шаблон `deploy/values/talos-example.yaml`.
 - **Зафиксирована связка «чарт + образ»**: чарт из `main` передаёт флаги
   `agent.pull.*`, которых нет в релизном образе `0.2.0` — при
   `image.tag=0.2.0` агент падает с `flag provided but not defined:
-  -pull-timeout`. В overlay и `AGENTS.md` прописано, что `image.tag` обязан быть
-  `sha-*` того же коммита (или релизная пара OCI-чарт `0.2.0` + образ `0.2.0`).
-- На t8s-nsk зафиксирована особенность Talos: `imageFSCapacityBytes=0`, поэтому
-  disk-guard агента не срабатывает (fail-open) — алертить надо на диск ноды;
-  control-plane `cp-1` требует toleration в DaemonSet.
+  -pull-timeout`. В шаблоне overlay и `AGENTS.md` прописано, что `image.tag`
+  обязан быть `sha-*` того же коммита (или релизная пара OCI-чарт `0.2.0` +
+  образ `0.2.0`).
+- На Talos зафиксирована особенность: `imageFSCapacityBytes=0`, поэтому disk-guard
+  агента не срабатывает (fail-open) — алертить надо на диск ноды; control-plane
+  ноды требуют toleration в DaemonSet.
 - CI (`.github/workflows/ci.yaml` и его Gitea-зеркало): `helm lint` и
-  `helm template` прогоняются и с `-f deploy/values/t8s-nsk.yaml`, чтобы overlay не
-  разошёлся с чартом.
+  `helm template` прогоняются и с `-f deploy/values/talos-example.yaml`, чтобы
+  шаблон overlay не разошёлся с чартом.
 
 ## [0.2.0] — 2026-11-26 — Stage 2/3: живой путь от Kubernetes до containerd
 

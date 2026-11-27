@@ -19,6 +19,7 @@ func runAgent(args []string) {
 	nodeName := fs.String("node-name", envOr("PREPULLER_NODE_NAME", hostname()), "Kubernetes node name")
 	criSocket := fs.String("cri-socket", envOr("PREPULLER_CRI_SOCKET", "/run/containerd/containerd.sock"), "CRI runtime socket path")
 	listenAddr := fs.String("listen-addr", envOr("PREPULLER_AGENT_ADDR", ":9443"), "agent API listen address for the hub")
+	metricsAddr := fs.String("metrics-addr", envOr("PREPULLER_AGENT_METRICS_ADDR", ":9444"), "Prometheus metrics listen address; empty disables the metrics server (no auth, counters only)")
 	diskPause := fs.Float64("disk-pause-ratio", 0.78, "Pause auto-prepull when ImageFS usage exceeds this ratio")
 	mock := fs.Bool("mock", false, "serve in-memory images instead of talking to containerd")
 	token := fs.String("token", envOr("PREPULLER_AGENT_TOKEN", ""), "Bearer token for the agent API (empty disables auth until WS-F)")
@@ -39,6 +40,7 @@ func runAgent(args []string) {
 		NodeName:       *nodeName,
 		CRISocket:      *criSocket,
 		ListenAddr:     *listenAddr,
+		MetricsAddr:    *metricsAddr,
 		DiskPauseRatio: *diskPause,
 		Mock:           *mock,
 		Token:          *token,
