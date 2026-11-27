@@ -116,7 +116,7 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 | `.gitea/workflows/build-image.yaml` | Сборка и публикация образа (buildx, amd64+arm64) и Helm-чарта в реестр |
 | `.github/workflows/pr-agent.yml` | Ревью pull request'ов моделью (PR-Agent): `review` на открытие PR, `command` на комментарий со слэшем (только владелец), `doctor` вручную. Секреты — `OPENAI_API_BASE`/`OPENAI_KEY`; подробности в `docs/pr-agent.md` |
 | `Dockerfile` | multi-stage образ: golang:1.26.11 builder → distroless nonroot (65532) |
-| `deploy/helm/image-prepuller/` | Helm-чарт: hub, spoke, agent DaemonSet, RBAC, NetworkPolicy, ingress, Service метрик агента, шаблон `PrometheusRule` |
+| `deploy/helm/image-prepuller/` | Helm-чарт: hub (`hub.enabled`), spoke, agent DaemonSet, RBAC, ingress, Service метрик агента, `agent.networkPolicy`, `ServiceMonitor` и `PrometheusRule` раздельно для hub и агента |
 | `deploy/values/talos-example.yaml` | шаблон overlay для Talos-кластера: сокет CRI, toleration control-plane, ingress/cert-manager, `autoWarm=false`; реальные overlays кластеров — в приватном GitOps-репо |
 | `docs/DEPLOY.md` | чеклист деплоя: секреты, k3d-стенд, e2e-сценарий, общий runbook Talos-кластера (§14) |
 | `docs/architecture.md` | схемы Mermaid: топология, потоки, состояния, модель данных |
@@ -260,9 +260,18 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
   `agent.pull.*` (`-pull-timeout`, `-registry-probe-timeout`,
   `-pull-stall-timeout`), которых нет в релизном образе `0.2.0`:
   `image.tag=0.2.0` + чарт из `main` — это `CrashLoopBackOff` с
-  `flag provided but not defined: -pull-timeout` и все ноды `offline`. Ставьте
-  `image.tag=sha-<тот же коммит>` (как в `deploy/values/talos-example.yaml`) либо
-  релизную пару OCI-чарт `0.2.0` + образ `0.2.0`.
+  `flag provided but not defined: -pull-timeout` и все ноды `offline`. Пустой
+  `image.tag` не превращается в заглушку: `ip.imageTag` подставляет версию
+  релизного чарта (`Chart.version == Chart.appVersion`) либо `latest` для
+  чарта из `main` (и печатает предупреждение в `NOTES`). Для первой раскатки
+  всё равно пиньте `image.tag=sha-<тот же коммит>`; релизная пара — OCI-чарт
+  релиза + его образ. Меняя чарт, поднимайте `Chart.version`; `appVersion`
+  поднимается вместе с релизом.
+- **Values чарта ломаются между 0.2.0 и 0.3.0**: `networkPolicy.enabled`
+  переехал в `agent.networkPolicy.enabled`, `prometheusRule` разделён на
+  `prometheusRule` (hub/cluster) и `agent.prometheusRule`, добавлены
+  `hub.enabled`, `serviceMonitor`, `agent.serviceMonitor`. Старые overrides
+  молча не применятся — это повод один раз пройтись по overlay'ям.
 - **Talos: `imageFSCapacityBytes=0`.** `ImageFsInfo` в containerd на Talos отдаёт
   только used, поэтому disk-guard агента (`ShouldPause`/`UsedRatio`) не
   срабатывает никогда (нулевая ёмкость = «не пауза», fail-open).
@@ -305,7 +314,7 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 
 - [ ] `gofmt -l .` пуст, `go vet ./...` и `go test ./...` зелёные.
 - [ ] `go build -o bin/prepuller ./cmd/prepuller` проходит.
-- [ ] `helm lint deploy/helm/image-prepuller` и `helm template` (defaults и с `spoke`/`agent`/`ingress`/`networkPolicy`) проходят.
+- [ ] `helm lint deploy/helm/image-prepuller` (defaults и с `deploy/values/talos-example.yaml`) и `helm template` проходят: defaults, полный набор (`spoke`, `agent`, `ingress`, `agent.networkPolicy`, `serviceMonitor`, `agent.serviceMonitor`, `prometheusRule`, `agent.prometheusRule`, `--api-versions monitoring.coreos.com/v1`), а также `hub.enabled=false` и `agent.enabled=false` — компоненты должны реально исчезать из рендера.
 - [ ] Изменённое поведение отражено в `README.md` (API/флаги/метрики) и, если затронута
   архитектура, в `docs/architecture.md`.
 - [ ] Новые эндпоинты и middleware покрыты тестами; UI-путь проверен вручную

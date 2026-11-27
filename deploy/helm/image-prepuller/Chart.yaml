@@ -5,9 +5,13 @@ description: >-
   cookie auth, multi-cluster registry, Prometheus), an optional headless spoke
   backend and an optional per-node agent DaemonSet.
 type: application
-# Chart version. Bump on chart changes (docs/DEPLOY.md).
-version: 0.2.0
-# Application version; also the default image tag when image.tag is empty.
+# Chart version. Bump on chart changes (docs/DEPLOY.md). A released chart has
+# version == appVersion (the build workflow enforces chart version == git tag);
+# while they differ the chart is an unreleased build and image.tag falls back to
+# "latest" instead of a version that does not exist yet (see templates/_helpers.tpl).
+version: 0.3.0
+# Application version. On a release tag it equals the chart version and is the
+# default image tag; bump it together with version when cutting a release.
 appVersion: "0.2.0"
 kubeVersion: ">=1.25.0-0"
 home: https://github.com/vasyakrg/image-prepuller

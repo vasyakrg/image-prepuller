@@ -2,6 +2,18 @@
 {{- $secretName := include "ip.secretName" . -}}
 image-prepuller {{ .Chart.AppVersion }} is installed as "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
 
+Image: {{ include "ip.image" . }}
+Components: hub={{ ternary "on" "off" .Values.hub.enabled }}, spoke={{ ternary "on" "off" .Values.spoke.enabled }}, agent={{ ternary "on" "off" .Values.agent.enabled }}, ingress={{ ternary "on" "off" .Values.ingress.enabled }}.
+{{- if eq (include "ip.imageTag" .) "latest" }}
+
+WARNING: image.tag resolved to "latest" (chart {{ .Chart.Version }} is newer than
+appVersion {{ .Chart.AppVersion }}, so no released image exists for it yet).
+That is a moving reference: pin image.tag to an immutable sha-<commit> for
+production installs (docs/DEPLOY.md 14.2).
+{{- end }}
+
+{{- if .Values.hub.enabled }}
+
 Hub:
 {{- if .Values.ingress.enabled }}
 {{- range .Values.ingress.hosts }}
@@ -11,6 +23,12 @@ Hub:
   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $fullname }} {{ .Values.hub.service.httpPort }}:{{ .Values.hub.service.httpPort }}
   open http://localhost:{{ .Values.hub.service.httpPort }}/
 {{- end }}
+{{- else }}
+
+hub.enabled=false: no Web UI or hub API is installed in this release.
+{{- end }}
+
+{{- if or .Values.hub.enabled .Values.spoke.enabled .Values.agent.enabled }}
 
 {{- if .Values.secret.create }}
 Credentials (generated on install; retrieve them with):
@@ -20,12 +38,16 @@ Credentials (generated on install; retrieve them with):
 {{- else }}
 Credentials come from the existing secret "{{ $secretName }}".
 {{- end }}
+{{- end }}
+
+{{- if .Values.hub.enabled }}
 
 Health and metrics:
   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $fullname }} {{ .Values.hub.service.metricsPort }}:{{ .Values.hub.service.metricsPort }}
   curl -fsS http://localhost:{{ .Values.hub.service.httpPort }}/healthz
   curl -fsS http://localhost:{{ .Values.hub.service.httpPort }}/readyz
   curl -fsS http://localhost:{{ .Values.hub.service.metricsPort }}/metrics
+{{- end }}
 
 {{- if .Values.hub.mock }}
 
@@ -53,6 +75,24 @@ Spoke "{{ .Values.spoke.clusterName }}" is enabled: service {{ $fullname }}-spok
 (HTTP {{ .Values.spoke.service.httpPort }}, metrics {{ .Values.spoke.service.metricsPort }}).
 Point the hub at it with hub.remoteClusters, e.g.
   --set hub.remoteClusters="{{ .Values.spoke.clusterName }}=http://{{ $fullname }}-spoke.{{ .Release.Namespace }}.svc:{{ .Values.spoke.service.httpPort }}=<token>"
+{{- end }}
+
+{{- if or .Values.serviceMonitor.enabled .Values.agent.serviceMonitor.enabled .Values.prometheusRule.enabled .Values.agent.prometheusRule.enabled }}
+
+Monitoring (prometheus-operator):
+{{- if .Values.serviceMonitor.enabled }}
+  ServiceMonitor {{ $fullname }} -> hub metrics on the "metrics" port (interval {{ .Values.serviceMonitor.interval }}).
+{{- end }}
+{{- if .Values.agent.serviceMonitor.enabled }}
+  ServiceMonitor {{ $fullname }}-agent -> agent metrics :{{ .Values.agent.metrics.port }}, job="prepuller-agent".
+{{- end }}
+{{- if .Values.prometheusRule.enabled }}
+  PrometheusRule {{ $fullname }}-rules (hub/cluster alerts).
+{{- end }}
+{{- if .Values.agent.prometheusRule.enabled }}
+  PrometheusRule {{ $fullname }}-agent-rules (agent-process alerts).
+{{- end }}
+  Label them so the operator's selectors match (docs/alerts.md).
 {{- end }}
 
 Full deployment guide: docs/DEPLOY.md

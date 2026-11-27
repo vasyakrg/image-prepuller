@@ -1,0 +1,40 @@
+{{- if .Values.serviceMonitor.enabled }}
+{{- if not .Values.hub.enabled }}
+{{- fail "serviceMonitor.enabled=true requires hub.enabled=true: the monitor selects the hub metrics Service" }}
+{{- end }}
+{{- include "ip.requireMonitoringCRD" (dict "ctx" . "flag" "serviceMonitor.enabled") }}
+# ServiceMonitor for the hub metrics Service. Preferred over the prometheus.io/*
+# pod annotations: the target is the Service on its named "metrics" port, so the
+# job keeps a stable name across pod restarts.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "ip.fullname" . }}
+  labels:
+    {{- include "ip.labels" (dict "ctx" . "component" "hub") | nindent 4 }}
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.serviceMonitor.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      {{- include "ip.selectorLabels" (dict "ctx" . "component" "hub") | nindent 6 }}
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+      {{- with .Values.serviceMonitor.scrapeTimeout }}
+      scrapeTimeout: {{ . }}
+      {{- end }}
+      {{- with .Values.serviceMonitor.metricRelabelings }}
+      metricRelabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -1,0 +1,48 @@
+{{- if .Values.agent.serviceMonitor.enabled }}
+{{- if not .Values.agent.enabled }}
+{{- fail "agent.serviceMonitor.enabled=true requires agent.enabled=true" }}
+{{- end }}
+{{- if not .Values.agent.metrics.enabled }}
+{{- fail "agent.serviceMonitor.enabled=true requires agent.metrics.enabled=true: the monitor selects the agent metrics Service" }}
+{{- end }}
+{{- include "ip.requireMonitoringCRD" (dict "ctx" . "flag" "agent.serviceMonitor.enabled") }}
+# ServiceMonitor for the agent metrics Service (:9444). The agent is
+# hostNetwork, so every Service endpoint is the node IP itself — one target per
+# node, which is exactly the cardinality of the prepuller_agent_* series.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ printf "%s-agent" (include "ip.fullname" .) | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "ip.labels" (dict "ctx" . "component" "agent") | nindent 4 }}
+    {{- with .Values.agent.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.agent.serviceMonitor.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      {{- include "ip.selectorLabels" (dict "ctx" . "component" "agent") | nindent 6 }}
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.agent.serviceMonitor.interval }}
+      {{- with .Values.agent.serviceMonitor.scrapeTimeout }}
+      scrapeTimeout: {{ . }}
+      {{- end }}
+      {{- with .Values.agent.serviceMonitor.metricRelabelings }}
+      metricRelabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      relabelings:
+        # The alert rules key off up{job="prepuller-agent"}; without this the
+        # operator would name the job after the Service. Applied last, so it wins.
+        - targetLabel: job
+          replacement: prepuller-agent
+{{- end }}

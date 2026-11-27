@@ -257,8 +257,19 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
 ```
 
 `values.yaml` собирает hub в live-режиме (`hub.mock=false`) и включает агентский
-DaemonSet; spoke, ingress и NetworkPolicy — отдельными блоками (`spoke.enabled`,
-`ingress.enabled`, `networkPolicy.enabled`). Секреты либо генерируются при установке,
+DaemonSet. Каждый компонент включается своим флагом: `hub.enabled` (по умолчанию да),
+`agent.enabled` (да), `spoke.enabled` (нет) — так ставится и «только агенты» в кластер
+без UI. Только у агента свои `agent.networkPolicy.enabled` и
+`agent.prometheusRule.enabled`; ingress по умолчанию выключен (`ingress.enabled`) и
+требует включённого hub'а, а ServiceMonitor'ы и правила для hub — отдельными флагами
+(`serviceMonitor.enabled`, `prometheusRule.enabled`). Только агенты в кластер без UI —
+```bash
+helm upgrade --install prepuller-agents deploy/helm/image-prepuller \
+  --namespace prepuller --create-namespace \
+  --set hub.enabled=false --set agent.criSocket=/run/containerd/containerd.sock
+```
+
+Секреты либо генерируются при установке,
 либо берутся из `secret.existingSecret` (ключи `auth-user`, `auth-pass`, `session-secret`,
 `cluster-token`, `agent-token`). Публикация в GHCR идёт на штатном `GITHUB_TOKEN`
 (права `packages: write`), внешних секретов не нужно; старый Gitea-вариант с
@@ -468,7 +479,9 @@ Node-agent отдаёт свои метрики **на отдельном пор
 | `prepuller_agent_imagefs_used_bytes`, `..._capacity_bytes`, `prepuller_agent_images_cached_total` | gauge | `node` (значения последнего успешного снапшота) |
 
 Готовые правила алертов, пороги и матрица «кто виноват: агент, токен или связь» —
-[docs/alerts.md](docs/alerts.md) и шаблон `PrometheusRule` в чарте (`prometheusRule.enabled`).
+[docs/alerts.md](docs/alerts.md). Правила и ServiceMonitor'ы чарт умеет создавать сам,
+раздельно для hub/кластерных серий (`prometheusRule.enabled`, `serviceMonitor.enabled`)
+и для метрик агента (`agent.prometheusRule.enabled`, `agent.serviceMonitor.enabled`).
 
 ## Структура репозитория
 

@@ -86,22 +86,40 @@ jobs:
         run: |
           helm template ci deploy/helm/image-prepuller > /tmp/default.yaml
           helm template ci deploy/helm/image-prepuller \
+            --api-versions monitoring.coreos.com/v1 \
             --set spoke.enabled=true \
             --set agent.enabled=true \
             --set ingress.enabled=true \
-            --set networkPolicy.enabled=true \
+            --set agent.networkPolicy.enabled=true \
+            --set serviceMonitor.enabled=true \
+            --set agent.serviceMonitor.enabled=true \
             --set prometheusRule.enabled=true \
+            --set agent.prometheusRule.enabled=true \
             --set secret.auth.password=ci-password \
             --set secret.sessionSecret=ci-session-secret \
             --set secret.clusterToken=ci-cluster-token \
             > /tmp/full.yaml
+          # Agent-only and hub-only installs: each must render without the other
+          # component's objects.
+          helm template ci deploy/helm/image-prepuller --set hub.enabled=false > /tmp/agent-only.yaml
+          helm template ci deploy/helm/image-prepuller --set agent.enabled=false > /tmp/hub-only.yaml
           # The Talos template overlay carries the CRI socket path, the control-plane
           # toleration and the ingress/cert-manager wiring that defaults lack.
           helm template ci deploy/helm/image-prepuller \
             -f deploy/values/talos-example.yaml \
             > /tmp/talos-example.yaml
+          # Flags must actually gate objects, not just render them disabled.
+          ! grep -q 'kind: Deployment' /tmp/agent-only.yaml || { echo "agent-only render still has a Deployment"; exit 1; }
+          grep -q 'kind: DaemonSet' /tmp/agent-only.yaml
+          ! grep -q 'kind: DaemonSet' /tmp/hub-only.yaml || { echo "hub-only render still has a DaemonSet"; exit 1; }
+          grep -q 'kind: Deployment' /tmp/hub-only.yaml
+          grep -q 'kind: ServiceMonitor' /tmp/full.yaml
+          grep -q 'kind: PrometheusRule' /tmp/full.yaml
+          grep -q 'replacement: prepuller-agent' /tmp/full.yaml
           echo "rendered default: $(grep -c '^kind:' /tmp/default.yaml) objects"
           echo "rendered full:    $(grep -c '^kind:' /tmp/full.yaml) objects"
+          echo "rendered agent-only: $(grep -c '^kind:' /tmp/agent-only.yaml) objects"
+          echo "rendered hub-only:   $(grep -c '^kind:' /tmp/hub-only.yaml) objects"
           echo "rendered talos-example: $(grep -c '^kind:' /tmp/talos-example.yaml) objects"
 
       - name: validate rendered YAML
@@ -112,7 +130,7 @@ jobs:
             || python3 -m pip install --quiet --break-system-packages pyyaml
           python3 - <<'PY'
           import yaml
-          for path in ("/tmp/default.yaml", "/tmp/full.yaml", "/tmp/talos-example.yaml"):
+          for path in ("/tmp/default.yaml", "/tmp/full.yaml", "/tmp/agent-only.yaml", "/tmp/hub-only.yaml", "/tmp/talos-example.yaml"):
               with open(path) as fh:
                   docs = [d for d in yaml.safe_load_all(fh) if d]
               if not docs:

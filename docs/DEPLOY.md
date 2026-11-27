@@ -26,14 +26,21 @@ node-agent на каждой ноде. Для in-memory демо без Kubernet
 
 | Объект | Шаблон | Включено по умолчанию |
 | --- | --- | --- |
-| ServiceAccount (hub/spoke + agent) | `serviceaccount.yaml` | да |
-| ClusterRole + ClusterRoleBinding (read-only Nodes/workload'ы) | `rbac.yaml` | да (`rbac.create`) |
-| Secret (auth, session secret, cluster token, agent token) | `secret.yaml` | да |
-| Deployment + Service (hub) | `deployment-hub.yaml`, `service-hub.yaml` | да |
-| Ingress (совместимый с Traefik) | `ingress.yaml` | нет (`ingress.enabled`) |
+| ServiceAccount (hub/spoke) | `serviceaccount.yaml` | да, если `hub.enabled` или `spoke.enabled` |
+| ServiceAccount (agent, без прав в API) | `serviceaccount.yaml` | да при `agent.enabled` |
+| ClusterRole + ClusterRoleBinding (read-only Nodes/workload'ы) | `rbac.yaml` | да, если `hub.enabled` или `spoke.enabled` (`rbac.create`) |
+| Secret (auth, session secret, cluster token, agent token) | `secret.yaml` | да, если включён любой компонент |
+| Deployment + Service (hub) | `deployment-hub.yaml`, `service-hub.yaml` | да (`hub.enabled`) |
+| Ingress (совместимый с Traefik) | `ingress.yaml` | нет (`ingress.enabled`; требует `hub.enabled`) |
 | Deployment + Service (spoke) | `deployment-spoke.yaml`, `service-spoke.yaml` | нет (`spoke.enabled`) |
 | DaemonSet (node-agent) | `daemonset-agent.yaml` | да (`agent.enabled`) |
-| NetworkPolicy (agent) | `networkpolicy.yaml` | нет (`networkPolicy.enabled`) |
+| Service метрик агента | `service-agent-metrics.yaml` | да при `agent.metrics.enabled` |
+| NetworkPolicy (только агент) | `networkpolicy-agent.yaml` | нет (`agent.networkPolicy.enabled`) |
+| ServiceMonitor (hub / агент) | `servicemonitor-hub.yaml`, `servicemonitor-agent.yaml` | нет (`serviceMonitor.enabled` / `agent.serviceMonitor.enabled`) |
+| PrometheusRule (hub / агент) | `prometheusrule.yaml`, `prometheusrule-agent.yaml` | нет (`prometheusRule.enabled` / `agent.prometheusRule.enabled`) |
+
+`hub.enabled=false` (или `agent.enabled=false`) убирает объекты компонента
+целиком — так ставится «только агенты» в кластер без UI и наоборот.
 
 Один бинарь, три роли: `controller -role=hub` (Web UI + cookie-авторизация +
 реестр кластеров + Prometheus), `controller -role=spoke` (headless backend API
@@ -288,7 +295,13 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
   --namespace prepuller --reuse-values \
   --set agent.enabled=true \
   --set agent.criSocket=/run/containerd/containerd.sock \
-  --set networkPolicy.enabled=true
+  --set agent.networkPolicy.enabled=true
+
+# кластер без UI: только агенты (hub и ingress выключаются явно)
+helm upgrade --install prepuller-agents deploy/helm/image-prepuller \
+  --namespace prepuller --create-namespace \
+  --set hub.enabled=false --set ingress.enabled=false \
+  --set agent.criSocket=/run/containerd/containerd.sock
 
 # demo without a container runtime: in-memory agent, no socket needed
 helm upgrade --install prepuller deploy/helm/image-prepuller \
@@ -558,10 +571,18 @@ flag provided but not defined: -pull-timeout
 | Комбинация | Что получаете |
 | --- | --- |
 | чарт из этого репозитория на коммите + ```image.tag=sha-<same commit>``` | текущий код, гигиена pull'ов включена — **используйте это для первой раскатки** |
-| опубликованный OCI-чарт ```0.2.0``` + образ ```0.2.0``` | согласованная релизная пара, но без preflight-пробы и stall watchdog |
+| опубликованный OCI-чарт релиза + его образ | согласованная релизная пара; образ из релиза может быть старше кода |
 
-Берите тег ```sha-*``` того коммита, который деплоите; никогда не откатывайтесь
-на ```latest```.
+Если ```image.tag``` не задан, чарт подставляет конкретный тег сам, без
+незаполненных заглушек:
+
+- релизный чарт (```Chart.version == Chart.appVersion```) → эта версия;
+- чарт из ```main``` (версия уже поднята, ```appVersion``` ещё нет) → ```latest```,
+  то есть последняя опубликованная сборка; в ```NOTES``` установки будет предупреждение.
+
+Берите тег ```sha-*``` того коммита, который деплоите; ```latest``` — движущаяся
+ссылка, для продакшена не годится. Правило согласованности простое: чарт и образ
+должны быть из одного билда или из одного релиза.
 
 ### 14.3 Namespace и креды
 
@@ -687,6 +708,8 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
 - ```agent.tolerations``` для ```node-role.kubernetes.io/control-plane``` — без
   него ноды control-plane никогда не получат агента, и снапшот останется
   partial;
+- ```hub.tolerations``` — та же toleration для hub: если в кластере нет
+  untainted worker-нод (небольшой Talos), без неё под hub'а останется Pending;
 - ```agent.pull.*``` оставлены на дефолтах;
 - ```ingress.*``` — хост, класс, issuer cert-manager;
 - ```agent.metrics.enabled=true``` — Service метрик на ```:9444``` (14.8).
@@ -811,38 +834,37 @@ curl -fsS -b /tmp/pc 'http://127.0.0.1:8080/api/v1/pull-tasks?cluster=<cluster-n
 
 Чарт рендерит ClusterIP Service для порта метрик агента при
 ```agent.metrics.enabled=true```; поскольку агент работает с ```hostNetwork```,
-endpoints Service — это IP-адреса нод, поэтому ServiceMonitor (или обычные
-аннотации ```prometheus.io/*```, которые чарт тоже ставит) работает без
-дополнительной обвязки:
+endpoints Service — это IP-адреса нод (один endpoint на ноду). ServiceMonitor'ы
+чарт умеет создавать сам, отдельные флаги для hub и агента:
 
-```yaml
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: prepuller
-  namespace: monitoring
-spec:
-  namespaceSelector:
-    matchNames: [prepuller]
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: image-prepuller
-      app.kubernetes.io/instance: prepuller
-  endpoints:
-    - port: metrics          # hub, 9090
-      path: /metrics
-      interval: 30s
-      scrapeTimeout: 15s     # the hub bounds each snapshot at 3 s, keep headroom
+```bash
+helm upgrade --install prepuller deploy/helm/image-prepuller \
+  --namespace prepuller -f deploy/values/talos-example.yaml \
+  --set serviceMonitor.enabled=true \
+  --set serviceMonitor.labels.release=kube-prometheus-stack \
+  --set agent.serviceMonitor.enabled=true \
+  --set agent.serviceMonitor.labels.release=kube-prometheus-stack
 ```
 
-Держать ```scrapeTimeout``` на 15 s важно: при дефолтных 10 s hub может не
-уложиться в собственный дедлайн, пока ждёт мёртвого агента, и вся цель выпадет
-ровно во время инцидента.
+- ```serviceMonitor.enabled``` — ServiceMonitor на hub Service, порт ```metrics```
+  (9090), ```scrapeTimeout``` по умолчанию 15s;
+- ```agent.serviceMonitor.enabled``` — ServiceMonitor на ```<fullname>-agent-metrics```,
+  порт ```metrics``` (9444), и он принудительно ставит ```job="prepuller-agent"```,
+  чтобы правило ```PrepullerAgentDown``` работало без правки scrape-конфига.
 
-Правила алертов для этих серий лежат в этом репозитории шаблоном
-```PrometheusRule``` (```prometheusRule.enabled```) и разобраны вместе с
-матрицей триангуляции «агент, токен или связь?» в
-[docs/alerts.md](alerts.md).
+Оба флага требуют CRD ```monitoring.coreos.com/v1```: без него рендер падает с
+сообщением, что именно выключить. Альтернатива без оператора — аннотации
+```prometheus.io/scrape|port|path``` (```hub.metrics.annotations```,
+```agent.metrics.annotations```).
+
+Держать ```scrapeTimeout``` hub'а на 15 s важно: при 10 s hub может не
+уложиться в собственный дедлайн, пока ждёт мёртвого агента, и вся цель выпадет
+ровно во время инцидента (тот же порог в ```deploy/values/talos-example.yaml```).
+
+Правила алертов разделены на два объекта, чтобы включать их независимо:
+```prometheusRule.enabled``` — hub/cluster-серии, ```agent.prometheusRule.enabled```
+— ```prepuller_agent_*``` с ```:9444```. Матрица триангуляции «агент, токен или связь?»
+и все пороги — в [docs/alerts.md](alerts.md).
 
 ### 14.9 Upgrade, откат, удаление
 

@@ -44,9 +44,24 @@ app.kubernetes.io/version: {{ .ctx.Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .ctx.Release.Service }}
 {{- end }}
 
-{{/* Image reference; image.tag defaults to Chart.AppVersion. */}}
+{{/*
+Resolved image tag. Precedence: values.image.tag, then Chart.AppVersion for a
+released chart (version == appVersion), then "latest" for an unreleased chart
+whose appVersion has no image yet. Never renders an unresolved placeholder.
+*/}}
+{{- define "ip.imageTag" -}}
+{{- if .Values.image.tag -}}
+{{- .Values.image.tag -}}
+{{- else if eq .Chart.Version .Chart.AppVersion -}}
+{{- .Chart.AppVersion -}}
+{{- else -}}
+latest
+{{- end -}}
+{{- end }}
+
+{{/* Image reference. */}}
 {{- define "ip.image" -}}
-{{- printf "%s:%s" .Values.image.repository (.Values.image.tag | default .Chart.AppVersion) }}
+{{- printf "%s:%s" .Values.image.repository (include "ip.imageTag" .) }}
 {{- end }}
 
 {{/* ServiceAccount name used by all workloads. */}}
@@ -91,5 +106,15 @@ app.kubernetes.io/managed-by: {{ .ctx.Release.Service }}
 prometheus.io/scrape: "true"
 prometheus.io/port: {{ .metricsPort | quote }}
 prometheus.io/path: "/metrics"
+{{- end }}
+{{- end }}
+{{/*
+Guard for prometheus-operator objects. Fails early with an actionable message
+instead of letting apply dry-run choke on an unknown apiVersion. Context:
+dict "ctx" (root) "flag" (values key that enabled the object).
+*/}}
+{{- define "ip.requireMonitoringCRD" -}}
+{{- if not (.ctx.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+{{- fail (printf "monitoring.coreos.com/v1 CRDs are not installed: install prometheus-operator or set %s=false" .flag) }}
 {{- end }}
 {{- end }}

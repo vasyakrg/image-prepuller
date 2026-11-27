@@ -1,4 +1,7 @@
 {{- if .Values.ingress.enabled }}
+{{- if not .Values.hub.enabled }}
+{{- fail "ingress.enabled=true requires hub.enabled=true: an agent-only install has no HTTP UI to expose" }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:

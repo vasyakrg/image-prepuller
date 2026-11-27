@@ -1,4 +1,4 @@
-{{- if and .Values.networkPolicy.enabled .Values.agent.enabled }}
+{{- if and .Values.agent.networkPolicy.enabled .Values.agent.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -13,7 +13,7 @@ spec:
     - Ingress
     - Egress
   ingress:
-    # Hub/controller in the same namespace may reach the agent HTTP API port.
+    # Hub/controller and spoke pods of this release may reach the agent HTTP API port.
     - from:
         - podSelector:
             matchLabels:

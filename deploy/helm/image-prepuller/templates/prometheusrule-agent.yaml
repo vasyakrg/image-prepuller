@@ -1,0 +1,83 @@
+{{- if .Values.agent.prometheusRule.enabled }}
+{{- if not .Values.agent.enabled }}
+{{- fail "agent.prometheusRule.enabled=true requires agent.enabled=true: the rules cover agent series" }}
+{{- end }}
+{{- include "ip.requireMonitoringCRD" (dict "ctx" . "flag" "agent.prometheusRule.enabled") }}
+{{- $thresholds := .Values.agent.prometheusRule.thresholds }}
+# PrometheusRule for prometheus-operator: agent-process series scraped from
+# :9444 of every node. Kept apart from prometheusRule (hub/cluster rules) so the
+# agent rule set can be enabled or dropped on its own.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ printf "%s-agent-rules" (include "ip.fullname" .) | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "ip.labels" (dict "ctx" . "component" "agent") | nindent 4 }}
+    {{- with .Values.agent.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.agent.prometheusRule.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  groups:
+    - name: prepuller-agent
+      rules:
+        # Dead-man switch. The job label must match the scrape config that
+        # collects the agent /metrics; the chart's agent ServiceMonitor forces
+        # job="prepuller-agent" for exactly this reason. If that scrape job is
+        # removed from Prometheus entirely, up{job="prepuller-agent"} disappears
+        # and this alert cannot fire, so keep job and scrape config in sync.
+        - alert: PrepullerAgentDown
+          expr: up{job="prepuller-agent"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: Prepuller agent scrape target is down
+            description: An agent /metrics target has been unreachable for 2m. Check the DaemonSet pod on that node first.
+
+        # The agent answers scrapes but the hub stopped talking to it: the
+        # hub -> agent link (NetworkPolicy, token, node address, hub restarts)
+        # is broken while the process itself is alive.
+        - alert: PrepullerAgentNotContacted
+          expr: 'time() - prepuller_agent_last_contact_timestamp_seconds{endpoint="snapshot"} > {{ $thresholds.agentNoContact }}'
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Agent is alive but receives no hub snapshot requests
+            description: No /agent/v1/snapshot request for more than {{ $thresholds.agentNoContact }}s. Check the hub -> agent path, not the agent process.
+
+        # Auth failures are token rotation/configuration, not a network fault:
+        # the agent replies 401/403 to the hub's bearer token.
+        - alert: PrepullerAgentUnauthorized
+          expr: increase(prepuller_agent_requests_total{code=~"401|403"}[10m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: Agent rejects hub requests with 401/403
+            description: The hub's agent token no longer matches the agent. Rotate PREPULLER_AGENT_TOKEN on both sides.
+
+        - alert: PrepullerAgentCRIDown
+          expr: prepuller_agent_cri_up == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: Agent cannot reach the node CRI
+            description: The agent is up but its CRI client has been unhealthy for 5m; image inventory and pulls are degraded.
+
+        # A stalled pull is cancelled by the agent watchdog and counted; a
+        # sustained rate means a registry or containerd problem, not one slow image.
+        - alert: PrepullerAgentPullStalled
+          expr: increase(prepuller_agent_pull_total{result="stalled"}[15m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: Agent cancelled a stalled image pull
+            description: ImageFS stopped growing during a pull and the watchdog cancelled it. Check the registry and containerd.
+{{- end }}

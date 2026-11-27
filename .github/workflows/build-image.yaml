@@ -78,13 +78,18 @@ jobs:
       - name: helm template (defaults)
         run: helm template ci deploy/helm/image-prepuller > /tmp/rendered.yaml
 
-      - name: helm template (spoke + agent + ingress + networkPolicy)
+      - name: helm template (spoke + agent + ingress + NetworkPolicy + ServiceMonitor + rules)
         run: |
           helm template ci deploy/helm/image-prepuller \
+            --api-versions monitoring.coreos.com/v1 \
             --set spoke.enabled=true \
             --set agent.enabled=true \
             --set ingress.enabled=true \
-            --set networkPolicy.enabled=true \
+            --set agent.networkPolicy.enabled=true \
+            --set serviceMonitor.enabled=true \
+            --set agent.serviceMonitor.enabled=true \
+            --set prometheusRule.enabled=true \
+            --set agent.prometheusRule.enabled=true \
             --set secret.auth.password=ci-password \
             --set secret.sessionSecret=ci-session-secret \
             --set secret.clusterToken=ci-cluster-token \

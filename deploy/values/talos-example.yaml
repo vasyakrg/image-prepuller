@@ -12,13 +12,19 @@
 
 image:
   repository: ghcr.io/vasyakrg/image-prepuller
-  # Pin a sha-* tag built from the SAME commit as the chart: the released 0.2.0
-  # image predates the agent.pull.* flags and exits with
+  # Empty -> the chart resolves a concrete tag: the chart version for a released
+  # chart, "latest" for an unreleased build from main. For production pin the
+  # sha-<commit> built from the SAME commit as the chart: a released 0.2.0 image
+  # predates the agent.pull.* flags and exits with
   # "flag provided but not defined: -pull-timeout" (docs/DEPLOY.md 14.2).
-  tag: sha-<commit>
+  # Left empty on purpose: the chart resolves it (released chart -> its version,
+  # unreleased build -> latest). Pin the sha-<commit> of the same build in the
+  # private overlay for production (docs/DEPLOY.md 14.2).
+  tag: ""
   pullPolicy: IfNotPresent
 
 hub:
+  enabled: true
   replicaCount: 1
   mock: false
   clusterName: talos-prod
@@ -27,6 +33,12 @@ hub:
   # (docs/DEPLOY.md 14.7).
   autoWarm: false
   cookieSecure: true
+  # Small Talos installs have no untainted worker nodes, so the hub needs the
+  # same toleration as the agent or its pod stays Pending.
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
 
 agent:
   enabled: true
@@ -37,6 +49,12 @@ agent:
     # Anonymous /metrics on :9444 (counters only). The chart renders a Service
     # whose endpoints are the node IPs because the agent is hostNetwork.
     enabled: true
+    serviceMonitor:
+      # Flip on when prometheus-operator scrapes this cluster; select the object
+      # with a label your Prometheus picks up.
+      enabled: false
+      labels:
+        release: kube-prometheus-stack
   pull:
     # docker.io is normally reachable directly from the nodes; if containerd
     # pulls through a mirror and the direct dial is blocked, set this to false.
@@ -52,8 +70,20 @@ agent:
     - key: node-role.kubernetes.io/control-plane
       operator: Exists
       effect: NoSchedule
+  # The agent runs with hostNetwork=true, so most CNIs never apply this policy;
+  # restrict TCP 9443 (agent API) and 9444 (agent metrics) on the node firewall
+  # when the node network is not private.
+  networkPolicy:
+    enabled: false
+  prometheusRule:
+    # Agent-process alerts (prepuller_agent_*). Separate from prometheusRule so
+    # they can be enabled or dropped on their own.
+    enabled: false
+    labels:
+      release: kube-prometheus-stack
 
 ingress:
+  # Requires hub.enabled=true.
   enabled: true
   className: traefik
   annotations:
@@ -69,13 +99,18 @@ ingress:
       hosts:
         - prepuller.example.com
 
-# Alert rules for these series (docs/alerts.md). Enable only when
+# ServiceMonitor for the hub metrics Service (prometheus-operator CRD).
+# scrapeTimeout stays at 15s: the hub bounds a snapshot at 3s while it waits for
+# dead agents, and the usual 10s drops the whole target during an incident.
+serviceMonitor:
+  enabled: false
+  labels:
+    release: kube-prometheus-stack
+  scrapeTimeout: 15s
+
+# Alert rules for the hub/cluster series (docs/alerts.md). Enable only when
 # prometheus-operator manages them in the cluster.
 prometheusRule:
   enabled: false
-
-# The agent runs with hostNetwork=true, so a NetworkPolicy never applies to it;
-# restrict TCP 9443 (agent API) and 9444 (agent metrics) on the node firewall if
-# the node network is not private.
-networkPolicy:
-  enabled: false
+  labels:
+    release: kube-prometheus-stack

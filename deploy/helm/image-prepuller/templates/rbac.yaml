@@ -1,6 +1,7 @@
-{{- if and .Values.rbac.create .Values.serviceAccount.create }}
+{{- if and .Values.rbac.create .Values.serviceAccount.create (or .Values.hub.enabled .Values.spoke.enabled) }}
 # The controller lists Nodes and workload objects (Deployments, StatefulSets,
-# DaemonSets) cluster-wide. It never writes to the Kubernetes API.
+# DaemonSets) cluster-wide. It never writes to the Kubernetes API. Needed by the
+# hub and by a live spoke (K8sProvider); an agent-only install gets no RBAC.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
