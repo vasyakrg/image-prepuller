@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+Минорный релиз: вкладка `Stats` в hub UI поверх PostgreSQL и скрипт релиза.
+
 ### Added
 
 - **Вкладка Stats в hub UI.** Статистика из PostgreSQL (`internal/stats`) теперь
@@ -22,6 +24,16 @@
   отдаются. Документация — README (API + вкладка), ADR-002 (граница чтения),
   docs/DEPLOY.md §14.12; тесты — `internal/stats/query_test.go`,
   `internal/stats/service_test.go`, `internal/web/server_stats_test.go`.
+- **Скрипт релиза `release.sh`.** Один номер на чарт и приложение было легко
+  разъехать вручную, поэтому релиз теперь режется из корня репозитория:
+  `./release.sh X.Y.Z -m "..."` требует чистого дерева и `main`, синхронного с
+  `origin`, и сам запрещает не-возрастающие версии и уже существующие теги.
+  Дальше — бамп `Chart.yaml` `version`/`appVersion` и `internal/agent.Version`,
+  закрытие секции `[Unreleased]` в CHANGELOG, локальные гейты (`gofmt`,
+  `go build`, `go vet`, `go test`, `helm lint`/`helm template`), чтение значений
+  обратно, коммит `release: vX.Y.Z`, аннотированный тег и пуш ветки с тегом.
+  `--dry-run` печатает план и ничего не меняет, `--no-push` — коммит и тег без
+  пуша, `--skip-tests`/`--no-changelog` — для отладки и ручного CHANGELOG.
 
 ## [1.0.0] — 2026-11-27 — Статистика, история задач и область действия
 

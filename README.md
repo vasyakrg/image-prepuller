@@ -303,12 +303,15 @@ curl -s -b /tmp/pc 'localhost:8080/api/v1/snapshot?cluster=talos-prod-kz' | jq '
 и только после них — сборка `image`/`chart` (теги `v*` и `main`, амд64+arm64).
 Полный чеклист (секреты, стенд в k3d, e2e-сценарий из
 [docs/PLAN.md](docs/PLAN.md) §9) — [docs/DEPLOY.md](docs/DEPLOY.md).
+Релиз режется из корня репозитория: `./release.sh X.Y.Z -m "..."` — бамп
+`Chart.yaml`/`internal/agent.Version`, закрытие `[Unreleased]` в CHANGELOG,
+локальные гейты, коммит, тег и push ([docs/DEPLOY.md](docs/DEPLOY.md) §13).
 
 ```bash
 # опубликованные артефакты (public, без логина)
-docker pull ghcr.io/vasyakrg/image-prepuller:1.0.0
+docker pull ghcr.io/vasyakrg/image-prepuller:1.1.0
 helm upgrade --install prepuller oci://ghcr.io/vasyakrg/charts/image-prepuller \
-  --version 1.0.0 --namespace prepuller --create-namespace \
+  --version 1.1.0 --namespace prepuller --create-namespace \
   --set secret.auth.user=admin --set secret.auth.password='...' \
   --set secret.sessionSecret="$(openssl rand -hex 32)"
 
@@ -820,7 +823,8 @@ KEEP=1 bash hack/e2e-k3d.sh   # оставить кластер для разб�
 | Stage 2 (готово) | node-agent: CRI containerd, инвентарь образов, disk-guard, HTTP/JSON API v1, pull через агент |
 | Stage 3 (готово) | `K8sProvider` (client-go): workload'ы, слоты image×node, TTL-кэш снапшота, reconciler и `-auto-warm`; транспорт к node-agent (HTTP/JSON v1, Bearer, таймауты), живой pull и present-слоты из CRI-инвентаря — включён в `main.go` через `provider.NewK8sProviderFromEnv` |
 | v0.2.0 (готово) | Деплой: Dockerfile, Helm-чарт, CI-сборка образа и чарта; multi-user auth/RBAC и rate-limit; надёжный транспорт hub↔spoke |
-| v1.0.0 (текущий) | Опциональная статистика в PostgreSQL (образы, GC, перепулы, лог задач), история pull-задач с пагинацией, область действия и `mock` в дефолтах чарта, честный Pull All, обновлённые шаблоны overlay'ев |
+| v1.0.0 (готово) | Опциональная статистика в PostgreSQL (образы, GC, перепулы, лог задач), история pull-задач с пагинацией, область действия и `mock` в дефолтах чарта, честный Pull All, обновлённые шаблоны overlay'ев |
+| v1.1.0 (текущий) | Вкладка Stats в hub UI: read-only `/api/v1/stats/*` и таблицы «Ноды (последний срез)», «Присутствие образов», «События GC», «Перепулы», «Лог pull-задач» с фильтрами и пагинацией; состояния «сбор выключен» и «БД недоступна» с повтором; скрипт релиза `release.sh` |
 | Далее | алерты по покрытию и ImageFS, e2e в k3d в CI, CSRF-токены, durable audit sink, argon2id |
 
 ## Известные ограничения
