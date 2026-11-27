@@ -1,0 +1,82 @@
+# Overlay: MANAGED (spoke) cluster — no hub, no ingress: a headless spoke API
+# plus a node agent on every node. The master cluster's hub talks to this
+# cluster over the spoke (docs/DEPLOY.md section 14.10).
+#
+# This repository is PUBLIC: real hostnames, IPs and pinned image tags belong in
+# the private GitOps repository. Copy this file there and replace the
+# placeholders; do not commit the filled-in copy here.
+#
+# Usage:
+#   helm upgrade --install prepuller deploy/helm/image-prepuller \
+#     --namespace prepuller --create-namespace -f <private-managed-overlay>.yaml
+#
+# The master cluster has its own overlay: deploy/values/hub-cluster.yaml.
+
+image:
+  repository: ghcr.io/vasyakrg/image-prepuller
+  # Empty -> the chart resolves a concrete tag (chart version for a release,
+  # "latest" for an unreleased build). Pin the sha-<commit> of the same build as
+  # the master cluster so both clusters run identical code (docs/DEPLOY.md 14.2).
+  tag: ""
+  pullPolicy: IfNotPresent
+
+hub:
+  # No Web UI, no API, no ingress in this cluster: the hub lives in the master
+  # cluster. hub.enabled=false also drops the hub RBAC it would not use.
+  enabled: false
+
+spoke:
+  # Headless backend for exactly this cluster. The name must match the entry you
+  # put into hub.remoteClusters on the master cluster.
+  enabled: true
+  clusterName: talos-stage
+  replicaCount: 1
+  mock: false
+  service:
+    type: ClusterIP
+    httpPort: 8081
+    metricsPort: 9091
+
+secret:
+  # Bearer token the hub uses to call this spoke (PREPULLER_CLUSTER_TOKEN on the
+  # spoke, token in hub.remoteClusters on the master). Empty -> random on
+  # install; then read it and paste it into the master overlay:
+  #   kubectl -n prepuller get secret prepuller-image-prepuller-secret \
+  #     -o jsonpath='{.data.cluster-token}' | base64 -d
+  # Set it explicitly here if your GitOps flow cannot read the Secret back.
+  clusterToken: ""
+
+agent:
+  enabled: true
+  # Talos keeps containerd on the upstream path.
+  criSocket: /run/containerd/containerd.sock
+  diskPauseRatio: 0.78
+  metrics:
+    enabled: true
+    serviceMonitor:
+      # Scraped by the same Prometheus that scrapes the master cluster, or by a
+      # local one: the agent monitor forces job="prepuller-agent".
+      enabled: false
+      labels:
+        release: kube-prometheus-stack
+  pull:
+    registryProbe: true
+    registryProbeTimeout: 5s
+    stallWatch: true
+    stallTimeout: 60s
+    timeout: 10m
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+  networkPolicy:
+    enabled: false
+  prometheusRule:
+    # Agent-process alerts for this cluster. Keep off if only the master
+    # cluster's Prometheus evaluates them.
+    enabled: false
+    labels:
+      release: kube-prometheus-stack
+
+# No hub here, so no hub ServiceMonitor; the spoke has its own /metrics if you
+# need cluster-level series from this side (not chart-managed today).

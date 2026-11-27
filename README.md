@@ -258,11 +258,14 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
 
 `values.yaml` собирает hub в live-режиме (`hub.mock=false`) и включает агентский
 DaemonSet. Каждый компонент включается своим флагом: `hub.enabled` (по умолчанию да),
-`agent.enabled` (да), `spoke.enabled` (нет) — так ставится и «только агенты» в кластер
-без UI. Только у агента свои `agent.networkPolicy.enabled` и
-`agent.prometheusRule.enabled`; ingress по умолчанию выключен (`ingress.enabled`) и
-требует включённого hub'а, а ServiceMonitor'ы и правила для hub — отдельными флагами
-(`serviceMonitor.enabled`, `prometheusRule.enabled`). Только агенты в кластер без UI —
+`agent.enabled` (да), `spoke.enabled` (нет). Ingress живёт под hub'ом
+(`hub.ingress.enabled`, по умолчанию выключен): ведомые кластеры его не получают.
+Только у агента свои `agent.networkPolicy.enabled` и `agent.prometheusRule.enabled`;
+ServiceMonitor'ы и правила для hub — отдельными флагами (`serviceMonitor.enabled`,
+`prometheusRule.enabled`).
+
+Кластер без UI — только агенты:
+
 ```bash
 helm upgrade --install prepuller-agents deploy/helm/image-prepuller \
   --namespace prepuller --create-namespace \
@@ -276,13 +279,18 @@ helm upgrade --install prepuller-agents deploy/helm/image-prepuller \
 `REGISTRY`/`IMAGE` и `REGISTRY_USERNAME`/`REGISTRY_PASSWORD` остался в
 [`.gitea/workflows/build-image.yaml`](.gitea/workflows/build-image.yaml) как зеркало.
 
-### Первый кластер (Talos)
+### Кластеры: мастер и ведомый (Talos)
 
 Первая раскатка проверена на Talos-кластере (Talos v1.13, Kubernetes v1.36,
-Cilium, Traefik, cert-manager). В репозитории лежит только **шаблон** overlay —
-[`deploy/values/talos-example.yaml`](deploy/values/talos-example.yaml):
-Talos-путь к сокету containerd, toleration для control-plane, ingress с
-сертификатом от платформенного `ClusterIssuer`, `autoWarm=false` на первый раскат.
+Cilium, Traefik, cert-manager). В репозитории лежат два **шаблона** overlay:
+
+- [`deploy/values/hub-cluster.yaml`](deploy/values/hub-cluster.yaml) — мастер-кластер: hub,
+  ingress с сертификатом платформенного `ClusterIssuer`, агенты на всех нодах,
+  toleration для control-plane, `autoWarm=false` на первую раскатку;
+- [`deploy/values/managed-cluster.yaml`](deploy/values/managed-cluster.yaml) — ведомый
+  кластер: `hub.enabled=false`, включены `spoke` и агенты. URL и токен spoke
+  регистрируются в `hub.remoteClusters` мастер-кластера
+  ([docs/DEPLOY.md §14.10](docs/DEPLOY.md));
 
 **Репозиторий публичный.** Реальные значения (домен, адреса нод, секрет-стор,
 `sha-*` тег сборки) живут в приватном GitOps-репозитории платформы; overlay

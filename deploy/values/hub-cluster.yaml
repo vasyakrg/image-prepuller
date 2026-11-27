@@ -1,13 +1,15 @@
-# Template overlay for the first production cluster running Talos.
+# Overlay: MASTER cluster — hub (Web UI + API + Prometheus) plus a node agent on
+# every node. This is the cluster you open in the browser.
 #
-# This repository is PUBLIC: real cluster data (hostname, node addresses, secret
-# store, pinned sha-* tags) belongs in the private GitOps repository. Copy this
-# file there and replace the placeholders; do not commit the filled-in copy here.
+# This repository is PUBLIC: real hostnames, IPs, issuer names and pinned image
+# tags belong in the private GitOps repository. Copy this file there and replace
+# the placeholders; do not commit the filled-in copy here.
 #
 # Usage:
 #   helm upgrade --install prepuller deploy/helm/image-prepuller \
-#     --namespace prepuller --create-namespace -f <private-overlay>.yaml
+#     --namespace prepuller --create-namespace -f <private-hub-overlay>.yaml
 #
+# The managed (spoke) cluster has its own overlay: deploy/values/managed-cluster.yaml.
 # Walkthrough, expected numbers and Talos gotchas: docs/DEPLOY.md section 14.
 
 image:
@@ -17,9 +19,7 @@ image:
   # sha-<commit> built from the SAME commit as the chart: a released 0.2.0 image
   # predates the agent.pull.* flags and exits with
   # "flag provided but not defined: -pull-timeout" (docs/DEPLOY.md 14.2).
-  # Left empty on purpose: the chart resolves it (released chart -> its version,
-  # unreleased build -> latest). Pin the sha-<commit> of the same build in the
-  # private overlay for production (docs/DEPLOY.md 14.2).
+  # Left empty on purpose here: the chart resolves it.
   tag: ""
   pullPolicy: IfNotPresent
 
@@ -33,12 +33,40 @@ hub:
   # (docs/DEPLOY.md 14.7).
   autoWarm: false
   cookieSecure: true
+  # The hub is the only component with an ingress; it exposes the UI/API.
+  ingress:
+    enabled: true
+    className: traefik
+    annotations:
+      # cert-manager's ingress-shim creates the Certificate for hub.ingress.tls.
+      cert-manager.io/cluster-issuer: <cluster-issuer>
+    hosts:
+      - host: prepuller.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls:
+      - secretName: prepuller-tls
+        hosts:
+          - prepuller.example.com
+  # Managed clusters this hub drives, PREPULLER_REMOTE_CLUSTERS format:
+  #   "<name>=<url>=<cluster-token>"
+  # The token must equal secret.clusterToken of that cluster's release
+  # (deploy/values/managed-cluster.yaml). Read it from the managed cluster with:
+  #   kubectl -n prepuller get secret prepuller-image-prepuller-secret \
+  #     -o jsonpath='{.data.cluster-token}' | base64 -d
+  # Spoke URL format: http://<release>-image-prepuller-spoke.<namespace>.svc:8081
+  remoteClusters: ""
   # Small Talos installs have no untainted worker nodes, so the hub needs the
   # same toleration as the agent or its pod stays Pending.
   tolerations:
     - key: node-role.kubernetes.io/control-plane
       operator: Exists
       effect: NoSchedule
+
+# This release is the hub; it is not itself a spoke of another hub.
+spoke:
+  enabled: false
 
 agent:
   enabled: true
@@ -81,23 +109,6 @@ agent:
     enabled: false
     labels:
       release: kube-prometheus-stack
-
-ingress:
-  # Requires hub.enabled=true.
-  enabled: true
-  className: traefik
-  annotations:
-    # cert-manager's ingress-shim creates the Certificate for ingress.tls.
-    cert-manager.io/cluster-issuer: <cluster-issuer>
-  hosts:
-    - host: prepuller.example.com
-      paths:
-        - path: /
-          pathType: Prefix
-  tls:
-    - secretName: prepuller-tls
-      hosts:
-        - prepuller.example.com
 
 # ServiceMonitor for the hub metrics Service (prometheus-operator CRD).
 # scrapeTimeout stays at 15s: the hub bounds a snapshot at 3s while it waits for

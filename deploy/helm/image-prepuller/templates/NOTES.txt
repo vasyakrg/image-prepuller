@@ -3,7 +3,7 @@
 image-prepuller {{ .Chart.AppVersion }} is installed as "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
 
 Image: {{ include "ip.image" . }}
-Components: hub={{ ternary "on" "off" .Values.hub.enabled }}, spoke={{ ternary "on" "off" .Values.spoke.enabled }}, agent={{ ternary "on" "off" .Values.agent.enabled }}, ingress={{ ternary "on" "off" .Values.ingress.enabled }}.
+Components: hub={{ ternary "on" "off" .Values.hub.enabled }}, spoke={{ ternary "on" "off" .Values.spoke.enabled }}, agent={{ ternary "on" "off" .Values.agent.enabled }}, hub.ingress={{ ternary "on" "off" .Values.hub.ingress.enabled }}.
 {{- if eq (include "ip.imageTag" .) "latest" }}
 
 WARNING: image.tag resolved to "latest" (chart {{ .Chart.Version }} is newer than
@@ -15,9 +15,9 @@ production installs (docs/DEPLOY.md 14.2).
 {{- if .Values.hub.enabled }}
 
 Hub:
-{{- if .Values.ingress.enabled }}
-{{- range .Values.ingress.hosts }}
-  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}/
+{{- if .Values.hub.ingress.enabled }}
+{{- range .Values.hub.ingress.hosts }}
+  http{{ if $.Values.hub.ingress.tls }}s{{ end }}://{{ .host }}/
 {{- end }}
 {{- else }}
   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $fullname }} {{ .Values.hub.service.httpPort }}:{{ .Values.hub.service.httpPort }}

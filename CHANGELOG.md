@@ -2,10 +2,28 @@
 
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/), версии — [SemVer](https://semver.org/lang/ru/).
 
-## [Unreleased]
-
 ### Added
 
+- **Чарт 0.3.0: компоненты и мониторинг включаются раздельно.** `hub.enabled`
+  (agent-only/spoke-only кластер больше не получает Deployment/Service/RBAC hub'а),
+  ServiceMonitor для hub и для агента (`serviceMonitor.*`, `agent.serviceMonitor.*`,
+  агентский монитор сам ставит `job="prepuller-agent"`), `PrometheusRule` разделён на
+  hub/cluster (`prometheusRule.enabled`) и агентский (`agent.prometheusRule.enabled`)
+  с собственными labels/annotations/thresholds. Без CRD
+  `monitoring.coreos.com/v1` рендер падает с понятным сообщением.
+- **Overlay'и на два кластера:** `deploy/values/hub-cluster.yaml` (master: hub + агенты +
+  ingress) и `deploy/values/managed-cluster.yaml` (ведомый: spoke + агенты, hub и ingress
+  выключены); старый `talos-example.yaml` заменён ими, runbook 14.10 описывает связывание
+  через `hub.remoteClusters`.
+- `image.tag` резолвится без заглушек: релизный чарт → его версия, чарт из `main` →
+  `latest` (с предупреждением в NOTES), явный тег — как есть.
+### Changed
+
+- **Ломающие изменения values (чарт 0.3.0):** `networkPolicy.enabled` →
+  `agent.networkPolicy.enabled`, `ingress.*` → `hub.ingress.*` (ingress относится только
+  к hub'у), порог `thresholds.agentNoContact` → `agent.prometheusRule.thresholds.agentNoContact`.
+  `hub.tolerations` добавлен в master-overlay (single-node Talos), NetworkPolicy переехал
+  в секцию агента.
 - **Node-agent отдаёт Prometheus-метрики на отдельном порту `:9444`**
   (`-metrics-addr`/`PREPULLER_AGENT_METRICS_ADDR`, без авторизации; на скрейпе агент не
   ходит в CRI и в сеть, а отдаёт уже собранные данные): `prepuller_agent_up` (dead-man),

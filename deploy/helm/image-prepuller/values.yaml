@@ -110,6 +110,19 @@ hub:
     type: ClusterIP
     httpPort: 8080
     metricsPort: 9090
+  # Ingress lives under hub: it only ever exposes the hub UI/API. Managed
+  # clusters (agent-only or spoke-only releases) never carry an ingress.
+  ingress:
+    enabled: false
+    # Traefik accepts the standard Ingress class name, e.g. "traefik".
+    className: ""
+    annotations: {}
+    hosts:
+      - host: prepuller.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
   resources:
     requests:
       cpu: 50m
@@ -275,18 +288,6 @@ agent:
       maxUnavailable: 10%
   # kubectl drain/upgrade knob: the DaemonSet tolerates control-plane taints
   # only if listed here.
-
-ingress:
-  enabled: false
-  # Traefik accepts the standard Ingress class name, e.g. "traefik".
-  className: ""
-  annotations: {}
-  hosts:
-    - host: prepuller.example.com
-      paths:
-        - path: /
-          pathType: Prefix
-  tls: []
 
 # PrometheusRule with the hub/cluster alerts (prometheus-operator CRD): node
 # agent down, cluster partial/down, stale snapshot, ImageFS usage, failing

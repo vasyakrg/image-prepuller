@@ -31,7 +31,7 @@ node-agent на каждой ноде. Для in-memory демо без Kubernet
 | ClusterRole + ClusterRoleBinding (read-only Nodes/workload'ы) | `rbac.yaml` | да, если `hub.enabled` или `spoke.enabled` (`rbac.create`) |
 | Secret (auth, session secret, cluster token, agent token) | `secret.yaml` | да, если включён любой компонент |
 | Deployment + Service (hub) | `deployment-hub.yaml`, `service-hub.yaml` | да (`hub.enabled`) |
-| Ingress (совместимый с Traefik) | `ingress.yaml` | нет (`ingress.enabled`; требует `hub.enabled`) |
+| Ingress (совместимый с Traefik) | `ingress.yaml` | нет (`hub.ingress.enabled`; только для hub) |
 | Deployment + Service (spoke) | `deployment-spoke.yaml`, `service-spoke.yaml` | нет (`spoke.enabled`) |
 | DaemonSet (node-agent) | `daemonset-agent.yaml` | да (`agent.enabled`) |
 | Service метрик агента | `service-agent-metrics.yaml` | да при `agent.metrics.enabled` |
@@ -199,13 +199,13 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
   --set image.tag=sha-1a2b3c4d5e6f \
   --set secret.create=false \
   --set secret.existingSecret=prepuller-credentials \
-  --set ingress.enabled=true \
-  --set ingress.className=traefik \
-  --set 'ingress.hosts[0].host=prepuller.example.com' \
-  --set 'ingress.hosts[0].paths[0].path=/' \
-  --set 'ingress.hosts[0].paths[0].pathType=Prefix' \
-  --set 'ingress.tls[0].secretName=prepuller-tls' \
-  --set 'ingress.tls[0].hosts[0]=prepuller.example.com'
+  --set hub.ingress.enabled=true \
+  --set hub.ingress.className=traefik \
+  --set 'hub.ingress.hosts[0].host=prepuller.example.com' \
+  --set 'hub.ingress.hosts[0].paths[0].path=/' \
+  --set 'hub.ingress.hosts[0].paths[0].pathType=Prefix' \
+  --set 'hub.ingress.tls[0].secretName=prepuller-tls' \
+  --set 'hub.ingress.tls[0].hosts[0]=prepuller.example.com'
 ```
 
 Предпросмотр перед применением:
@@ -252,7 +252,9 @@ curl -fsS -H "Authorization: Bearer <cluster-token>" \
 
 Spoke — отдельный релиз того же чарта с `spoke.enabled=true`. Разверните его в
 кластере, которым он управляет (или в общем кластере), затем направьте на него
-hub через `hub.remoteClusters`:
+hub через `hub.remoteClusters`. Готовый шаблон такого релиза —
+[deploy/values/managed-cluster.yaml](../deploy/values/managed-cluster.yaml): hub и ingress
+там выключены, включены spoke и агенты.
 
 ```bash
 # 1. Deploy the spoke in cluster "kz".
@@ -300,7 +302,7 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
 # кластер без UI: только агенты (hub и ingress выключаются явно)
 helm upgrade --install prepuller-agents deploy/helm/image-prepuller \
   --namespace prepuller --create-namespace \
-  --set hub.enabled=false --set ingress.enabled=false \
+  --set hub.enabled=false \
   --set agent.criSocket=/run/containerd/containerd.sock
 
 # demo without a container runtime: in-memory agent, no socket needed
@@ -375,7 +377,7 @@ curl -fsS -H "Authorization: Bearer <agent-token>" \
 | Агент в `CrashLoopBackOff`, `agent config error` или ошибки dial к CRI | Неверный путь к сокету CRI, он не смонтирован или containerd отклоняет соединение | Проверьте `agent.criSocket` и логи агента; для смоука задайте `agent.mock=true` (in-memory образы). |
 | Hub достаёт агента из пробы `kubectl exec`, но ноды всё равно offline | Старый под hub сохранил прежний `agent-token` после смены Secret | `kubectl -n <ns> rollout restart deploy/<hub>` (или передеплой), чтобы окружение перечиталось. |
 | Агент в `CrashLoopBackOff`, `flag provided but not defined: -pull-timeout` | Чарт из `main` рендерит флаги `agent.pull.*`, которых не знает релизный образ `0.2.0` | Пришпильте `image.tag` к сборке `sha-<commit>` того же коммита ([14.2](#142-привязать-тег-образа-к-коммиту-а-не-к-релизу)) или ставьте релизный OCI-чарт `0.2.0` с образом `0.2.0` |
-| Ingress отдаёт 404 на Traefik | Неверный `ingressClassName` или хост | Задайте `ingress.className=traefik` и реальный хост; проверьте `kubectl get ingress`. |
+| Ingress отдаёт 404 на Traefik | Неверный `ingressClassName` или хост | Задайте `hub.ingress.className=traefik` и реальный хост; проверьте `kubectl get ingress`. |
 | `helm install` падает: `secret.create=false requires secret.existingSecret` | Guard в `secret.yaml` | Создайте Secret или задайте `secret.create=true`. |
 
 ## 10. Upgrade и откат
@@ -537,9 +539,11 @@ workload'ами, так что считайте их ориентировочн�
 
 **Этот репозиторий публичный.** Overlay реального кластера (hostname, адреса
 нод, secret store, пришпиленные теги) живёт в приватном GitOps-репозитории
-платформы, а не здесь. Здесь лежит только шаблон
-[deploy/values/talos-example.yaml](../deploy/values/talos-example.yaml);
-скопируйте его в GitOps-репозиторий и заполните реальными значениями уже там.
+платформы, а не здесь. Здесь лежат только шаблоны: [deploy/values/hub-cluster.yaml](../deploy/values/hub-cluster.yaml)
+для мастер-кластера (hub + агенты + ingress) и
+[deploy/values/managed-cluster.yaml](../deploy/values/managed-cluster.yaml) для ведомого
+(spoke + агенты). Скопируйте их в GitOps-репозиторий и заполните реальными
+значениями уже там.
 
 ### 14.1 Что должен предоставить целевой кластер
 
@@ -638,9 +642,9 @@ spec:
 dig +short <prepuller.example.com>
 ```
 
-[deploy/values/talos-example.yaml](../deploy/values/talos-example.yaml) включает Ingress чарта с
+[deploy/values/hub-cluster.yaml](../deploy/values/hub-cluster.yaml) включает Ingress чарта с
 ```ClusterIssuer``` платформы; ingress-shim cert-manager'а выпускает сертификат
-для ```ingress.tls```. Следить:
+для ```hub.ingress.tls```. Следить:
 
 ```bash
 kubectl -n prepuller get certificate -w
@@ -648,7 +652,7 @@ kubectl -n prepuller get order,challenge
 ```
 
 Если кластер предпочитает нативный ```IngressRoute```, задайте
-```ingress.enabled=false``` и примените два этих объекта:
+```hub.ingress.enabled=false``` и примените два этих объекта:
 
 ```yaml
 apiVersion: cert-manager.io/v1
@@ -687,7 +691,7 @@ spec:
 
 ```bash
 helm template prepuller deploy/helm/image-prepuller -n prepuller \
-  -f deploy/values/talos-example.yaml > /tmp/prepuller.yaml
+  -f deploy/values/hub-cluster.yaml > /tmp/prepuller.yaml
 kubectl apply --dry-run=server -f /tmp/prepuller.yaml
 ```
 
@@ -696,7 +700,7 @@ kubectl apply --dry-run=server -f /tmp/prepuller.yaml
 ```bash
 helm upgrade --install prepuller deploy/helm/image-prepuller \
   --namespace prepuller --create-namespace \
-  -f deploy/values/talos-example.yaml
+  -f deploy/values/hub-cluster.yaml
 ```
 
 Что шаблон меняет относительно дефолтов чарта (всё описано инлайном):
@@ -711,7 +715,7 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
 - ```hub.tolerations``` — та же toleration для hub: если в кластере нет
   untainted worker-нод (небольшой Talos), без неё под hub'а останется Pending;
 - ```agent.pull.*``` оставлены на дефолтах;
-- ```ingress.*``` — хост, класс, issuer cert-manager;
+- ```hub.ingress.*``` — хост, класс, issuer cert-manager;
 - ```agent.metrics.enabled=true``` — Service метрик на ```:9444``` (14.8).
 
 Опубликованный OCI-чарт работает с тем же overlay:
@@ -719,7 +723,7 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
 ```bash
 helm upgrade --install prepuller oci://ghcr.io/vasyakrg/charts/image-prepuller \
   --version <version> --namespace prepuller --create-namespace \
-  -f deploy/values/talos-example.yaml
+  -f deploy/values/hub-cluster.yaml
 ```
 
 ### 14.6 Проверка
@@ -839,7 +843,7 @@ endpoints Service — это IP-адреса нод (один endpoint на но
 
 ```bash
 helm upgrade --install prepuller deploy/helm/image-prepuller \
-  --namespace prepuller -f deploy/values/talos-example.yaml \
+  --namespace prepuller -f deploy/values/hub-cluster.yaml \
   --set serviceMonitor.enabled=true \
   --set serviceMonitor.labels.release=kube-prometheus-stack \
   --set agent.serviceMonitor.enabled=true \
@@ -859,7 +863,7 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
 
 Держать ```scrapeTimeout``` hub'а на 15 s важно: при 10 s hub может не
 уложиться в собственный дедлайн, пока ждёт мёртвого агента, и вся цель выпадет
-ровно во время инцидента (тот же порог в ```deploy/values/talos-example.yaml```).
+ровно во время инцидента (тот же порог в ```deploy/values/hub-cluster.yaml```).
 
 Правила алертов разделены на два объекта, чтобы включать их независимо:
 ```prometheusRule.enabled``` — hub/cluster-серии, ```agent.prometheusRule.enabled```
@@ -871,7 +875,7 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
 ```bash
 # same overlay, new sha tag
 helm upgrade prepuller deploy/helm/image-prepuller -n prepuller \
-  -f deploy/values/talos-example.yaml --set image.tag=sha-<new-commit>
+  -f deploy/values/hub-cluster.yaml --set image.tag=sha-<new-commit>
 
 helm history prepuller -n prepuller
 helm rollback prepuller <revision> -n prepuller   # then re-pin image.tag explicitly
@@ -884,3 +888,53 @@ kubectl delete namespace prepuller
 Удаление namespace уносит также Ingress, Certificate и DaemonSet; image-кэш
 containerd на нодах при uninstall **не** трогается. Если позже релизом владеет
 Flux, удалите HelmRelease и дайте Flux сделать prune.
+
+### 14.10 Второй, ведомый кластер
+
+Ведомый кластер получает свой релиз того же чарта: без hub'а и без ingress, с
+spoke и агентами. Шаблон —
+[deploy/values/managed-cluster.yaml](../deploy/values/managed-cluster.yaml):
+
+```bash
+helm upgrade --install prepuller deploy/helm/image-prepuller \
+  --namespace prepuller --create-namespace --kube-context <managed-context> \
+  -f deploy/values/managed-cluster.yaml \
+  --set spoke.clusterName=talos-stage
+```
+
+Что важно в этом overlay:
+
+- ```hub.enabled=false``` — никакого UI, API и ingress в ведомом кластере, и
+  hub-RBAC тоже не рендерится;
+- ```spoke.enabled=true``` и ```spoke.clusterName``` — имя кластера в UI и в
+  метриках, оно же попадёт в ```hub.remoteClusters```;
+- ```agent.*``` — тот же DaemonSet, что и в мастер-кластере (сокет CRI, toleration
+  control-plane, метрики на :9444).
+
+Дальше свяжите кластеры токеном. Сделайте его фиксированным заранее
+(```secret.clusterToken```) или прочитайте сгенерированный:
+
+```bash
+TOKEN="$(kubectl --context <managed-context> -n prepuller get secret \
+  prepuller-image-prepuller-secret -o jsonpath='{.data.cluster-token}' | base64 -d)"
+
+# на мастер-кластере: зарегистрировать ведомый в hub
+helm upgrade prepuller deploy/helm/image-prepuller --namespace prepuller \
+  -f deploy/values/hub-cluster.yaml --reuse-values \
+  --set "hub.remoteClusters=talos-stage=http://prepuller-image-prepuller-spoke.prepuller.svc:8081=${TOKEN}"
+```
+
+Spoke ходит по HTTP внутри кластера; если hub не может достучаться до
+cluster-internal Service, опубликуйте spoke через Internal LoadBalancer или
+Ingress с TLS и подставьте этот адрес в ```hub.remoteClusters```.
+
+Проверка со стороны hub'а:
+
+```bash
+kubectl -n prepuller logs deploy/prepuller-image-prepuller | grep -i 'talos-stage'
+curl -fsS -b /tmp/cookies http://127.0.0.1:8080/api/v1/clusters | jq
+```
+
+В UI ведомый появится вторым кластером со своей матрицей ```image × node```;
+если он недоступен, снапшот помечается ```offline```/```partial```, а не роняет
+мастер-кластер.
