@@ -1,8 +1,8 @@
-{{- if .Values.serviceMonitor.enabled }}
+{{- if .Values.hub.serviceMonitor.enabled }}
 {{- if not .Values.hub.enabled }}
-{{- fail "serviceMonitor.enabled=true requires hub.enabled=true: the monitor selects the hub metrics Service" }}
+{{- fail "hub.serviceMonitor.enabled=true requires hub.enabled=true: the monitor selects the hub metrics Service" }}
 {{- end }}
-{{- include "ip.requireMonitoringCRD" (dict "ctx" . "flag" "serviceMonitor.enabled") }}
+{{- include "ip.requireMonitoringCRD" (dict "ctx" . "flag" "hub.serviceMonitor.enabled") }}
 # ServiceMonitor for the hub metrics Service. Preferred over the prometheus.io/*
 # pod annotations: the target is the Service on its named "metrics" port, so the
 # job keeps a stable name across pod restarts.
@@ -12,10 +12,10 @@ metadata:
   name: {{ include "ip.fullname" . }}
   labels:
     {{- include "ip.labels" (dict "ctx" . "component" "hub") | nindent 4 }}
-    {{- with .Values.serviceMonitor.labels }}
+    {{- with .Values.hub.serviceMonitor.labels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
-  {{- with .Values.serviceMonitor.annotations }}
+  {{- with .Values.hub.serviceMonitor.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
@@ -29,11 +29,11 @@ spec:
   endpoints:
     - port: metrics
       path: /metrics
-      interval: {{ .Values.serviceMonitor.interval }}
-      {{- with .Values.serviceMonitor.scrapeTimeout }}
+      interval: {{ .Values.hub.serviceMonitor.interval }}
+      {{- with .Values.hub.serviceMonitor.scrapeTimeout }}
       scrapeTimeout: {{ . }}
       {{- end }}
-      {{- with .Values.serviceMonitor.metricRelabelings }}
+      {{- with .Values.hub.serviceMonitor.metricRelabelings }}
       metricRelabelings:
         {{- toYaml . | nindent 8 }}
       {{- end }}

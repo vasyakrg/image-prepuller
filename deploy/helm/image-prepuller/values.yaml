@@ -139,34 +139,58 @@ hub:
       cpu: 500m
       memory: 256Mi
   # Adds prometheus.io/scrape|port|path pod annotations for the metrics port.
-  # Keep it for annotation-based scraping; use serviceMonitor.enabled for
+  # Keep it for annotation-based scraping; use hub.serviceMonitor.enabled for
   # prometheus-operator (a stable job label instead of per-pod annotations).
   metrics:
     annotations: true
+  # ServiceMonitor for the hub metrics Service (prometheus-operator CRD). It
+  # lives under hub because only a hub release owns that Service: an
+  # agent-only/managed release has nothing for the monitor to select. Selects
+  # the Service on its named "metrics" port, so the job label stays stable
+  # across pod restarts. Requires monitoring.coreos.com/v1: the template fails
+  # with a clear message when the CRD is missing.
+  serviceMonitor:
+    enabled: false
+    # Extra labels so your Prometheus selects the monitor, e.g.
+    # release: kube-prometheus-stack.
+    labels: {}
+    # Extra annotations on the ServiceMonitor object.
+    annotations: {}
+    interval: 30s
+    # The hub bounds each snapshot at 3 s while it waits for dead agents, so keep
+    # the scrape timeout well above that: with the usual 10 s the whole target
+    # drops out exactly during an incident (docs/DEPLOY.md 14.8).
+    scrapeTimeout: 15s
+    # Metric relabelings applied at scrape time (rendered verbatim).
+    metricRelabelings: []
+  # PrometheusRule with the hub/cluster alerts (prometheus-operator CRD): node
+  # agent down, cluster partial/down, stale snapshot, ImageFS usage, failing
+  # pulls. Also rendered for a spoke-only release, because the spoke exposes the
+  # same cluster series on its own metrics port. Agent-process alerts live under
+  # agent.metrics.prometheusRule. Enable it only when the CRD is installed and
+  # the operator's rule selector matches this namespace; thresholds are values
+  # so a cluster can tune them without forking the chart. See docs/alerts.md.
+  prometheusRule:
+    enabled: false
+    # Extra labels on the PrometheusRule object, e.g. release: kube-prometheus-stack,
+    # so the operator's ruleSelector picks it up.
+    labels: {}
+    # Extra annotations on the PrometheusRule object (not on the individual alerts).
+    annotations: {}
+    thresholds:
+      # Seconds an agent may stay down while its node is Ready.
+      nodeAgentDown: 120
+      # Seconds a cluster snapshot may stay partial.
+      clusterPartial: 600
+      # Seconds since the hub's last successful sync with the cluster.
+      snapshotAge: 120
+      # ImageFS used ratio (0..1) that raises the node disk alert.
+      imagefsUsedRatio: 0.85
   nodeSelector: {}
   tolerations: []
   affinity: {}
   # Extra environment variables (list of name/value or name/valueFrom).
   extraEnv: []
-
-# ServiceMonitor for the hub metrics Service (prometheus-operator CRD). Selects
-# the hub Service on its named "metrics" port, so the job label stays stable
-# across pod restarts. Requires monitoring.coreos.com/v1: the template fails
-# with a clear message when the CRD is missing.
-serviceMonitor:
-  enabled: false
-  # Extra labels so your Prometheus selects the monitor, e.g.
-  # release: kube-prometheus-stack.
-  labels: {}
-  # Extra annotations on the ServiceMonitor object.
-  annotations: {}
-  interval: 30s
-  # The hub bounds each snapshot at 3 s while it waits for dead agents, so keep
-  # the scrape timeout well above that: with the usual 10 s the whole target
-  # drops out exactly during an incident (docs/DEPLOY.md 14.8).
-  scrapeTimeout: 15s
-  # Metric relabelings applied at scrape time (rendered verbatim).
-  metricRelabelings: []
 
 spoke:
   # Headless backend for one managed cluster. Deploy one release (or one
@@ -236,27 +260,29 @@ agent:
       type: ClusterIP
       # Defaults to <fullname>-agent-metrics.
       name: ""
-  # ServiceMonitor for the agent metrics Service. Its own flag: agents are
-  # scraped from :9444 and often live in a different scrape budget than the hub.
-  # Requires monitoring.coreos.com/v1.
-  serviceMonitor:
-    enabled: false
-    labels: {}
-    annotations: {}
-    interval: 30s
-    scrapeTimeout: 10s
-    metricRelabelings: []
-  # PrometheusRule with the agent-process alerts (prepuller_agent_* from :9444):
-  # scrape target down, no hub contact, 401/403, CRI down, stalled pull.
-  # Separate from prometheusRule (hub/cluster alerts) so an agent rule set can be
-  # enabled or dropped independently.
-  prometheusRule:
-    enabled: false
-    labels: {}
-    annotations: {}
-    thresholds:
-      # Seconds without a hub request to the agent /agent/v1/snapshot endpoint.
-      agentNoContact: 180
+    # ServiceMonitor for the agent metrics Service. It lives under the metrics
+    # section because it scrapes exactly that listener: it requires
+    # agent.metrics.enabled and monitoring.coreos.com/v1. Agents are scraped from
+    # :9444 and often live in a different scrape budget than the hub, which is
+    # why this is not a hub-level monitor.
+    serviceMonitor:
+      enabled: false
+      labels: {}
+      annotations: {}
+      interval: 30s
+      scrapeTimeout: 10s
+      metricRelabelings: []
+    # PrometheusRule with the agent-process alerts (prepuller_agent_* from
+    # :9444): scrape target down, no hub contact, 401/403, CRI down, stalled
+    # pull. Requires agent.metrics.enabled; hub/cluster alerts are a separate
+    # object under hub.prometheusRule.
+    prometheusRule:
+      enabled: false
+      labels: {}
+      annotations: {}
+      thresholds:
+        # Seconds without a hub request to the agent /agent/v1/snapshot endpoint.
+        agentNoContact: 180
   # NetworkPolicy for the agent DaemonSet: ingress from this release's pods to
   # the agent API port, egress DNS + TCP 443 (registries). The agent runs with
   # hostNetwork, where NetworkPolicy is not enforced by most CNIs; on such
@@ -306,26 +332,3 @@ agent:
       maxUnavailable: 10%
   # kubectl drain/upgrade knob: the DaemonSet tolerates control-plane taints
   # only if listed here.
-
-# PrometheusRule with the hub/cluster alerts (prometheus-operator CRD): node
-# agent down, cluster partial/down, stale snapshot, ImageFS usage, failing
-# pulls. Agent-process alerts live in agent.prometheusRule. Enable it only when
-# the CRD is installed and the operator's rule selector matches this namespace;
-# thresholds are values so a cluster can tune them without forking the chart.
-# See docs/alerts.md.
-prometheusRule:
-  enabled: false
-  # Extra labels on the PrometheusRule object, e.g. release: kube-prometheus-stack,
-  # so the operator's ruleSelector picks it up.
-  labels: {}
-  # Extra annotations on the PrometheusRule object (not on the individual alerts).
-  annotations: {}
-  thresholds:
-    # Seconds an agent may stay down while its node is Ready.
-    nodeAgentDown: 120
-    # Seconds a cluster snapshot may stay partial.
-    clusterPartial: 600
-    # Seconds since the hub's last successful sync with the cluster.
-    snapshotAge: 120
-    # ImageFS used ratio (0..1) that raises the node disk alert.
-    imagefsUsedRatio: 0.85

@@ -1,22 +1,26 @@
-{{- if .Values.agent.prometheusRule.enabled }}
+{{- if .Values.agent.metrics.prometheusRule.enabled }}
 {{- if not .Values.agent.enabled }}
-{{- fail "agent.prometheusRule.enabled=true requires agent.enabled=true: the rules cover agent series" }}
+{{- fail "agent.metrics.prometheusRule.enabled=true requires agent.enabled=true: the rules cover agent series" }}
 {{- end }}
-{{- include "ip.requireMonitoringCRD" (dict "ctx" . "flag" "agent.prometheusRule.enabled") }}
-{{- $thresholds := .Values.agent.prometheusRule.thresholds }}
+{{- if not .Values.agent.metrics.enabled }}
+{{- fail "agent.metrics.prometheusRule.enabled=true requires agent.metrics.enabled=true: the rules cover series scraped from the agent metrics port" }}
+{{- end }}
+{{- include "ip.requireMonitoringCRD" (dict "ctx" . "flag" "agent.metrics.prometheusRule.enabled") }}
+{{- $thresholds := .Values.agent.metrics.prometheusRule.thresholds }}
 # PrometheusRule for prometheus-operator: agent-process series scraped from
-# :9444 of every node. Kept apart from prometheusRule (hub/cluster rules) so the
-# agent rule set can be enabled or dropped on its own.
+# :9444 of every node. Lives under agent.metrics because it only makes sense
+# while the agent metrics listener is on; hub/cluster rules are a separate
+# object under hub.prometheusRule, so either set can be dropped on its own.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
   name: {{ printf "%s-agent-rules" (include "ip.fullname" .) | trunc 63 | trimSuffix "-" }}
   labels:
     {{- include "ip.labels" (dict "ctx" . "component" "agent") | nindent 4 }}
-    {{- with .Values.agent.prometheusRule.labels }}
+    {{- with .Values.agent.metrics.prometheusRule.labels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
-  {{- with .Values.agent.prometheusRule.annotations }}
+  {{- with .Values.agent.metrics.prometheusRule.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}

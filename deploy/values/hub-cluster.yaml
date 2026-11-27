@@ -75,6 +75,21 @@ hub:
     - key: node-role.kubernetes.io/control-plane
       operator: Exists
       effect: NoSchedule
+  # prometheus-operator monitoring lives under hub: the monitor selects the hub
+  # metrics Service, so an agent-only/managed release has nothing to select.
+  serviceMonitor:
+    # scrapeTimeout stays at 15s: the hub bounds a snapshot at 3s while it waits
+    # for dead agents, and the usual 10s drops the whole target during an incident.
+    enabled: false
+    labels:
+      release: kube-prometheus-stack
+    scrapeTimeout: 15s
+  # Alert rules for the hub/cluster series (docs/alerts.md). Enable only when
+  # prometheus-operator manages them in this cluster.
+  prometheusRule:
+    enabled: false
+    labels:
+      release: kube-prometheus-stack
 
 # This release is the hub; it is not itself a spoke of another hub.
 spoke:
@@ -92,6 +107,12 @@ agent:
     serviceMonitor:
       # Flip on when prometheus-operator scrapes this cluster; select the object
       # with a label your Prometheus picks up.
+      enabled: false
+      labels:
+        release: kube-prometheus-stack
+    prometheusRule:
+      # Agent-process alerts (prepuller_agent_*). Separate from
+      # hub.prometheusRule so they can be enabled or dropped on their own.
       enabled: false
       labels:
         release: kube-prometheus-stack
@@ -115,25 +136,3 @@ agent:
   # when the node network is not private.
   networkPolicy:
     enabled: false
-  prometheusRule:
-    # Agent-process alerts (prepuller_agent_*). Separate from prometheusRule so
-    # they can be enabled or dropped on their own.
-    enabled: false
-    labels:
-      release: kube-prometheus-stack
-
-# ServiceMonitor for the hub metrics Service (prometheus-operator CRD).
-# scrapeTimeout stays at 15s: the hub bounds a snapshot at 3s while it waits for
-# dead agents, and the usual 10s drops the whole target during an incident.
-serviceMonitor:
-  enabled: false
-  labels:
-    release: kube-prometheus-stack
-  scrapeTimeout: 15s
-
-# Alert rules for the hub/cluster series (docs/alerts.md). Enable only when
-# prometheus-operator manages them in the cluster.
-prometheusRule:
-  enabled: false
-  labels:
-    release: kube-prometheus-stack

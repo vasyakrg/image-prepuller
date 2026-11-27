@@ -97,24 +97,26 @@ Keep spoke.replicaCount=1 in this mode: the hub command queue assumes a single
 spoke replica.
 {{- else }}
 
-Point the hub at it with hub.remoteClusters, e.g.
+Direct mode: point the hub at it with hub.remoteClusters. The address below only
+works when the hub runs in this same cluster/network; for a separate cluster use
+spoke.hub.enabled (outbound) or publish this Service behind an ingress/LB, e.g.
   --set hub.remoteClusters="{{ .Values.spoke.clusterName }}=http://{{ $fullname }}-spoke.{{ .Release.Namespace }}.svc:{{ .Values.spoke.service.httpPort }}=<token>"
 {{- end }}
 {{- end }}
 
-{{- if or .Values.serviceMonitor.enabled .Values.agent.serviceMonitor.enabled .Values.prometheusRule.enabled .Values.agent.prometheusRule.enabled }}
+{{- if or .Values.hub.serviceMonitor.enabled .Values.agent.metrics.serviceMonitor.enabled .Values.hub.prometheusRule.enabled .Values.agent.metrics.prometheusRule.enabled }}
 
 Monitoring (prometheus-operator):
-{{- if .Values.serviceMonitor.enabled }}
-  ServiceMonitor {{ $fullname }} -> hub metrics on the "metrics" port (interval {{ .Values.serviceMonitor.interval }}).
+{{- if .Values.hub.serviceMonitor.enabled }}
+  ServiceMonitor {{ $fullname }} -> hub metrics on the "metrics" port (interval {{ .Values.hub.serviceMonitor.interval }}).
 {{- end }}
-{{- if .Values.agent.serviceMonitor.enabled }}
+{{- if .Values.agent.metrics.serviceMonitor.enabled }}
   ServiceMonitor {{ $fullname }}-agent -> agent metrics :{{ .Values.agent.metrics.port }}, job="prepuller-agent".
 {{- end }}
-{{- if .Values.prometheusRule.enabled }}
+{{- if .Values.hub.prometheusRule.enabled }}
   PrometheusRule {{ $fullname }}-rules (hub/cluster alerts).
 {{- end }}
-{{- if .Values.agent.prometheusRule.enabled }}
+{{- if .Values.agent.metrics.prometheusRule.enabled }}
   PrometheusRule {{ $fullname }}-agent-rules (agent-process alerts).
 {{- end }}
   Label them so the operator's selectors match (docs/alerts.md).

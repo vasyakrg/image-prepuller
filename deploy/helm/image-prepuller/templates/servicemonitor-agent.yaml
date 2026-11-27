@@ -1,12 +1,13 @@
-{{- if .Values.agent.serviceMonitor.enabled }}
+{{- if .Values.agent.metrics.serviceMonitor.enabled }}
 {{- if not .Values.agent.enabled }}
-{{- fail "agent.serviceMonitor.enabled=true requires agent.enabled=true" }}
+{{- fail "agent.metrics.serviceMonitor.enabled=true requires agent.enabled=true" }}
 {{- end }}
 {{- if not .Values.agent.metrics.enabled }}
-{{- fail "agent.serviceMonitor.enabled=true requires agent.metrics.enabled=true: the monitor selects the agent metrics Service" }}
+{{- fail "agent.metrics.serviceMonitor.enabled=true requires agent.metrics.enabled=true: the monitor selects the agent metrics Service" }}
 {{- end }}
-{{- include "ip.requireMonitoringCRD" (dict "ctx" . "flag" "agent.serviceMonitor.enabled") }}
-# ServiceMonitor for the agent metrics Service (:9444). The agent is
+{{- include "ip.requireMonitoringCRD" (dict "ctx" . "flag" "agent.metrics.serviceMonitor.enabled") }}
+# ServiceMonitor for the agent metrics Service (:9444); it lives under
+# agent.metrics because it scrapes exactly that listener. The agent is
 # hostNetwork, so every Service endpoint is the node IP itself — one target per
 # node, which is exactly the cardinality of the prepuller_agent_* series.
 apiVersion: monitoring.coreos.com/v1
@@ -15,10 +16,10 @@ metadata:
   name: {{ printf "%s-agent" (include "ip.fullname" .) | trunc 63 | trimSuffix "-" }}
   labels:
     {{- include "ip.labels" (dict "ctx" . "component" "agent") | nindent 4 }}
-    {{- with .Values.agent.serviceMonitor.labels }}
+    {{- with .Values.agent.metrics.serviceMonitor.labels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
-  {{- with .Values.agent.serviceMonitor.annotations }}
+  {{- with .Values.agent.metrics.serviceMonitor.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
@@ -32,11 +33,11 @@ spec:
   endpoints:
     - port: metrics
       path: /metrics
-      interval: {{ .Values.agent.serviceMonitor.interval }}
-      {{- with .Values.agent.serviceMonitor.scrapeTimeout }}
+      interval: {{ .Values.agent.metrics.serviceMonitor.interval }}
+      {{- with .Values.agent.metrics.serviceMonitor.scrapeTimeout }}
       scrapeTimeout: {{ . }}
       {{- end }}
-      {{- with .Values.agent.serviceMonitor.metricRelabelings }}
+      {{- with .Values.agent.metrics.serviceMonitor.metricRelabelings }}
       metricRelabelings:
         {{- toYaml . | nindent 8 }}
       {{- end }}

@@ -333,6 +333,15 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
   `hub.remoteClusters` (`name=url=token`) — прямой; `hub.managedClusters` (`name=token`)
   вместе с `spoke.hub.*` — outbound. Одно имя в обоих списках даст два провайдера на один
   UI-id (последняя регистрация перезапишет первую).
+- **Ломающие изменения values 0.4.0 → 0.5.0**: мониторинг переехал в раздел
+  компонента, чьи серии он покрывает — `serviceMonitor.*` → `hub.serviceMonitor.*`,
+  `prometheusRule.*` → `hub.prometheusRule.*`, `agent.serviceMonitor.*` →
+  `agent.metrics.serviceMonitor.*`, `agent.prometheusRule.*` →
+  `agent.metrics.prometheusRule.*` (порог `agentNoContact` — в
+  `agent.metrics.prometheusRule.thresholds`). Монитор агента и его правила требуют
+  `agent.metrics.enabled=true`, монитор hub'а — `hub.enabled=true`; без этого рендер
+  падает с сообщением. Кластерные правила (`hub.prometheusRule`) по-прежнему
+  рендерятся и для spoke-only release: spoke отдаёт те же серии на `:9091`.
 - **Значения чарта 0.3.0 → 0.4.0 только добавлены** (`hub.managedClusters`,
   `spoke.hub.enabled/url/syncInterval`, ключ `managed-clusters` в Secret) — старые
   overrides продолжают работать. `hub.managedClusters` — строка формата
@@ -391,7 +400,7 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 
 - [ ] `gofmt -l .` пуст, `go vet ./...` и `go test ./...` зелёные.
 - [ ] `go build -o bin/prepuller ./cmd/prepuller` проходит.
-- [ ] `helm lint deploy/helm/image-prepuller` (defaults, `deploy/values/hub-cluster.yaml`, `deploy/values/managed-cluster.yaml`) и `helm template` проходят: defaults, полный набор (`spoke`, `agent`, `hub.ingress`, `agent.networkPolicy`, `serviceMonitor`, `agent.serviceMonitor`, `prometheusRule`, `agent.prometheusRule`, `--api-versions monitoring.coreos.com/v1`), а также `hub.enabled=false`, `agent.enabled=false`, оба overlay'я и outbound-вариант (`spoke.enabled=true`, `spoke.hub.enabled=true`, `spoke.hub.url` задан, `hub.enabled=false`) — компоненты должны реально исчезать из рендера, managed-кластер не рендерить ни Ingress, ни hub-контейнер, outbound-рендер содержать `-hub-url`, а пустой `spoke.hub.url` и `spoke.replicaCount>1` — падать.
+- [ ] `helm lint deploy/helm/image-prepuller` (defaults, `deploy/values/hub-cluster.yaml`, `deploy/values/managed-cluster.yaml`) и `helm template` проходят: defaults, полный набор (`spoke`, `agent`, `hub.ingress`, `agent.networkPolicy`, `hub.serviceMonitor`, `hub.prometheusRule`, `agent.metrics.serviceMonitor`, `agent.metrics.prometheusRule`, `--api-versions monitoring.coreos.com/v1`), а также `hub.enabled=false`, `agent.enabled=false`, оба overlay'я и outbound-вариант (`spoke.enabled=true`, `spoke.hub.enabled=true`, `spoke.hub.url` задан, `hub.enabled=false`) — компоненты должны реально исчезать из рендера, managed-кластер не рендерить ни Ingress, ни hub-контейнер, outbound-рендер содержать `-hub-url`, а пустой `spoke.hub.url` и `spoke.replicaCount>1` — падать.
 - [ ] Изменённое поведение отражено в `README.md` (API/флаги/метрики) и, если затронута
   архитектура, в `docs/architecture.md`.
 - [ ] Новые эндпоинты и middleware покрыты тестами; UI-путь проверен вручную

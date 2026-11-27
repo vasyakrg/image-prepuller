@@ -37,8 +37,8 @@ node-agent на каждой ноде. Для in-memory демо без Kubernet
 | DaemonSet (node-agent) | `daemonset-agent.yaml` | да (`agent.enabled`) |
 | Service метрик агента | `service-agent-metrics.yaml` | да при `agent.metrics.enabled` |
 | NetworkPolicy (только агент) | `networkpolicy-agent.yaml` | нет (`agent.networkPolicy.enabled`) |
-| ServiceMonitor (hub / агент) | `servicemonitor-hub.yaml`, `servicemonitor-agent.yaml` | нет (`serviceMonitor.enabled` / `agent.serviceMonitor.enabled`) |
-| PrometheusRule (hub / агент) | `prometheusrule.yaml`, `prometheusrule-agent.yaml` | нет (`prometheusRule.enabled` / `agent.prometheusRule.enabled`) |
+| ServiceMonitor (hub / агент) | `servicemonitor-hub.yaml`, `servicemonitor-agent.yaml` | нет (`hub.serviceMonitor.enabled` / `agent.metrics.serviceMonitor.enabled`) |
+| PrometheusRule (hub / агент) | `prometheusrule.yaml`, `prometheusrule-agent.yaml` | нет (`hub.prometheusRule.enabled` / `agent.metrics.prometheusRule.enabled`) |
 
 `hub.enabled=false` (или `agent.enabled=false`) убирает объекты компонента
 целиком — так ставится «только агенты» в кластер без UI и наоборот.
@@ -937,20 +937,22 @@ curl -fsS -b /tmp/pc 'http://127.0.0.1:8080/api/v1/pull-tasks?cluster=<cluster-n
 Чарт рендерит ClusterIP Service для порта метрик агента при
 ```agent.metrics.enabled=true```; поскольку агент работает с ```hostNetwork```,
 endpoints Service — это IP-адреса нод (один endpoint на ноду). ServiceMonitor'ы
-чарт умеет создавать сам, отдельные флаги для hub и агента:
+чарт умеет создавать сам, флаги живут в разделе того компонента, чьи серии они
+покрывают (`hub.*` и `agent.metrics.*`), поэтому монитор агента не рендерится
+без включённого порта метрик:
 
 ```bash
 helm upgrade --install prepuller deploy/helm/image-prepuller \
   --namespace prepuller -f deploy/values/hub-cluster.yaml \
-  --set serviceMonitor.enabled=true \
-  --set serviceMonitor.labels.release=kube-prometheus-stack \
-  --set agent.serviceMonitor.enabled=true \
-  --set agent.serviceMonitor.labels.release=kube-prometheus-stack
+  --set hub.serviceMonitor.enabled=true \
+  --set hub.serviceMonitor.labels.release=kube-prometheus-stack \
+  --set agent.metrics.serviceMonitor.enabled=true \
+  --set agent.metrics.serviceMonitor.labels.release=kube-prometheus-stack
 ```
 
-- ```serviceMonitor.enabled``` — ServiceMonitor на hub Service, порт ```metrics```
+- ```hub.serviceMonitor.enabled``` — ServiceMonitor на hub Service, порт ```metrics```
   (9090), ```scrapeTimeout``` по умолчанию 15s;
-- ```agent.serviceMonitor.enabled``` — ServiceMonitor на ```<fullname>-agent-metrics```,
+- ```agent.metrics.serviceMonitor.enabled``` — ServiceMonitor на ```<fullname>-agent-metrics```,
   порт ```metrics``` (9444), и он принудительно ставит ```job="prepuller-agent"```,
   чтобы правило ```PrepullerAgentDown``` работало без правки scrape-конфига.
 
@@ -964,8 +966,10 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
 ровно во время инцидента (тот же порог в ```deploy/values/hub-cluster.yaml```).
 
 Правила алертов разделены на два объекта, чтобы включать их независимо:
-```prometheusRule.enabled``` — hub/cluster-серии, ```agent.prometheusRule.enabled```
-— ```prepuller_agent_*``` с ```:9444```. Матрица триангуляции «агент, токен или связь?»
+```hub.prometheusRule.enabled``` — hub/cluster-серии (объект рендерится и в
+managed-кластере: spoke отдаёт те же серии на ```:9091```, так что правила
+можно включить локальным Prometheus), ```agent.metrics.prometheusRule.enabled``` —
+```prepuller_agent_*``` с ```:9444``` (требует ```agent.metrics.enabled```). Матрица триангуляции «агент, токен или связь?»
 и все пороги — в [docs/alerts.md](alerts.md).
 
 ### 14.9 Upgrade, откат, удаление

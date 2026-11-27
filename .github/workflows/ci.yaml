@@ -93,10 +93,10 @@ jobs:
             --set agent.enabled=true \
             --set hub.ingress.enabled=true \
             --set agent.networkPolicy.enabled=true \
-            --set serviceMonitor.enabled=true \
-            --set agent.serviceMonitor.enabled=true \
-            --set prometheusRule.enabled=true \
-            --set agent.prometheusRule.enabled=true \
+            --set hub.serviceMonitor.enabled=true \
+            --set hub.prometheusRule.enabled=true \
+            --set agent.metrics.serviceMonitor.enabled=true \
+            --set agent.metrics.prometheusRule.enabled=true \
             --set secret.auth.password=ci-password \
             --set secret.sessionSecret=ci-session-secret \
             --set secret.clusterToken=ci-cluster-token \
@@ -130,6 +130,23 @@ jobs:
             echo "expected helm template to fail without spoke.hub.url"; exit 1
           fi
           grep -q 'spoke.hub.url' /tmp/spoke-outbound-invalid.log
+          # Monitoring objects are nested under the component whose series they
+          # cover: a hub monitor without a hub, or agent rules without the agent
+          # metrics listener, must fail with a clear message instead of rendering.
+          if helm template ci deploy/helm/image-prepuller \
+            --api-versions monitoring.coreos.com/v1 \
+            --set hub.enabled=false --set hub.serviceMonitor.enabled=true \
+            > /tmp/monitor-hub-invalid.log 2>&1; then
+            echo "expected helm template to fail for hub.serviceMonitor without hub"; exit 1
+          fi
+          grep -q 'hub.serviceMonitor.enabled' /tmp/monitor-hub-invalid.log
+          if helm template ci deploy/helm/image-prepuller \
+            --api-versions monitoring.coreos.com/v1 \
+            --set agent.metrics.enabled=false --set agent.metrics.prometheusRule.enabled=true \
+            > /tmp/rules-agent-invalid.log 2>&1; then
+            echo "expected helm template to fail for agent.metrics.prometheusRule without metrics"; exit 1
+          fi
+          grep -q 'agent.metrics.prometheusRule.enabled' /tmp/rules-agent-invalid.log
           # Flags must actually gate objects, not just render them disabled.
           ! grep -q 'kind: Deployment' /tmp/agent-only.yaml || { echo "agent-only render still has a Deployment"; exit 1; }
           grep -q 'kind: DaemonSet' /tmp/agent-only.yaml

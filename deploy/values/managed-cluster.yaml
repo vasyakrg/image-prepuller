@@ -70,6 +70,12 @@ agent:
       enabled: false
       labels:
         release: kube-prometheus-stack
+    prometheusRule:
+      # Agent-process alerts for this cluster. Keep off if only the master
+      # cluster's Prometheus evaluates them.
+      enabled: false
+      labels:
+        release: kube-prometheus-stack
   pull:
     registryProbe: true
     registryProbeTimeout: 5s
@@ -82,15 +88,15 @@ agent:
       effect: NoSchedule
   networkPolicy:
     enabled: false
-  prometheusRule:
-    # Agent-process alerts for this cluster. Keep off if only the master
-    # cluster's Prometheus evaluates them.
-    enabled: false
-    labels:
-      release: kube-prometheus-stack
 
 # No hub here, so no hub ServiceMonitor; the spoke has its own /metrics if you
 # need cluster-level series from this side (not chart-managed today).
+# hub.prometheusRule (hub/cluster alert rules) is still rendered for a
+# spoke-only release, because the spoke exposes the same cluster series on
+# :9091. Enable it here only if this cluster's Prometheus evaluates the rules:
+#   hub:
+#     prometheusRule:
+#       enabled: true
 #
 # Direct ("push") mode note: hub.remoteClusters with the in-cluster Service DNS
 # (http://<release>-image-prepuller-spoke.<namespace>.svc:8081) only works when

@@ -9,7 +9,7 @@ type: application
 # version == appVersion (the build workflow enforces chart version == git tag);
 # while they differ the chart is an unreleased build and image.tag falls back to
 # "latest" instead of a version that does not exist yet (see templates/_helpers.tpl).
-version: 0.4.0
+version: 0.5.0
 # Application version. On a release tag it equals the chart version and is the
 # default image tag; bump it together with version when cutting a release.
 appVersion: "0.2.0"

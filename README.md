@@ -290,10 +290,11 @@ DaemonSet. Каждый компонент включается своим фл�
 Управляемые кластеры регистрируются двумя разными значениями: `hub.managedClusters`
 (outbound, `name=token`) и `hub.remoteClusters` (direct, `name=url=token`);
 на стороне ведомого outbound включается `spoke.hub.enabled=true` +
-`spoke.hub.url` + `spoke.hub.syncInterval` (см. ниже). Только у агента свои
-`agent.networkPolicy.enabled` и `agent.prometheusRule.enabled`; ServiceMonitor'ы
-и правила для hub — отдельными флагами (`serviceMonitor.enabled`,
-`prometheusRule.enabled`).
+`spoke.hub.url` + `spoke.hub.syncInterval` (см. ниже). Мониторинг сгруппирован по
+компоненту, чьи серии он покрывает: `hub.serviceMonitor` / `hub.prometheusRule` —
+hub и кластерные серии; `agent.metrics.serviceMonitor` / `agent.metrics.prometheusRule`
+— `prepuller_agent_*` с порта метрик агента (`agent.metrics.enabled`), плюс
+`agent.networkPolicy.enabled` отдельно.
 
 Кластер без UI — только агенты:
 
@@ -564,8 +565,8 @@ Node-agent отдаёт свои метрики **на отдельном пор
 
 Готовые правила алертов, пороги и матрица «кто виноват: агент, токен или связь» —
 [docs/alerts.md](docs/alerts.md). Правила и ServiceMonitor'ы чарт умеет создавать сам,
-раздельно для hub/кластерных серий (`prometheusRule.enabled`, `serviceMonitor.enabled`)
-и для метрик агента (`agent.prometheusRule.enabled`, `agent.serviceMonitor.enabled`).
+раздельно для hub/кластерных серий (`hub.prometheusRule.enabled`, `hub.serviceMonitor.enabled`)
+и для метрик агента (`agent.metrics.prometheusRule.enabled`, `agent.metrics.serviceMonitor.enabled`).
 
 ## Структура репозитория
 

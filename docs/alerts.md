@@ -24,15 +24,22 @@ Service агента (`<fullname>-agent-metrics`, ключ `agent.metrics.servic
 селектит поды DaemonSet'а; так как поды hostNetwork, его endpoints — это
 `<node-ip>:9444`. Отдельный headless Service не нужен. Варианты обнаружения:
 
-- `agent.serviceMonitor.enabled=true` — чарт создаёт ServiceMonitor
+- `agent.metrics.serviceMonitor.enabled=true` — чарт создаёт ServiceMonitor
   (`<fullname>-agent`, порт `metrics`, job принудительно `prepuller-agent`);
-- `serviceMonitor.enabled=true` — ServiceMonitor для hub (`<fullname>`, порт
+- `hub.serviceMonitor.enabled=true` — ServiceMonitor для hub (`<fullname>`, порт
   `metrics`, `scrapeTimeout` по умолчанию 15s);
 - pod-аннотации `prometheus.io/scrape|port|path` — `hub.metrics.annotations` /
   `agent.metrics.annotations`.
 
 Оба ServiceMonitor-флага требуют CRD `monitoring.coreos.com/v1`: без него
 рендер падает с понятным сообщением, а не молча пропускает объект.
+
+Мониторы и правила лежат в разделе того компонента, чьи серии они покрывают:
+`hub.serviceMonitor` / `hub.prometheusRule` — hub и кластерные серии (правила
+рендерятся и для release без hub'а, если в нём есть spoke: spoke отдаёт те же
+серии на своём порту метрик); `agent.metrics.serviceMonitor` /
+`agent.metrics.prometheusRule` — `prepuller_agent_*` с `:9444`, поэтому без
+`agent.metrics.enabled` они не рендерятся (чарт падает с сообщением).
 
 Ключевое соглашение: job scrape-конфига агента должен называться
 `prepuller-agent`, иначе правило `PrepullerAgentDown` не сработает (выражение
@@ -58,16 +65,16 @@ job'а придётся задать самому.
 | `PrepullerNodeImageFSHigh` | `prepuller_node_imagefs_capacity_bytes > 0 and (prepuller_node_imagefs_used_bytes / prepuller_node_imagefs_capacity_bytes) > <imagefsUsedRatio>` | 5m | warning | ImageFS заполнен выше порога | почистить неиспользуемые образы / расширить диск |
 | `PrepullerPullFailures` | `sum by (cluster) (increase(prepuller_pull_total{result=~"error\|failed"}[15m])) > 0` | 0m | warning | есть проваленные pull'ы | логи агента и реестра |
 
-`<...>` — пороги из `prometheusRule.thresholds` (кроме `agentNoContact`:
-он в `agent.prometheusRule.thresholds`); правила с `for: 0m` срабатывают
+`<...>` — пороги из `hub.prometheusRule.thresholds` (кроме `agentNoContact`:
+он в `agent.metrics.prometheusRule.thresholds`); правила с `for: 0m` срабатывают
 сразу, потому что сам счётчик уже накоплен за окно `increase`.
 
 Правила разделены на два объекта, чтобы их можно было включать независимо:
 
 | Объект | Флаг | Правила |
 | --- | --- | --- |
-| `<fullname>-rules` | `prometheusRule.enabled` | всё, что считается по hub/spoke-сериям: `PrepullerNodeAgentDown`, `PrepullerNodeAgentAuthErrors`, `PrepullerClusterPartial`, `PrepullerClusterDown`, `PrepullerSnapshotStale`, `PrepullerSnapshotScrapeTimeouts`, `PrepullerNodeImageFSHigh`, `PrepullerPullFailures` |
-| `<fullname>-agent-rules` | `agent.prometheusRule.enabled` | всё, что считается по `prepuller_agent_*` с `:9444`: `PrepullerAgentDown`, `PrepullerAgentNotContacted`, `PrepullerAgentUnauthorized`, `PrepullerAgentCRIDown`, `PrepullerAgentPullStalled` |
+| `<fullname>-rules` | `hub.prometheusRule.enabled` | всё, что считается по hub/spoke-сериям: `PrepullerNodeAgentDown`, `PrepullerNodeAgentAuthErrors`, `PrepullerClusterPartial`, `PrepullerClusterDown`, `PrepullerSnapshotStale`, `PrepullerSnapshotScrapeTimeouts`, `PrepullerNodeImageFSHigh`, `PrepullerPullFailures` |
+| `<fullname>-agent-rules` | `agent.metrics.prometheusRule.enabled` | всё, что считается по `prepuller_agent_*` с `:9444`: `PrepullerAgentDown`, `PrepullerAgentNotContacted`, `PrepullerAgentUnauthorized`, `PrepullerAgentCRIDown`, `PrepullerAgentPullStalled` |
 
 Оговорки, зашитые в выражения:
 
@@ -114,41 +121,41 @@ job'а придётся задать самому.
 
 ## 4. Как включить
 
-По умолчанию всё выключено: `prometheusRule.enabled: false`,
-`agent.prometheusRule.enabled: false`, `serviceMonitor.enabled: false`,
-`agent.serviceMonitor.enabled: false`. Включайте, только если в кластере
+По умолчанию всё выключено: `hub.prometheusRule.enabled: false`,
+`agent.metrics.prometheusRule.enabled: false`, `hub.serviceMonitor.enabled: false`,
+`agent.metrics.serviceMonitor.enabled: false`. Включайте, только если в кластере
 установлен prometheus-operator и существует CRD `monitoring.coreos.com/v1`;
 без CRD рендер падает с сообщением вида
-`monitoring.coreos.com/v1 CRDs are not installed: install prometheus-operator or set prometheusRule.enabled=false`.
+`monitoring.coreos.com/v1 CRDs are not installed: install prometheus-operator or set hub.prometheusRule.enabled=false`.
 
 ```bash
 helm upgrade --install prepuller deploy/helm/image-prepuller \
-  --set serviceMonitor.enabled=true \
-  --set serviceMonitor.labels.release=kube-prometheus-stack \
-  --set prometheusRule.enabled=true \
-  --set prometheusRule.labels.release=kube-prometheus-stack \
-  --set agent.serviceMonitor.enabled=true \
-  --set agent.serviceMonitor.labels.release=kube-prometheus-stack \
-  --set agent.prometheusRule.enabled=true \
-  --set agent.prometheusRule.labels.release=kube-prometheus-stack
+  --set hub.serviceMonitor.enabled=true \
+  --set hub.serviceMonitor.labels.release=kube-prometheus-stack \
+  --set hub.prometheusRule.enabled=true \
+  --set hub.prometheusRule.labels.release=kube-prometheus-stack \
+  --set agent.metrics.serviceMonitor.enabled=true \
+  --set agent.metrics.serviceMonitor.labels.release=kube-prometheus-stack \
+  --set agent.metrics.prometheusRule.enabled=true \
+  --set agent.metrics.prometheusRule.labels.release=kube-prometheus-stack
 ```
 
 `*.labels` должны попадать под селекторы вашего Prometheus (`ruleSelector` для
 правил, `serviceMonitorSelector` для мониторов), иначе оператор не заберёт
 объекты. `*.annotations` — аннотации на сам объект (не на алерты).
-`serviceMonitor.interval` / `scrapeTimeout` и
-`agent.serviceMonitor.interval` / `scrapeTimeout` — параметры скрейпа;
+`hub.serviceMonitor.interval` / `scrapeTimeout` и
+`agent.metrics.serviceMonitor.interval` / `scrapeTimeout` — параметры скрейпа;
 `scrapeTimeout` hub'а по умолчанию 15s (см. §1), у агента — 10s.
 
 Все пороги — значения чарта, форкать чарт не нужно:
 
 | Ключ | По умолчанию | Смысл |
 | --- | --- | --- |
-| `agent.prometheusRule.thresholds.agentNoContact` | `180` | секунд без snapshot-запроса hub к агенту |
-| `prometheusRule.thresholds.nodeAgentDown` | `120` | секунд недоступности агента на Ready ноде |
-| `prometheusRule.thresholds.clusterPartial` | `600` | секунд в состоянии partial |
-| `prometheusRule.thresholds.snapshotAge` | `120` | секунд с последней успешной синхронизации |
-| `prometheusRule.thresholds.imagefsUsedRatio` | `0.85` | доля занятого ImageFS |
+| `agent.metrics.prometheusRule.thresholds.agentNoContact` | `180` | секунд без snapshot-запроса hub к агенту |
+| `hub.prometheusRule.thresholds.nodeAgentDown` | `120` | секунд недоступности агента на Ready ноде |
+| `hub.prometheusRule.thresholds.clusterPartial` | `600` | секунд в состоянии partial |
+| `hub.prometheusRule.thresholds.snapshotAge` | `120` | секунд с последней успешной синхронизации |
+| `hub.prometheusRule.thresholds.imagefsUsedRatio` | `0.85` | доля занятого ImageFS |
 
 ## 5. Переносимость
 

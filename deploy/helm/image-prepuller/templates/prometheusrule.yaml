@@ -1,19 +1,21 @@
-{{- if and .Values.prometheusRule.enabled (or .Values.hub.enabled .Values.spoke.enabled) }}
-{{- include "ip.requireMonitoringCRD" (dict "ctx" . "flag" "prometheusRule.enabled") }}
-{{- $thresholds := .Values.prometheusRule.thresholds }}
+{{- if and .Values.hub.prometheusRule.enabled (or .Values.hub.enabled .Values.spoke.enabled) }}
+{{- include "ip.requireMonitoringCRD" (dict "ctx" . "flag" "hub.prometheusRule.enabled") }}
+{{- $thresholds := .Values.hub.prometheusRule.thresholds }}
 # PrometheusRule for prometheus-operator: hub/cluster series scraped from the
-# hub (:9090) or a spoke (:9091). Agent-process rules are a separate object
-# controlled by agent.prometheusRule.enabled (docs/alerts.md).
+# hub (:9090) or a spoke (:9091). Rendered for a hub release and for a
+# spoke-only release (the spoke exposes the same series). Agent-process rules
+# are a separate object controlled by agent.metrics.prometheusRule.enabled
+# (docs/alerts.md).
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
   name: {{ printf "%s-rules" (include "ip.fullname" .) | trunc 63 | trimSuffix "-" }}
   labels:
     {{- include "ip.labels" (dict "ctx" . "component" "monitoring") | nindent 4 }}
-    {{- with .Values.prometheusRule.labels }}
+    {{- with .Values.hub.prometheusRule.labels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
-  {{- with .Values.prometheusRule.annotations }}
+  {{- with .Values.hub.prometheusRule.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}

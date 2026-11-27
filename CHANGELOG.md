@@ -42,6 +42,16 @@
   `latest` (с предупреждением в NOTES), явный тег — как есть.
 ### Changed
 
+- **Ломающие изменения values (чарт 0.5.0): мониторинг сгруппирован по компоненту.**
+  `serviceMonitor.*` → `hub.serviceMonitor.*`, `prometheusRule.*` →
+  `hub.prometheusRule.*` (hub и кластерные серии), `agent.serviceMonitor.*` →
+  `agent.metrics.serviceMonitor.*`, `agent.prometheusRule.*` →
+  `agent.metrics.prometheusRule.*` (порог `agentNoContact` —
+  `agent.metrics.prometheusRule.thresholds.agentNoContact`). Монитор агента и его
+  правила требуют `agent.metrics.enabled=true`, монитор hub'а — `hub.enabled=true`:
+  иначе рендер падает с понятным сообщением вместо «висящего» объекта. Кластерные
+  правила (`hub.prometheusRule`) по-прежнему рендерятся и для release без hub'а,
+  если в нём включён spoke (spoke отдаёт те же серии на :9091).
 - **Агрегация счётчиков spoke — одна реализация.** `SpokeCounters` собирается в
   `provider.AggregateCounters`, поэтому `GET /internal/v1/counters` и state push
   outbound-канала отдают одинаковые числа (раньше логика жила в `internal/web`).
