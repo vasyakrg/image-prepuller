@@ -106,6 +106,23 @@ jobs:
           helm template ci deploy/helm/image-prepuller \
             -f deploy/values/managed-cluster.yaml \
             > /tmp/managed-cluster.yaml
+          # Outbound ("pull") mode: the spoke dials the hub ingress. The render
+          # must carry -hub-url and no hub-side env, and an empty URL must fail
+          # the render with a clear message.
+          helm template ci deploy/helm/image-prepuller \
+            --set spoke.enabled=true \
+            --set spoke.hub.enabled=true \
+            --set spoke.hub.url=https://hub.example.com \
+            --set hub.enabled=false \
+            > /tmp/spoke-outbound.yaml
+          if helm template ci deploy/helm/image-prepuller \
+            --set spoke.enabled=true \
+            --set spoke.hub.enabled=true \
+            --set spoke.hub.url= \
+            --set hub.enabled=false > /tmp/spoke-outbound-invalid.log 2>&1; then
+            echo "expected helm template to fail without spoke.hub.url"; exit 1
+          fi
+          grep -q 'spoke.hub.url' /tmp/spoke-outbound-invalid.log
           # Flags must actually gate objects, not just render them disabled.
           ! grep -q 'kind: Deployment' /tmp/agent-only.yaml || { echo "agent-only render still has a Deployment"; exit 1; }
           grep -q 'kind: DaemonSet' /tmp/agent-only.yaml
@@ -118,12 +135,22 @@ jobs:
           grep -q 'name: ci-image-prepuller-spoke' /tmp/managed-cluster.yaml
           ! grep -q 'kind: Ingress' /tmp/managed-cluster.yaml || { echo "managed cluster must not render an Ingress"; exit 1; }
           ! grep -q -- '-role=hub' /tmp/managed-cluster.yaml || { echo "managed cluster must not render a hub container"; exit 1; }
+          # Outbound mode wiring: the managed overlay dials the hub (-hub-url=)
+          # and must never carry hub-side env; the hub overlay must register the
+          # managed cluster in PREPULLER_MANAGED_CLUSTERS / its Secret key.
+          grep -q -- '-hub-url=' /tmp/managed-cluster.yaml
+          ! grep -q 'PREPULLER_MANAGED_CLUSTERS' /tmp/managed-cluster.yaml || { echo "managed cluster must not render hub-side managed-clusters env"; exit 1; }
+          grep -q 'PREPULLER_MANAGED_CLUSTERS' /tmp/hub-cluster.yaml
+          grep -q 'managed-clusters: "talos-prod-kz=' /tmp/hub-cluster.yaml
+          grep -q 'talos-prod-kz=' deploy/values/hub-cluster.yaml
+          grep -q -- '-hub-url=https://hub.example.com' /tmp/spoke-outbound.yaml
           echo "rendered default: $(grep -c '^kind:' /tmp/default.yaml) objects"
           echo "rendered full:    $(grep -c '^kind:' /tmp/full.yaml) objects"
           echo "rendered agent-only: $(grep -c '^kind:' /tmp/agent-only.yaml) objects"
           echo "rendered hub-only:   $(grep -c '^kind:' /tmp/hub-only.yaml) objects"
           echo "rendered hub-cluster: $(grep -c '^kind:' /tmp/hub-cluster.yaml) objects"
           echo "rendered managed-cluster: $(grep -c '^kind:' /tmp/managed-cluster.yaml) objects"
+          echo "rendered spoke-outbound: $(grep -c '^kind:' /tmp/spoke-outbound.yaml) objects"
 
       - name: validate rendered YAML
         run: |
@@ -133,7 +160,7 @@ jobs:
             || python3 -m pip install --quiet --break-system-packages pyyaml
           python3 - <<'PY'
           import yaml
-          for path in ("/tmp/default.yaml", "/tmp/full.yaml", "/tmp/agent-only.yaml", "/tmp/hub-only.yaml", "/tmp/hub-cluster.yaml", "/tmp/managed-cluster.yaml"):
+          for path in ("/tmp/default.yaml", "/tmp/full.yaml", "/tmp/agent-only.yaml", "/tmp/hub-only.yaml", "/tmp/hub-cluster.yaml", "/tmp/managed-cluster.yaml", "/tmp/spoke-outbound.yaml"):
               with open(path) as fh:
                   docs = [d for d in yaml.safe_load_all(fh) if d]
               if not docs:

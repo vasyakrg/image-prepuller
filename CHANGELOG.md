@@ -4,6 +4,29 @@
 
 ### Added
 
+- **Outbound-режим spoke: управляемый кластер сам ходит к hub'у на его ingress.**
+  Прямой режим (hub → spoke по HTTP) требует, чтобы hub дотягивался до кластера; за NAT
+  или без ingress в ведомом кластере это невозможно, поэтому появился второй транспорт:
+  spoke открывает исходящее соединение к hub'у, пушит состояние
+  (`POST /internal/v1/spokes/{cluster}/state`) и long-poll'ит команды
+  (`GET /internal/v1/spokes/{cluster}/commands`), а команда — это ровно тот
+  HTTP-вызов, который hub сделал бы напрямую, исполняемый собственным handler'ом spoke'а
+  (`POST .../commands/{id}/result`). Включение: `-hub-url`/`PREPULLER_HUB_URL` и
+  `-hub-sync-interval`/`PREPULLER_HUB_SYNC_INTERVAL` (3 s) на spoke,
+  `PREPULLER_MANAGED_CLUSTERS=name=token,...` на hub. Чтения (snapshot, counters, health,
+  UI, `/metrics`) обслуживаются из кэша pushed-состояния и не делают round trip;
+  молчащий дольше `max(3*syncInterval, 10 s)` spoke = offline
+  (`prepuller_cluster_up=0`, `prepuller_snapshot_age_seconds` растёт). State-changing
+  вызовы сохраняют прежний маппинг статусов (409/404/502), доставка at-least-once с
+  дедупликацией по id команды. Прямой режим (`hub.remoteClusters`) не менялся.
+- **Чарт 0.4.0: outbound-режим в values.** `spoke.hub.enabled/url/syncInterval`
+  (рендерятся в `-hub-url`/`-hub-sync-interval`), `hub.managedClusters` — строка
+  `PREPULLER_MANAGED_CLUSTERS`, она же ключ `managed-clusters` в Secret (hub читает его
+  `optional: true`). Рендер падает с понятным сообщением, если `spoke.hub.enabled`
+  включён без `spoke.hub.url` или при `spoke.replicaCount > 1` (очередь команд
+  single-replica). `managed-cluster.yaml` переведён на outbound, `hub-cluster.yaml`
+  регистрирует ведомый кластер в `hub.managedClusters`, оставляя `hub.remoteClusters`
+  как прямой вариант.
 - **Чарт 0.3.0: компоненты и мониторинг включаются раздельно.** `hub.enabled`
   (agent-only/spoke-only кластер больше не получает Deployment/Service/RBAC hub'а),
   ServiceMonitor для hub и для агента (`serviceMonitor.*`, `agent.serviceMonitor.*`,
@@ -19,6 +42,9 @@
   `latest` (с предупреждением в NOTES), явный тег — как есть.
 ### Changed
 
+- **Агрегация счётчиков spoke — одна реализация.** `SpokeCounters` собирается в
+  `provider.AggregateCounters`, поэтому `GET /internal/v1/counters` и state push
+  outbound-канала отдают одинаковые числа (раньше логика жила в `internal/web`).
 - **Ломающие изменения values (чарт 0.3.0):** `networkPolicy.enabled` →
   `agent.networkPolicy.enabled`, `ingress.*` → `hub.ingress.*` (ingress относится только
   к hub'у), порог `thresholds.agentNoContact` → `agent.prometheusRule.thresholds.agentNoContact`.

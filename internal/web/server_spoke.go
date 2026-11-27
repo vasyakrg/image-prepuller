@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/local/image-prepuller/internal/auth"
@@ -226,66 +225,11 @@ func spokeTaskFinished(ctx context.Context, p provider.Provider, taskID string) 
 }
 
 // spokeCounters builds the aggregate counters answer from the provider series
-// and the current task summary.
+// and the current task summary. The logic lives in provider.AggregateCounters so
+// the outbound spoke channel (which pushes counters instead of answering this
+// endpoint) shares the exact same numbers.
 func spokeCounters(ctx context.Context, p provider.Provider) provider.SpokeCounters {
-	out := provider.SpokeCounters{Samples: []model.PullMetricSample{}}
-	for _, sample := range p.PullCounters() {
-		if sample.Count == 0 {
-			continue
-		}
-		out.PullTotal += sample.Count
-		switch strings.ToLower(sample.Result) {
-		case "success", "succeeded":
-			out.PullSucceeded += sample.Count
-		case "error", "failed", "failure":
-			out.PullFailed += sample.Count
-		case "canceled", "cancelled":
-			out.PullCanceled += sample.Count
-		}
-		out.Samples = append(out.Samples, sample)
-	}
-
-	snap := p.Snapshot(ctx)
-	out.PullInFlight = snap.Summary.RunningTasks + snap.Summary.QueuedTasks
-
-	// Canceled tasks are not part of the per-result pull series on every
-	// provider, so fall back to the retained task list and keep the total
-	// consistent with the aggregate fields.
-	var canceledTasks uint64
-	for _, task := range snap.Tasks {
-		if task.State == model.TaskCanceled {
-			canceledTasks++
-		}
-	}
-	if canceledTasks > out.PullCanceled {
-		out.PullTotal += canceledTasks - out.PullCanceled
-		out.PullCanceled = canceledTasks
-	}
-	out.ImagesCached = cachedImageCount(snap)
-	out.LastSyncAt = snap.LastSyncAt
-	if out.LastSyncAt.IsZero() {
-		out.LastSyncAt = snap.UpdatedAt
-	}
-	if out.LastSyncAt.IsZero() {
-		out.LastSyncAt = time.Now()
-	}
-	return out
-}
-
-// cachedImageCount counts images present on at least one node.
-func cachedImageCount(snap model.Snapshot) int {
-	unique := make(map[string]struct{})
-	for _, workload := range snap.Workloads {
-		for _, image := range workload.Images {
-			for _, node := range image.Nodes {
-				if node.State == model.StatePresent {
-					unique[image.Image] = struct{}{}
-					break
-				}
-			}
-		}
-	}
-	return len(unique)
+	return provider.AggregateCounters(ctx, p)
 }
 
 // logSpokeError logs a 5xx cause without request bodies, tokens or headers.

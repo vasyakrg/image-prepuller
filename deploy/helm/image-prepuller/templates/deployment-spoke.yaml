@@ -1,4 +1,19 @@
 {{- if .Values.spoke.enabled }}
+{{- /*
+  Outbound ("pull") mode (spoke.hub.enabled): the spoke dials the hub ingress and
+  keeps that connection open, so this release needs no ingress and no inbound
+  route from the hub. The spoke Service rendered by this chart is then only used
+  for in-cluster liveness/metrics scraping, never for hub -> spoke traffic.
+  The hub's command queue assumes a single spoke replica, hence the guards.
+*/}}
+{{- if .Values.spoke.hub.enabled }}
+{{- if not .Values.spoke.hub.url }}
+{{- fail "spoke.hub.enabled=true requires spoke.hub.url to be set (the hub ingress URL, e.g. https://prepuller.example.com)" }}
+{{- end }}
+{{- if gt (int .Values.spoke.replicaCount) 1 }}
+{{- fail "spoke.hub.enabled requires spoke.replicaCount=1: the hub command queue is single-replica" }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -40,6 +55,11 @@ spec:
             - -http-addr=:{{ .Values.spoke.service.httpPort }}
             - -metrics-addr=:{{ .Values.spoke.service.metricsPort }}
             - -cluster-name={{ .Values.spoke.clusterName }}
+            {{- if .Values.spoke.hub.enabled }}
+            {{- /* Quoted: an unquoted URL with "#", ": " or "&" would not parse. */}}
+            - {{ printf "-hub-url=%s" .Values.spoke.hub.url | quote }}
+            - -hub-sync-interval={{ .Values.spoke.hub.syncInterval }}
+            {{- end }}
           env:
             - name: PREPULLER_CLUSTER_TOKEN
               valueFrom:

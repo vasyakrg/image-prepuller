@@ -49,7 +49,8 @@ Stage 2/3 требуют двух вещей, которых в stdlib нет:
    `internal/kube` **не пишем**: watch/информеры и пагинация берутся из client-go.
    Решение пересматривается, только если размер бинаря или supply chain станут проблемой.
 3. **Hub-обвязка** (`internal/web`, `internal/model`, `internal/auth`,
-   `internal/metrics`, `internal/provider/{provider,registry,mock,remote}.go`) —
+   `internal/metrics`, `internal/provider/{provider,registry,mock,remote,spoke_hub,spoke_wire,counters}.go`
+   и `internal/spokeclient` — оба конца outbound-канала spoke → hub) —
    по-прежнему только stdlib. `client-go` попадает в бинарь hub транзитивно через
    пакет `internal/provider` (hub и spoke — один бинарь); это принятая цена.
 4. **`vendor/` не используется.** CI и разработка тянут модули через `GOPROXY`
@@ -98,6 +99,8 @@ flowchart LR
 | `internal/provider/k8s*.go` | `k8s.io/client-go`, `k8s.io/api`, `k8s.io/apimachinery`, stdlib |
 | `internal/web`, `internal/model`, `internal/auth`, `internal/metrics` | только stdlib |
 | `internal/provider/{provider,registry,mock,remote}.go` | только stdlib |
+| `internal/provider/{spoke_hub,spoke_wire,counters}.go` | только stdlib |
+| `internal/spokeclient` | stdlib + `internal/model`, `internal/provider` (сеть — `net/http`) |
 | `internal/testutil` | stdlib + внутренние пакеты (фейки, без клиентов) |
 
 ## Последствия

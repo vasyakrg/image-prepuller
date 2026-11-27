@@ -49,6 +49,16 @@ Health and metrics:
   curl -fsS http://localhost:{{ .Values.hub.service.metricsPort }}/metrics
 {{- end }}
 
+{{- if and .Values.hub.enabled (not .Values.hub.managedClusters) }}
+
+Managed clusters: no outbound registrations came from hub.managedClusters in
+this release. Register each managed cluster either with hub.managedClusters
+(outbound mode: the spoke dials this hub's ingress, so no inbound route into the
+managed cluster is needed) or with hub.remoteClusters (direct mode: the hub calls
+the spoke URL and must be able to reach it). With secret.existingSecret, put the
+same value in that Secret's "managed-clusters" key.
+{{- end }}
+
 {{- if .Values.hub.mock }}
 
 WARNING: hub.mock=true -> the controller runs with -mock (in-memory data).
@@ -73,8 +83,23 @@ for a real deployment; use agent.mock=true for a socket-less smoke test.
 
 Spoke "{{ .Values.spoke.clusterName }}" is enabled: service {{ $fullname }}-spoke
 (HTTP {{ .Values.spoke.service.httpPort }}, metrics {{ .Values.spoke.service.metricsPort }}).
+{{- if .Values.spoke.hub.enabled }}
+
+Outbound ("pull") mode: this spoke dials {{ .Values.spoke.hub.url }} every
+{{ .Values.spoke.hub.syncInterval }} and holds that connection open. It needs no
+ingress here and no inbound route from the hub; only egress from this cluster to
+the hub host on 443. Register it on the hub: PREPULLER_MANAGED_CLUSTERS (the
+"managed-clusters" Secret key, hub.managedClusters) must contain
+  {{ .Values.spoke.clusterName }}=<this release's cluster-token>
+Read the token here:
+  kubectl -n {{ .Release.Namespace }} get secret {{ $secretName }} -o jsonpath='{.data.cluster-token}' | base64 -d
+Keep spoke.replicaCount=1 in this mode: the hub command queue assumes a single
+spoke replica.
+{{- else }}
+
 Point the hub at it with hub.remoteClusters, e.g.
   --set hub.remoteClusters="{{ .Values.spoke.clusterName }}=http://{{ $fullname }}-spoke.{{ .Release.Namespace }}.svc:{{ .Values.spoke.service.httpPort }}=<token>"
+{{- end }}
 {{- end }}
 
 {{- if or .Values.serviceMonitor.enabled .Values.agent.serviceMonitor.enabled .Values.prometheusRule.enabled .Values.agent.prometheusRule.enabled }}

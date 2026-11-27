@@ -65,11 +65,16 @@ workload'ы и ноды и строит матрицу `image × node`; `node-ag
 - **Node-agent** — `prepuller agent`: HTTP/JSON API v1 рядом с containerd
   (`/agent/v1/snapshot`, `/agent/v1/images/{ref}`, `/agent/v1/pulls`), disk-guard по
   ImageFS и опциональный Bearer-токен.
-- **Multi-cluster** — hub агрегирует локальный и удалённые spoke-кластеры через единый
-  интерфейс. State-changing вызовы к spoke (pull, workload-pull, отмена, reconcile)
-  повторяются с экспоненциальным backoff (3 попытки, таймаут 5 с на попытку);
+- **Multi-cluster** — hub агрегирует локальный и управляемые spoke-кластеры через
+  единый интерфейс, в двух топологиях. **Прямая (direct)**: hub сам ходит в spoke по
+  HTTP (регистрация `hub.remoteClusters` / `PREPULLER_REMOTE_CLUSTERS`); state-changing
+  вызовы повторяются с экспоненциальным backoff (3 попытки, таймаут 5 с на попытку),
   недоступный spoke и отклонённый токен дают `502`, а UI не блокируется — снапшот,
-  counters и health читаются без ретраев.
+  counters и health читаются без ретраев. **Исходящая (outbound/pull)** — spoke сам
+  подключается к ingress'у hub'а и держит канал: пушит состояние кластера и long-poll'ит
+  команды, поэтому входящий маршрут в управляемый кластер не нужен. Это режим по
+  умолчанию для кластеров за NAT и без ingress: наружу нужен только исходящий HTTPS
+  на 443.
 - **Prometheus** — отдельный порт `:9090/metrics`, метрики по кластерам, нодам, слотам,
   pull-задачам и свежести синка.
 
@@ -92,9 +97,10 @@ flowchart TB
         direction TB
         AUTH["Session auth<br/>HMAC-SHA256 cookie"]
         API["/api/v1/*<br/>clusters · snapshot · pull · reconcile"]
-        REG["Cluster registry<br/>local + remote"]
+        REG["Cluster registry<br/>local + managed"]
         HUBMET["Metrics handler<br/>:9090"]
         STATIC["Embedded static UI"]
+        SPOKEHUB["SpokeHub<br/>state cache + command mailbox<br/>/internal/v1/spokes/*"]
     end
 
     subgraph SpokeA["Spoke — --role=spoke (cluster KZ)"]
@@ -117,8 +123,11 @@ flowchart TB
     API --> STATIC
     API --> REG
     REG --> LPROV
-    REG -->|"RemoteProvider<br/>HTTPS + Bearer"| SAPI_A
-    REG -->|"RemoteProvider<br/>HTTPS + Bearer"| SAPI_B
+    REG -->|"direct: RemoteProvider<br/>HTTPS + Bearer"| SAPI_A
+    REG -->|"direct: RemoteProvider<br/>HTTPS + Bearer"| SAPI_B
+    REG --> SPOKEHUB
+    SAPI_A -.->|"outbound: state push<br/>+ command long-poll"| SPOKEHUB
+    SAPI_B -.->|"outbound: state push<br/>+ command long-poll"| SPOKEHUB
     SAPI_A --> SPROV_A
     SAPI_B --> SPROV_B
     LPROV --> NODES
@@ -130,6 +139,24 @@ flowchart TB
 С флагом `-mock` все провайдеры заменяются на `MockProvider` — ни Kubernetes, ни
 containerd не нужны. В live-режиме hub поднимает `K8sProvider` (client-go) и берёт инвентарь
 образов ноды у node-agent'а по HTTP/JSON API v1; pull уходит в CRI через агент.
+
+Управляемый кластер подключается к hub'у двумя способами, и оба сосуществуют в одном
+реестре:
+
+- **direct** — hub сам ходит в spoke по HTTP (`hub.remoteClusters` /
+  `PREPULLER_REMOTE_CLUSTERS`). Нужен маршрут hub → spoke: общая сеть, либо
+  ingress/LoadBalancer в управляемом кластере.
+- **outbound («pull»)** — spoke запускается с `-hub-url`, сам подключается к ingress'у
+  hub'а, пушит состояние кластера (snapshot + counters) и long-poll'ит команды. Входящий
+  маршрут в управляемый кластер не нужен, только исходящий HTTPS из него на hub (443).
+  **Это рекомендуемый режим для управляемых кластеров за NAT/без ingress** и
+  единственный вариант, когда hub не может достучаться до кластера. Регистрация — `hub.managedClusters`
+  / `PREPULLER_MANAGED_CLUSTERS`.
+
+Чтения на hub'е (snapshot, counters, health, UI, `/metrics`) в outbound-режиме
+обслуживаются из последнего присланного состояния, без запроса на каждый вызов;
+state-changing вызовы (pull, workload-pull, cancel, reconcile) едут командами по тому же
+каналу. Подробности — [docs/architecture.md](docs/architecture.md).
 
 Многокластерный контур (hub + несколько spoke, у каждого свой пул воркеров) показан
 Mermaid-схемой выше; интерактивная схема прогрева и отказа ноды — в разделе
@@ -260,8 +287,12 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
 DaemonSet. Каждый компонент включается своим флагом: `hub.enabled` (по умолчанию да),
 `agent.enabled` (да), `spoke.enabled` (нет). Ingress живёт под hub'ом
 (`hub.ingress.enabled`, по умолчанию выключен): ведомые кластеры его не получают.
-Только у агента свои `agent.networkPolicy.enabled` и `agent.prometheusRule.enabled`;
-ServiceMonitor'ы и правила для hub — отдельными флагами (`serviceMonitor.enabled`,
+Управляемые кластеры регистрируются двумя разными значениями: `hub.managedClusters`
+(outbound, `name=token`) и `hub.remoteClusters` (direct, `name=url=token`);
+на стороне ведомого outbound включается `spoke.hub.enabled=true` +
+`spoke.hub.url` + `spoke.hub.syncInterval` (см. ниже). Только у агента свои
+`agent.networkPolicy.enabled` и `agent.prometheusRule.enabled`; ServiceMonitor'ы
+и правила для hub — отдельными флагами (`serviceMonitor.enabled`,
 `prometheusRule.enabled`).
 
 Кластер без UI — только агенты:
@@ -286,11 +317,25 @@ Cilium, Traefik, cert-manager). В репозитории лежат два **ш
 
 - [`deploy/values/hub-cluster.yaml`](deploy/values/hub-cluster.yaml) — мастер-кластер: hub,
   ingress с сертификатом платформенного `ClusterIssuer`, агенты на всех нодах,
-  toleration для control-plane, `autoWarm=false` на первую раскатку;
+  toleration для control-plane, `autoWarm=false` на первую раскатку; здесь же
+  список управляемых кластеров — `hub.managedClusters` (outbound) и/или
+  `hub.remoteClusters` (direct);
 - [`deploy/values/managed-cluster.yaml`](deploy/values/managed-cluster.yaml) — ведомый
-  кластер: `hub.enabled=false`, включены `spoke` и агенты. URL и токен spoke
-  регистрируются в `hub.remoteClusters` мастер-кластера
-  ([docs/DEPLOY.md §14.10](docs/DEPLOY.md));
+  кластер: `hub.enabled=false`, включены `spoke` и агенты, `spoke.hub.enabled=true`
+  с `spoke.hub.url` (адрес ingress'а мастер-кластера) — spoke сам подключается к hub'у.
+
+Ведомый кластер регистрируется на hub'е одним из двух способов:
+
+| Режим | Кто кому ходит | Значение чарта | Когда использовать |
+| --- | --- | --- | --- |
+| **outbound** (рекомендуется для NAT/без ingress) | spoke → hub ingress, канал держит spoke | `hub.managedClusters: "name=token"` на hub'е; `spoke.hub.enabled/url/syncInterval` на ведомом | hub не может достучаться до кластера: NAT, нет ingress. Нужен только исходящий HTTPS на 443 |
+| **direct** | hub → spoke по HTTP | `hub.remoteClusters: "name=url=token"` | hub и spoke в одной сети, либо в управляемом кластере опубликован ingress/LoadBalancer |
+
+Токен в обоих режимах — это `cluster-token` релиза ведомого кластера
+(`PREPULLER_CLUSTER_TOKEN`). В outbound-режиме обязательны `spoke.hub.url` и ровно
+одна реплика spoke (`spoke.replicaCount=1`): очередь команд hub'а рассчитана на один
+spoke; чарт падает на рендере, если эти условия нарушены. Ingress в ведомом кластере
+не нужен — Service spoke'а остаётся только для метрик и проб.
 
 **Репозиторий публичный.** Реальные значения (домен, адреса нод, секрет-стор,
 `sha-*` тег сборки) живут в приватном GitOps-репозитории платформы; overlay
@@ -318,6 +363,8 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
 | `-mock` | `false` | In-memory провайдер, Kubernetes не нужен |
 | `-cluster-name` | `talos-prod-eu` | Имя локального кластера |
 | `-auto-warm` | `false` | Запустить reconciler авто-прогрева для каждого локального кластера |
+| `-hub-url` | пусто | Только spoke: базовый URL hub'а (обычно ingress). Задаёт outbound-режим — spoke сам подключается к hub'у; пусто — direct-режим, и hub должен уметь достучаться до spoke по HTTP (env `PREPULLER_HUB_URL`) |
+| `-hub-sync-interval` | `3s` | Только spoke: как часто outbound-spoke пушит состояние кластера в hub (env `PREPULLER_HUB_SYNC_INTERVAL`) |
 
 Подкоманда `agent` — node-agent:
 
@@ -357,8 +404,11 @@ stalled`. Hub превращает 504 в `provider.ErrAgentPullStalled` → HTT
 | `PREPULLER_COOKIE_SECURE` | hub | нет | `true` — всегда ставить `Secure` на cookie (TLS терминируется перед hub) |
 | `PREPULLER_LOGIN_ATTEMPTS_PER_MINUTE` | hub | нет | Лимит попыток логина на IP и на username, по умолчанию `5` |
 | `PREPULLER_LOGIN_BLOCK` | hub | нет | Блокировка после исчерпания лимита, по умолчанию `5m` |
-| `PREPULLER_CLUSTER_TOKEN` | spoke | нет | Bearer-токен для `/internal/v1/*`; пустое значение = API без авторизации |
-| `PREPULLER_REMOTE_CLUSTERS` | hub | нет | Дополнительные spoke: `name=url=token,name2=url2=token2` |
+| `PREPULLER_CLUSTER_TOKEN` | spoke | да в outbound, нет в direct | Bearer-токен для `/internal/v1/*`; в direct пустое значение отключает авторизацию, в outbound обязателен (без него spoke не стартует) и должен совпадать с токеном этого кластера в `hub.managedClusters` |
+| `PREPULLER_REMOTE_CLUSTERS` | hub | нет | Direct-режим: дополнительные spoke `name=url=token,name2=url2=token2`; hub должен уметь достучаться до URL |
+| `PREPULLER_MANAGED_CLUSTERS` | hub | нет | Outbound-режим: управляемые кластеры `name=token,name2=token2`; токен = `PREPULLER_CLUSTER_TOKEN` соответствующего релиза spoke. Malformed-запись или дубликат имени — hub не стартует |
+| `PREPULLER_HUB_URL` | spoke | нет | Базовый URL hub'а для outbound-режима (то же, что `-hub-url`); пусто — direct-режим |
+| `PREPULLER_HUB_SYNC_INTERVAL` | spoke | нет | Интервал push состояния в outbound-режиме (Go duration, по умолчанию `3s`; невалидное значение — предупреждение в лог и `3s`) |
 | `PREPULLER_AGENT_TOKEN` | agent + hub + spoke | нет | Bearer-токен агентского API: его проверяет агент (`-token`) и им же hub/spoke ходят в `GET /agent/v1/snapshot` и `POST /agent/v1/pulls`; пусто — без авторизации |
 | `PREPULLER_AGENT_METRICS_ADDR` | agent | нет | Адрес Prometheus-метрик агента, по умолчанию `:9444`; пусто — выключить сервер метрик |
 
@@ -367,7 +417,9 @@ stalled`. Hub превращает 504 в `provider.ErrAgentPullStalled` → HTT
 ## HTTP API
 
 Все защищённые ручки hub требуют cookie `prepuller_session` (HttpOnly, SameSite=Lax,
-`Secure` при TLS или `X-Forwarded-Proto: https`). Health-ручки открыты.
+`Secure` при TLS или `X-Forwarded-Proto: https`). Health-ручки открыты. Исключение —
+ручки outbound-канала `/internal/v1/spokes/*`: их вызывает spoke с Bearer-токеном
+кластера, а не оператор с cookie (см. ниже).
 
 ### Пользователи и роли
 
@@ -418,6 +470,20 @@ Spoke (только если задан `PREPULLER_CLUSTER_TOKEN` — Bearer):
 
 Поле `apiVersion` в запросах обязательно только для новых клиентов: пустое значение и
 `v1` принимаются в течение одного релиза (см. [docs/PLAN.md](docs/PLAN.md) §10).
+
+### Hub: управляемые кластеры (outbound-канал)
+
+Эти ручки отдаёт **hub**, а не spoke: их вызывает outbound-spoke, который сам
+подключился к ingress'у hub'а. Авторизация — Bearer-токен кластера из
+`PREPULLER_MANAGED_CLUSTERS` (не cookie); незарегистрированный кластер — 404,
+несовпавший токен — 401. Ручки существуют, только если hub запущен с непустым
+`PREPULLER_MANAGED_CLUSTERS`.
+
+| Метод и путь | Описание |
+| --- | --- |
+| `POST /internal/v1/spokes/{cluster}/state` | Push состояния: `SpokeState` (snapshot + counters); `apiVersion` проверяется, неподдерживаемый — 400 |
+| `GET /internal/v1/spokes/{cluster}/commands` | Long-poll очереди команд; 204, если за время ожидания (до 20 с) ничего не появилось |
+| `POST /internal/v1/spokes/{cluster}/commands/{id}/result` | Результат выполнения команды; идемпотентно — неизвестный/просроченный id = no-op 200 |
 
 Node-agent (HTTP/JSON, API v1; `/healthz` открыт, остальное — Bearer из `-token`):
 
@@ -471,6 +537,16 @@ Hub и spoke экспортируют метрики на отдельном п�
 `prepuller_node_agent_errors_total` заполняет только `K8sProvider` (опциональная
 capability `provider.AgentErrorCounter`), поэтому у mock/remote кластеров серии нет.
 
+В outbound-режиме hub экспортирует те же серии из последнего присланного spoke'ом
+состояния, а не из запроса на каждый скрейп. Поэтому «сейчас» в метриках и UI отстаёт на
+интервал синхронизации spoke (по умолчанию `3s`, плюс TTL провайдера) и на время скрейпа.
+Сигналы устаревания — `prepuller_cluster_up` и `prepuller_cluster_sync_partial`; spoke,
+молчащий дольше `max(3 × syncInterval, 10s)`, считается offline (snapshot
+`syncStatus=offline`, `partial=true`, health `online=false` с возрастом последнего push).
+`prepuller_snapshot_age_seconds` растёт, пока коллектор отдаёт последний успешный
+снапшот (например, при таймауте скрейпа); когда провайдер уже вернул offline-заглушку
+с нулевым `LastSyncAt`, серия пропадает — ориентируйтесь на `cluster_up`.
+
 Node-agent отдаёт свои метрики **на отдельном порту** (`-metrics-addr`, по умолчанию
 `:9444`, без авторизации, только счётчики и gauge'и; на скрейпе агент не ходит в CRI):
 
@@ -498,9 +574,12 @@ cmd/prepuller/          точка входа: controller (hub/spoke) и agent, 
 internal/agent/         node-agent: CRI-клиент, инвентарь образов, disk-guard, HTTP/JSON API v1
 internal/auth/          cookie-сессии и middleware (RequireAuth, RequireToken)
 internal/model/         доменные типы и JSON-контракт API v2 (Snapshot, PullTask, ImageRef, …)
-internal/provider/      Provider v2, MockProvider, RemoteProvider, K8sProvider (client-go), Registry
+internal/provider/      Provider v2, MockProvider, RemoteProvider, K8sProvider (client-go), Registry;
+                        spoke_hub.go — hub-сторона outbound-канала: кэш состояния + mailbox команд
+internal/spokeclient/   spoke-сторона outbound-канала: push состояния, long-poll команд, дедуп, backoff
 internal/reconcile/     политика авто-прогрева: очередь, приоритеты, лимиты, backoff
-internal/web/           hub-роутер (server.go) + spoke-роутер (server_spoke.go), embed статики
+internal/web/           hub-роутер (server.go) + spoke-роутер (server_spoke.go) + hub-ручки
+                        outbound-канала (server_spoke_hub.go), embed статики
 internal/web/static/    index.html, app.js, styles.css — без сборки и npm
 internal/metrics/       ручная генерация Prometheus text exposition
 internal/testutil/      фейковый spoke/hub, golden-снапшот v2, контрактные тесты hub↔spoke
@@ -586,3 +665,19 @@ KEEP=1 bash hack/e2e-k3d.sh   # оставить кластер для разб�
   `$KUBECONFIG` / `~/.kube/config` (вне кластера) и падают на старте, если конфига нет.
   Ноды без доступного агента дают `offline`-слоты, `syncStatus=degraded` и `partial=true`;
   pull-задача при этом падает с `502`, а при диске выше порога — с `409`.
+- **Outbound-канал рассчитан на одну реплику spoke.** Очередь команд hub'а — один mailbox
+  на кластер, поэтому `spoke.hub.enabled` с `spoke.replicaCount > 1` чарт отклоняет на
+  рендере. Несколько реплик hub'а состояние канала тоже не разделяют: реестр и mailbox
+  живут в памяти процесса.
+- **Команда в outbound-режиме живёт 5 s на попытку** — тот же бюджет, что у сетевого
+  таймаута direct-режима (таймаут одного round trip: ожидание в очереди + исполнение;
+  state-changing вызовы ретраятся по тем же правилам, что и в direct-режиме). Живой pull
+  через node-agent синхронный и может идти минутами, поэтому кнопка Pull на
+  outbound-кластере в этом случае вернёт `502` — ровно как в direct-режиме сегодня;
+  сама задача при этом продолжится на spoke и отразится в следующем снапшоте.
+- **Данные outbound-кластера отстают на интервал синхронизации.** UI, API и `/metrics`
+  читают последнее присланное состояние, а не ходят в spoke на каждый запрос: по умолчанию
+  задержка ~3 s плюс TTL провайдера. Spoke, молчащий дольше `max(3 × syncInterval, 10s)`,
+  показывается offline (`prepuller_cluster_up=0`, `prepuller_cluster_sync_partial=1`);
+  доставка команд at-least-once (повтор через 10 s, дедупликация по id на spoke),
+  поэтому исполнение команд обязано быть идемпотентным.

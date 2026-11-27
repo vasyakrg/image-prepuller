@@ -114,6 +114,14 @@ func NewRemoteProvider(clusterName, baseURL, token string) *RemoteProvider {
 // NewRemoteProviderWithConfig builds a provider with an explicit transport
 // policy; zero fields of cfg fall back to defaults.
 func NewRemoteProviderWithConfig(clusterName, baseURL, token string, cfg RemoteConfig) *RemoteProvider {
+	return newRemoteProviderWithTransport(clusterName, baseURL, token, nil, cfg)
+}
+
+// newRemoteProviderWithTransport builds a provider on top of an explicit
+// RoundTripper. A nil rt keeps the real HTTP transport; the outbound spoke
+// channel (spoke_hub.go) passes its command mailbox so that every request rule
+// in this file - timeouts, retries, status mapping - applies unchanged.
+func newRemoteProviderWithTransport(clusterName, baseURL, token string, rt http.RoundTripper, cfg RemoteConfig) *RemoteProvider {
 	cfg = cfg.withDefaults()
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
@@ -127,6 +135,15 @@ func NewRemoteProviderWithConfig(clusterName, baseURL, token string, cfg RemoteC
 		IdleConnTimeout:       cfg.IdleConnTimeout,
 		TLSHandshakeTimeout:   5 * time.Second,
 		ExpectContinueTimeout: time.Second,
+	}
+	if rt != nil {
+		return &RemoteProvider{
+			clusterName: clusterName,
+			baseURL:     strings.TrimRight(baseURL, "/"),
+			token:       token,
+			client:      &http.Client{Transport: rt},
+			cfg:         cfg,
+		}
 	}
 	return &RemoteProvider{
 		clusterName: clusterName,
@@ -350,16 +367,30 @@ func (p *RemoteProvider) doOnce(ctx context.Context, method, path string, payloa
 func (p *RemoteProvider) Snapshot(ctx context.Context) model.Snapshot {
 	var snap model.Snapshot
 	if err := p.doJSON(ctx, http.MethodGet, "/internal/v1/snapshot", nil, &snap, 1); err != nil {
-		return model.Snapshot{
-			ClusterName: p.clusterName,
-			APIVersion:  model.APIVersion,
-			UpdatedAt:   time.Now(),
-			SyncStatus:  model.SyncOffline,
-			Partial:     true,
-		}
+		return offlineSnapshot(p.clusterName)
 	}
+	normalizeSnapshot(p.clusterName, &snap)
+	return snap
+}
+
+// offlineSnapshot is the provider-interface stand-in for an unreachable cluster:
+// an empty snapshot marked offline and partial, never an error (Provider cannot
+// return one).
+func offlineSnapshot(cluster string) model.Snapshot {
+	return model.Snapshot{
+		ClusterName: cluster,
+		APIVersion:  model.APIVersion,
+		UpdatedAt:   time.Now(),
+		SyncStatus:  model.SyncOffline,
+		Partial:     true,
+	}
+}
+
+// normalizeSnapshot fills the fields a spoke or state push may omit, so the UI
+// and metrics always see a consistent snapshot.
+func normalizeSnapshot(cluster string, snap *model.Snapshot) {
 	if snap.ClusterName == "" {
-		snap.ClusterName = p.clusterName
+		snap.ClusterName = cluster
 	}
 	if snap.APIVersion == "" {
 		snap.APIVersion = model.PreviousAPIVersion
@@ -367,7 +398,6 @@ func (p *RemoteProvider) Snapshot(ctx context.Context) model.Snapshot {
 	if snap.SyncStatus == "" {
 		snap.SyncStatus = model.SyncUnknown
 	}
-	return snap
 }
 
 func (p *RemoteProvider) TriggerPull(ctx context.Context, req model.PullRequest) (model.PullTask, error) {

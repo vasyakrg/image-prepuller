@@ -49,13 +49,25 @@ hub:
       - secretName: prepuller-tls
         hosts:
           - prepuller.example.com
-  # Managed clusters this hub drives, PREPULLER_REMOTE_CLUSTERS format:
-  #   "<name>=<url>=<cluster-token>"
+  # Managed clusters this hub drives.
+  #
+  # Outbound ("pull") mode, the default for managed clusters: each spoke dials
+  # this hub's ingress and holds the connection open, so nothing has to be
+  # reachable from here. PREPULLER_MANAGED_CLUSTERS format:
+  #   "<cluster-name>=<cluster-token>"
   # The token must equal secret.clusterToken of that cluster's release
-  # (deploy/values/managed-cluster.yaml). Read it from the managed cluster with:
+  # (deploy/values/managed-cluster.yaml). Read it on the managed cluster with:
   #   kubectl -n prepuller get secret prepuller-image-prepuller-secret \
   #     -o jsonpath='{.data.cluster-token}' | base64 -d
-  # Spoke URL format: http://<release>-image-prepuller-spoke.<namespace>.svc:8081
+  # Then paste it here, e.g.:
+  #   managedClusters: "talos-prod-kz=<cluster token of the managed release>"
+  # Prefer a pre-created Secret in production (secret.existingSecret with the
+  # same "managed-clusters" key) instead of storing the token in a values file.
+  managedClusters: "talos-prod-kz=<cluster token of the managed release>"
+  # Direct ("push") / legacy mode: the hub calls the spoke itself, so the hub
+  # must be able to reach that URL (shared cluster network or a route into the
+  # managed cluster). Format: "<name>=<url>=<cluster-token>". Leave empty to use
+  # outbound mode only.
   remoteClusters: ""
   # Small Talos installs have no untainted worker nodes, so the hub needs the
   # same toleration as the agent or its pod stays Pending.

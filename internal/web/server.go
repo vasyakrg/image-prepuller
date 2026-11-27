@@ -21,14 +21,28 @@ var staticFiles embed.FS
 type Server struct {
 	registry *provider.Registry
 	auth     *auth.Manager
+	spokeHub *provider.SpokeHub
 	mux      *http.ServeMux
 }
 
-func NewServer(reg *provider.Registry, a *auth.Manager) (*Server, error) {
+// Option customizes the hub HTTP server.
+type Option func(*Server)
+
+// WithSpokeHub enables the hub side of the outbound spoke channel: managed
+// clusters that dial this hub's ingress instead of being reachable over HTTP
+// (see provider.SpokeHub and server_spoke_hub.go).
+func WithSpokeHub(h *provider.SpokeHub) Option {
+	return func(s *Server) { s.spokeHub = h }
+}
+
+func NewServer(reg *provider.Registry, a *auth.Manager, opts ...Option) (*Server, error) {
 	s := &Server{
 		registry: reg,
 		auth:     a,
 		mux:      http.NewServeMux(),
+	}
+	for _, opt := range opts {
+		opt(s)
 	}
 
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -62,6 +76,9 @@ func NewServer(reg *provider.Registry, a *auth.Manager) (*Server, error) {
 
 	// Operator-only feed of the recent security audit events.
 	s.mux.HandleFunc("GET /api/v1/audit", auth.RequireOperator(s.auth)(s.handleAudit))
+
+	// Inbound endpoints of managed clusters that connect outbound (optional).
+	s.registerSpokeHubRoutes()
 
 	// Embedded static Web UI
 	sub, err := fs.Sub(staticFiles, "static")

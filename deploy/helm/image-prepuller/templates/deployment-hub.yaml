@@ -85,6 +85,14 @@ spec:
             - name: PREPULLER_REMOTE_CLUSTERS
               value: {{ . | quote }}
             {{- end }}
+            # Outbound ("pull") mode: managed clusters dial this hub's ingress.
+            # optional:true keeps an existingSecret without the key valid.
+            - name: PREPULLER_MANAGED_CLUSTERS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ip.secretName" . }}
+                  key: managed-clusters
+                  optional: true
             {{- with .Values.hub.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

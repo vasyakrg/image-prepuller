@@ -13,8 +13,8 @@
 | Web UI | да (embed static) | нет |
 | Авторизация | cookie-сессия оператора | Bearer-токен кластера |
 | Публичный API | `/api/v1/*` | — |
-| Внутренний API | — | `/internal/v1/*` |
-| Кластеры | локальный + удалённые через `RemoteProvider` | ровно один локальный |
+| Внутренний API | `/internal/v1/spokes/*` для outbound-spoke | `/internal/v1/*` |
+| Кластеры | локальный + управляемые (`RemoteProvider` в direct, `PushProvider` в outbound) | ровно один локальный |
 | Метрики | `:9090/metrics` по всем кластерам | `:9090/metrics` по своему |
 | Требует K8s в Stage 1 | нет (`-mock`) | нет (`-mock`) |
 
@@ -67,6 +67,85 @@ flowchart LR
 `docs/diagrams/image-prepuller-overview.png`). Mermaid-схемы ниже остаются
 каноническими для markdown-рендера; HTML-артефакт нужен для чтения схемы с зумом
 и подсветкой связей.
+
+### 1.1 Outbound-канал: spoke → hub
+
+Прямая схема выше требует, чтобы hub мог достучаться до spoke по HTTP. Если
+управляемый кластер за NAT или в нём нет ingress, направление обратное: spoke
+запускается с `-hub-url`, сам подключается к ingress'у hub'а и держит канал —
+пушит состояние кластера и long-poll'ит команды.
+
+```mermaid
+flowchart LR
+    subgraph Managed["Управляемый кластер (NAT / без ingress)"]
+        direction TB
+        SPOKE["spoke controller<br/>-role=spoke -hub-url=...<br/>spokeclient.Client"]
+        SPAPI["web.NewSpokeServer<br/>/internal/v1/* — локальный handler"]
+        AGENTS["node-agent DaemonSet<br/>:9443 на каждой ноде"]
+        CRI["containerd CRI"]
+        SPOKE -->|"команда → локальный handler"| SPAPI
+        SPAPI -->|"инвентарь / pull"| AGENTS
+        AGENTS -->|"CRI"| CRI
+    end
+
+    subgraph Master["Мастер-кластер (hub)"]
+        direction TB
+        ING["Ingress<br/>HTTPS"]
+        HAPI["hub web.Server<br/>/internal/v1/spokes/*"]
+        AUTH["auth.RequireSpokeToken<br/>Bearer = cluster-token"]
+        MAIL["provider.SpokeHub<br/>mailbox команд + кэш состояния"]
+        PUSH["PushProvider<br/>Snapshot/Counters/Health из кэша"]
+        REG["Registry<br/>role=remote, endpoint=outbound"]
+        PROM["Prometheus<br/>:9090/metrics"]
+        ING --> HAPI
+        HAPI --> AUTH
+        AUTH --> MAIL
+        MAIL --> PUSH
+        PUSH --> REG
+        REG --> PROM
+    end
+
+    SPOKE -->|"1. POST .../state<br/>HTTPS outbound"| ING
+    SPOKE -->|"2. GET .../commands<br/>long-poll, до 20 s"| ING
+    SPOKE -->|"3. POST .../commands/{id}/result"| ING
+```
+
+Входящих стрелок в управляемый кластер на схеме нет: hub никогда не инициирует
+соединение к нему, весь трафик идёт из управляемого кластера наружу на 443 (или по
+HTTP внутри доверенной сети). Hub → node-agent остаётся внутри управляемого кластера:
+команду исполняет локальный handler spoke'а, который и ходит к агентам.
+
+**State cache.** Spoke раз в `-hub-sync-interval` (по умолчанию 3 s) отправляет
+`SpokeState`: тот же snapshot и counters, что отдают `GET /internal/v1/snapshot` и
+`GET /internal/v1/counters` в direct-режиме. Hub складывает их в `SpokeHub` и
+обслуживает чтения (snapshot для UI/API, counters для метрик, health) из кэша, не делая
+запрос на каждый вызов. Молчащий дольше `max(3 × syncInterval, 10 s)` spoke считается
+offline: snapshot `syncStatus=offline` + `partial=true`, health `online=false` с
+возрастом последнего push, `prepuller_cluster_up=0`, `prepuller_cluster_sync_partial=1`.
+Пока hub отдаёт последний успешный снапшот (например, при таймауте скрейпа),
+`prepuller_snapshot_age_seconds` растёт; после подмены на offline-заглушку с нулевым
+`LastSyncAt` серия пропадает — основным сигналом остаётся `prepuller_cluster_up`.
+
+**Mailbox команд.** State-changing вызовы (pull, workload-pull, cancel, reconcile)
+превращаются в `SpokeCommand{id, method, path, query, body}` и ждут в очереди
+кластера; spoke забирает их long-poll'ом (`GET /internal/v1/spokes/{cluster}/commands`,
+ответ 204, если за 20 s ничего не появилось) и исполняет через собственный handler,
+после чего отправляет `SpokeCommandResult` (исходный HTTP-статус и тело). Hub
+по-прежнему использует `RemoteProvider` поверх mailbox-транспорта, поэтому маппинг
+статусов прежний: 409 — задача уже завершена, 404 — неизвестная задача, 5xx/транспорт —
+502. Доставка at-least-once: неподтверждённая команда переотправляется через 10 s, spoke
+дедуплицирует по id (кэш последних 512 результатов), поэтому повтор не перезапускает
+исполненную команду. Один round trip ограничен 5 s (таймаут попытки — тот же, что
+у сетевого таймаута direct-режима; retry-политика state-changing вызовов не менялась);
+живой pull через node-agent
+синхронный и дольше, поэтому такой вызов вернёт 502 (как и в direct-режиме), а задача
+продолжится на spoke.
+
+**Аутентификация.** Каждый кластер регистрируется на hub'е с собственным токеном
+(`PREPULLER_MANAGED_CLUSTERS="name=token"`); все три ручки `/internal/v1/spokes/*`
+идут через `auth.RequireSpokeToken` и Bearer-токен кластера, cookie здесь не
+принимается. Hub никогда не отключает проверку: неизвестный кластер — 404, несовпавший
+токен — 401.
 
 ## 2. Компоненты и зависимости пакетов
 
@@ -181,6 +260,14 @@ in-cluster service account, иначе из `$KUBECONFIG`/`~/.kube/config`; то
 запускается свой `reconcile.Reconciler` под тем же signal-контекстом, что и HTTP-серверы;
 удалённые кластеры пропускаются — reconciler рядом с ними запускает spoke.
 
+Управляемые кластеры регистрируются двумя путями. `PREPULLER_REMOTE_CLUSTERS`
+(`name=url=token`) создаёт `RemoteProvider`: hub сам ходит в spoke по HTTP.
+`PREPULLER_MANAGED_CLUSTERS` (`name=token`) создаёт `SpokeHub` + `PushProvider`:
+кластер получает в реестре роль `remote`, endpoint `outbound`, а его spoke сам
+подключается к hub'у. Оба пути кладут провайдера в один `Registry`, поэтому UI,
+метрики и reconciler работают с управляемым кластером одинаково; регистрировать одно
+имя дважды нельзя — в реестре останется последняя запись.
+
 ## 4. Аутентификация
 
 ### Hub — cookie-сессия
@@ -269,17 +356,42 @@ sequenceDiagram
 
 UI не кэширует ничего, кроме последнего снапшота: каждые 5 секунд — `clusters` и
 `snapshot` выбранного кластера. Переключение кластера в селекте меняет только
-`state.activeCluster` и сразу перезапрашивает снапшот.
+`state.activeCluster` и сразу перезапрашивает снапшот. В outbound-режиме запрос
+`GET /internal/v1/snapshot` к spoke не выполняется: `PushProvider.Snapshot` отдаёт
+последний pushed-снапшот (и offline-заглушку, если spoke замолчал), поэтому UI
+показывает состояние с задержкой порядка sync-интервала.
 
-### Надёжность транспорта hub → spoke
+### Надёжность транспорта hub ↔ spoke
 
-`RemoteProvider` держит один `http.Client` с ограниченным пулом соединений и таймаутом
-5 s на попытку. Идемпотентные state-changing вызовы (`pull`, `workloads/pull`, `cancel`,
-`reconcile`) повторяются до 3 раз с экспоненциальным backoff (150 ms → 2 s); чтения
-(`snapshot`, `counters`, `health`) — ровно один запрос, чтобы мёртвый spoke не
-тормозил страницу и скрейп метрик. Ошибки типизированы: `ErrSpokeUnavailable`/
-`ErrSpokeUnauthorized` → `502`, `ErrTaskNotActive` → `409`; `Snapshot` по-прежнему
-деградирует в offline-снапшот, а `PullCounters` возвращает `nil`.
+**Direct.** `RemoteProvider` держит один `http.Client` с ограниченным пулом соединений
+и таймаутом 5 s на попытку. Идемпотентные state-changing вызовы (`pull`,
+`workloads/pull`, `cancel`, `reconcile`) повторяются до 3 раз с экспоненциальным
+backoff (150 ms → 2 s); чтения (`snapshot`, `counters`, `health`) — ровно один запрос,
+чтобы мёртвый spoke не тормозил страницу и скрейп метрик. Ошибки типизированы:
+`ErrSpokeUnavailable`/`ErrSpokeUnauthorized` → `502`, `ErrTaskNotActive` → `409`;
+`Snapshot` по-прежнему деградирует в offline-снапшот, а `PullCounters` возвращает `nil`.
+
+**Outbound.** Тот же `RemoteProvider` используется поверх mailbox-транспорта
+(`commandTransport`), поэтому правила статусов не меняются, но меняется природа
+таймаутов и доставки:
+
+- `SpokeHubConfig.CommandTimeout` = 5 s на один round trip (ожидание в очереди +
+  исполнение), то есть на одну попытку — это тот же бюджет, что у 5-секундного сетевого
+  таймаута прямого режима; retry-политика state-changing вызовов остаётся
+  прежней (до 3 попыток). Живой pull через
+  node-agent синхронный и может идти минутами — такой вызов вернёт `502`, как и в
+  direct-режиме сегодня, а сама задача продолжится на spoke.
+- Доставка команд **at-least-once**: неподтверждённая команда переотправляется через
+  10 s; spoke дедуплицирует по id (кэш последних 512 результатов) и на повтор только
+  переотправляет сохранённый результат, не исполняя команду заново. Поэтому исполнение
+  обязано быть идемпотентным (`TriggerPull` идемпотентен по image+node).
+- Чтения не ходят в spoke вовсе: `PushProvider.Snapshot/PullCounters/Health` читают
+  кэш последнего pushed-состояния. Нет свежего состояния — offline-снапшот
+  (`syncStatus=offline`, `partial=true`), `PullCounters() = nil`, health
+  `online=false` с возрастом последнего push. `Health.LatencyMs` на этом канале
+  всегда 0: RTT hub не измеряет, сигнал — `PushProvider.SyncAge()`.
+- Сбой одного цикла не блокирует другой: push состояния и long-poll команд — независимые
+  горутины spoke-клиента; транспортные ошибки логируются не чаще раза в минуту на ключ.
 
 ## 6. Модель данных
 

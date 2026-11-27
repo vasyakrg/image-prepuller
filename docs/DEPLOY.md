@@ -31,6 +31,7 @@ node-agent на каждой ноде. Для in-memory демо без Kubernet
 | ClusterRole + ClusterRoleBinding (read-only Nodes/workload'ы) | `rbac.yaml` | да, если `hub.enabled` или `spoke.enabled` (`rbac.create`) |
 | Secret (auth, session secret, cluster token, agent token) | `secret.yaml` | да, если включён любой компонент |
 | Deployment + Service (hub) | `deployment-hub.yaml`, `service-hub.yaml` | да (`hub.enabled`) |
+| HTTP-ручки outbound-канала управляемых кластеров (`/internal/v1/spokes/*`) | маршруты в hub (`server_spoke_hub.go`), отдельных объектов нет | да, если `hub.enabled` и задан `hub.managedClusters` |
 | Ingress (совместимый с Traefik) | `ingress.yaml` | нет (`hub.ingress.enabled`; только для hub) |
 | Deployment + Service (spoke) | `deployment-spoke.yaml`, `service-spoke.yaml` | нет (`spoke.enabled`) |
 | DaemonSet (node-agent) | `daemonset-agent.yaml` | да (`agent.enabled`) |
@@ -41,6 +42,11 @@ node-agent на каждой ноде. Для in-memory демо без Kubernet
 
 `hub.enabled=false` (или `agent.enabled=false`) убирает объекты компонента
 целиком — так ставится «только агенты» в кластер без UI и наоборот.
+
+Outbound-канал управляемых кластеров **не добавляет Kubernetes-объектов**: три ручки
+`/internal/v1/spokes/{cluster}/{state,commands,commands/{id}/result}` обслуживает тот же
+hub Deployment (и тот же ingress, если он включён). Отдельный Service, LoadBalancer или
+Ingress для управляемых кластеров не нужен — spoke сам подключается к hub'у.
 
 Один бинарь, три роли: `controller -role=hub` (Web UI + cookie-авторизация +
 реестр кластеров + Prometheus), `controller -role=spoke` (headless backend API
@@ -86,10 +92,11 @@ Secret. Ключи в Secret:
 | `auth-pass` | `PREPULLER_AUTH_PASS` | hub | Обязателен. |
 | `session-secret` | `PREPULLER_SESSION_SECRET` | hub | Обязателен для стабильных сессий. Пусто → случайное значение на каждую установку: после рестарта пользователи разлогинены, multi-replica схемы ломаются. |
 | — | `PREPULLER_COOKIE_SECURE` | hub | Флаг `Secure` у cookie; ставится из `hub.cookieSecure` (по умолчанию `true`; выключать только для локальной разработки по plain-HTTP). |
-| `cluster-token` | `PREPULLER_CLUSTER_TOKEN` | spoke | Bearer-токен, который ожидают `/internal/v1/*`. Пусто отключает авторизацию — только для dev. |
+| `cluster-token` | `PREPULLER_CLUSTER_TOKEN` | spoke | Bearer-токен, который ожидают `/internal/v1/*`. В direct-режиме пусто отключает авторизацию (только dev); в outbound-режиме **обязателен** и должен совпадать с токеном этого кластера в `hub.managedClusters` hub'а. |
 | `agent-token` | `PREPULLER_AGENT_TOKEN` | agent | Bearer-токен HTTP API v1 агента. Пусто отключает авторизацию агента. |
 | `users` | `PREPULLER_USERS` | hub | Опциональный список пользователей `name:password:role,...` (роли `viewer`/`operator`); multi-user авторизация работает — hub собирает пользователей из этого списка. |
-| — | `PREPULLER_REMOTE_CLUSTERS` | hub | Опциональный список дополнительных spoke `name=url=token,...`. |
+| — | `PREPULLER_REMOTE_CLUSTERS` | hub | Direct-режим: опциональный список spoke `name=url=token,...`; hub должен уметь достучаться до URL. |
+| `managed-clusters` | `PREPULLER_MANAGED_CLUSTERS` | hub | Outbound-режим: список управляемых кластеров `name=token,...` (токен = `cluster-token` релиза этого spoke). Значение берётся из `hub.managedClusters`; ключ читается с `optional: true`, поэтому старый `existingSecret` без него не ломает hub. Malformed-запись или дубликат имени — hub не стартует. |
 | — | `PREPULLER_LOGIN_ATTEMPTS_PER_MINUTE` | hub | Опциональный rate-limit логина (по умолчанию 5/мин); проверяется hub. |
 | — | `PREPULLER_LOGIN_BLOCK` | hub | Опциональная длительность блокировки после превышения попыток (Go duration, например `5m`). |
 | — | `PREPULLER_NODE_NAME` | agent | Имя ноды; DaemonSet ставит его из `spec.nodeName`. |
@@ -129,6 +136,14 @@ kubectl -n prepuller create secret generic prepuller-credentials \
 Креды реестра для pull образа — отдельная история: либо создайте Secret
 `kubernetes.io/dockerconfigjson` и задайте `imagePullSecrets`, либо привяжите
 его к ServiceAccount (`serviceAccount.annotations` / `kubectl patch sa`).
+
+Пара токенов outbound-канала задаётся на двух сторонах и должна совпадать: на
+ведомом кластере это `secret.clusterToken` (`PREPULLER_CLUSTER_TOKEN`), на hub'е —
+соответствующая запись `hub.managedClusters="<cluster-name>=<тот же токен>"` (ключ
+`managed-clusters` в Secret). В production не храните токены в values: положите
+`managed-clusters` в заранее созданный Secret и используйте `secret.existingSecret`.
+Флаги `-hub-url` / `-hub-sync-interval` чарт рендерит из `spoke.hub.url` /
+`spoke.hub.syncInterval` — в Secret их нет.
 
 Секреты не логируются и никогда не возвращаются API. Единственный секрет в
 values релиза Helm — тот, что передан через `--set`; для production
@@ -250,14 +265,90 @@ curl -fsS -H "Authorization: Bearer <cluster-token>" \
 
 ## 7. Добавление spoke-кластера
 
-Spoke — отдельный релиз того же чарта с `spoke.enabled=true`. Разверните его в
-кластере, которым он управляет (или в общем кластере), затем направьте на него
-hub через `hub.remoteClusters`. Готовый шаблон такого релиза —
+Spoke — отдельный релиз того же чарта с `spoke.enabled=true` в кластере, которым он
+управляет. Подключить его к hub'у можно двумя способами, и оба дают в UI кластер с
+ролью `remote`:
+
+| Режим | Кто кому ходит | Регистрация на hub'е | Когда использовать |
+| --- | --- | --- | --- |
+| **outbound** (рекомендуется для NAT/без ingress) | spoke → hub ingress; spoke держит канал и пушит состояние | `hub.managedClusters="name=token"` | hub не может достучаться до кластера: нужен только исходящий HTTPS из управляемого кластера на 443 |
+| **direct** | hub → spoke по HTTP | `hub.remoteClusters="name=url=token"` | hub и spoke в одной сети, либо в управляемом кластере опубликован ingress/Internal LoadBalancer |
+
+Готовый шаблон ведомого релиза —
 [deploy/values/managed-cluster.yaml](../deploy/values/managed-cluster.yaml): hub и ingress
-там выключены, включены spoke и агенты.
+там выключены, включены spoke и агенты, outbound задан через `spoke.hub.*`.
+
+### 7.1 Outbound: spoke сам подключается к hub
+
+Ничего не публикуйте в управляемом кластере: ingress и внешний Service не нужны.
+Обязательны исходящий доступ (DNS + TCP 443) до хоста hub'а и `spoke.replicaCount=1`
+(очередь команд hub'а рассчитана на одну реплику spoke).
 
 ```bash
-# 1. Deploy the spoke in cluster "kz".
+# 1. Deploy the spoke in cluster "kz" in outbound mode.
+helm upgrade --install prepuller-spoke deploy/helm/image-prepuller \
+  --namespace prepuller --create-namespace --kube-context kz \
+  --set image.repository=registry.example.com/ops/image-prepuller \
+  --set image.tag=sha-1a2b3c4d5e6f \
+  --set spoke.enabled=true \
+  --set spoke.clusterName=talos-prod-kz \
+  --set spoke.hub.enabled=true \
+  --set spoke.hub.url=https://prepuller.example.com \
+  --set spoke.hub.syncInterval=3s \
+  --set spoke.replicaCount=1 \
+  --set secret.create=true
+
+# 2. Read the generated cluster token in the managed cluster. It is the token the
+#    hub will expect for this cluster; keep it secret.
+TOKEN="$(kubectl --context kz -n prepuller get secret prepuller-spoke-image-prepuller-secret \
+  -o jsonpath='{.data.cluster-token}' | base64 -d)"
+
+# 3. Register the cluster on the hub. hub.managedClusters format is name=token,
+#    comma-separated for several clusters.
+helm upgrade prepuller deploy/helm/image-prepuller \
+  --namespace prepuller --reuse-values \
+  --set "hub.managedClusters=talos-prod-kz=${TOKEN}"
+```
+
+В production не передавайте токен через `--set` в истории релиза: положите строку
+`managed-clusters` в заранее созданный Secret и задайте
+`secret.create=false` + `secret.existingSecret=<name>` (ключ читается с
+`optional: true`, так что hub без этого ключа просто не примет outbound-кластеры).
+
+Проверка:
+
+```bash
+# hub: кластер зарегистрирован и принял состояние
+kubectl -n prepuller logs deploy/prepuller-image-prepuller | grep 'talos-prod-kz'
+#   managed cluster "talos-prod-kz" registered for the outbound spoke channel ...
+curl -fsS -b /tmp/cookies http://127.0.0.1:8080/api/v1/clusters | jq \
+  '.clusters[] | select(.id=="talos-prod-kz")'
+#   -> {"role":"remote","endpoint":"outbound",...}
+
+# spoke: канал поднялся
+kubectl --context kz -n prepuller logs deploy/prepuller-spoke-image-prepuller-spoke \
+  | grep -E 'OUTBOUND MODE|outbound channel'
+#   spoke OUTBOUND MODE: dialing hub https://prepuller.example.com as cluster "talos-prod-kz" ...
+
+# hub metrics: кластер онлайн, снапшот не partial и есть отметка последнего синка
+curl -fsS http://127.0.0.1:9090/metrics | grep 'prepuller_cluster_up{cluster="talos-prod-kz"'
+curl -fsS http://127.0.0.1:9090/metrics | grep 'prepuller_cluster_sync_partial{cluster="talos-prod-kz"'
+curl -fsS http://127.0.0.1:9090/metrics | grep 'prepuller_cluster_last_sync_timestamp_seconds{cluster="talos-prod-kz"'
+```
+
+Hub сохраняет порядок регистрации; первый зарегистрированный кластер — кластер по
+умолчанию в UI. В mock-режиме (`hub.mock=true`) дополнительно регистрируются три
+демо-кластера, а outbound-канал продолжает работать: локальную связку удобно проверять
+spoke'ом с `-hub-url=http://localhost:8080`.
+
+### 7.2 Direct: hub ходит в spoke по HTTP
+
+Этот вариант требует сетевого маршрута hub → spoke. Разверните spoke (без
+`spoke.hub.*`) и опубликуйте его через Ingress или Internal LoadBalancer, затем
+зарегистрируйте URL и токен в `hub.remoteClusters`:
+
+```bash
+# 1. Deploy the spoke in cluster "kz" (direct mode: no -hub-url).
 helm upgrade --install prepuller-spoke deploy/helm/image-prepuller \
   --namespace prepuller --create-namespace --kube-context kz \
   --set image.repository=registry.example.com/ops/image-prepuller \
@@ -274,13 +365,14 @@ TOKEN="$(kubectl --context kz -n prepuller get secret prepuller-spoke-image-prep
 #    register it on the hub. Use the hub release's hub.remoteClusters value:
 helm upgrade prepuller deploy/helm/image-prepuller \
   --namespace prepuller --reuse-values \
-  --set "hub.remoteClusters=talos-prod-kz=https://prepuller-spoke.kz.internal=<token>"
+  --set "hub.remoteClusters=talos-prod-kz=https://prepuller-spoke.kz.internal=${TOKEN}"
 ```
 
 `PREPULLER_REMOTE_CLUSTERS` использует записи `name=url=token`, разделённые
-запятыми. Hub сохраняет порядок регистрации; первый зарегистрированный кластер —
-кластер по умолчанию в UI. В режиме `hub.mock=true` регистрируются три фейковых
-кластера, а удалённые spoke игнорируются.
+запятыми. В direct-режиме `PREPULLER_CLUSTER_TOKEN` можно оставить пустым (spoke
+отключит авторизацию), но публиковать такой spoke вне доверенной сети нельзя.
+Одно и то же имя нельзя регистрировать одновременно в `hub.managedClusters` и
+`hub.remoteClusters`: в реестре останется только последняя регистрация.
 
 ## 8. DaemonSet агента
 
@@ -373,6 +465,12 @@ curl -fsS -H "Authorization: Bearer <agent-token>" \
 | 401 на API UI | Сессионная cookie невалидна или авторизация настроена неверно | Перелогиньтесь; проверьте, что `PREPULLER_SESSION_SECRET` одинаков на всех репликах. |
 | Spoke отвечает 401 | Несовпадение токена между hub и spoke | Задайте один и тот же `cluster-token` с обеих сторон. |
 | Spoke недоступен, hub показывает `offline` | DNS/Ingress/NetworkPolicy перекрывают путь hub→spoke | `kubectl run curl --rm -it --image=curlimages/curl -- curl -v <spoke-url>/internal/v1/health`; проверьте DNS, хост в Ingress, TLS. |
+| Outbound-spoke в цикле получает `401` (в логах `state-push`/`command-poll`), кластер в hub `offline` | Токен не совпал или кластер не зарегистрирован: hub не знает это имя/токен | Сверьте имя из `spoke.clusterName` со списком `hub.managedClusters` и `cluster-token` релиза spoke (`PREPULLER_CLUSTER_TOKEN`); после правки Secret перезапустите поды hub и spoke. |
+| Outbound-spoke вообще не доходит до hub (нет ни 401, ни принятого state) | Нет DNS/egress/firewall до ingress'а hub'а, либо внутренний CA не в trust store | Из пода spoke: `curl -v https://<hub-ingress>/healthz`; откройте TCP 443 наружу; для внутреннего CA задайте `SSL_CERT_FILE` или положите CA в trust store образа. |
+| `helm template/upgrade` падает: `spoke.hub.enabled=true requires spoke.hub.url` | Guard в `deployment-spoke.yaml`: outbound без адреса hub'а бессмыслен | Задайте `spoke.hub.url` (хост ingress'а мастер-кластера). |
+| `helm template/upgrade` падает: `spoke.hub.enabled requires spoke.replicaCount=1` | Guard в `deployment-spoke.yaml`: очередь команд hub'а рассчитана на одну реплику spoke | Оставьте `spoke.replicaCount=1`; для HA нужно менять дизайн канала, а не чарт. |
+| Живой Pull на outbound-кластере возвращает `502`, хотя pull на spoke продолжается | Одна попытка команды в outbound-канале ограничена 5 s (как и сетевой таймаут direct-режима), а синхронный pull через node-agent может идти минутами | Это ожидаемо и совпадает с direct-режимом: результат смотрите в следующем снапшоте/`pull-tasks`, задача не потеряна. |
+| Hub отвечает `404 unknown managed cluster` на outbound-ручках | Кластер не перечислен в `PREPULLER_MANAGED_CLUSTERS` (или hub запущен без него) | Добавьте `name=token` в `hub.managedClusters` / ключ `managed-clusters` Secret и перезапустите hub. |
 | Под агента завис в `ContainerCreating`, событие `hostPath type check failed: ... is not a socket file` | `agent.criSocket` указывает на отсутствующий в этом дистрибутиве путь (k3s держит его в `/run/k3s`) | Задайте реальный сокет в `agent.criSocket` (`docker exec <node> ls -l /run/containerd/containerd.sock /run/k3s/containerd/containerd.sock`). |
 | Агент в `CrashLoopBackOff`, `agent config error` или ошибки dial к CRI | Неверный путь к сокету CRI, он не смонтирован или containerd отклоняет соединение | Проверьте `agent.criSocket` и логи агента; для смоука задайте `agent.mock=true` (in-memory образы). |
 | Hub достаёт агента из пробы `kubectl exec`, но ноды всё равно offline | Старый под hub сохранил прежний `agent-token` после смены Secret | `kubectl -n <ns> rollout restart deploy/<hub>` (или передеплой), чтобы окружение перечиталось. |
@@ -892,49 +990,71 @@ Flux, удалите HelmRelease и дайте Flux сделать prune.
 ### 14.10 Второй, ведомый кластер
 
 Ведомый кластер получает свой релиз того же чарта: без hub'а и без ingress, с
-spoke и агентами. Шаблон —
-[deploy/values/managed-cluster.yaml](../deploy/values/managed-cluster.yaml):
-
-```bash
-helm upgrade --install prepuller deploy/helm/image-prepuller \
-  --namespace prepuller --create-namespace --kube-context <managed-context> \
-  -f deploy/values/managed-cluster.yaml \
-  --set spoke.clusterName=talos-stage
-```
+spoke и агентами. Рекомендуемый режим для отдельного кластера — **outbound**: spoke сам подключается к
+ingress'у мастер-кластера и держит канал (push состояния + long-poll команд),
+поэтому входящий маршрут в ведомый кластер не нужен, только egress на 443.
+Шаблон — [deploy/values/managed-cluster.yaml](../deploy/values/managed-cluster.yaml).
 
 Что важно в этом overlay:
 
-- ```hub.enabled=false``` — никакого UI, API и ingress в ведомом кластере, и
+- `hub.enabled=false` — никакого UI, API и ingress в ведомом кластере, и
   hub-RBAC тоже не рендерится;
-- ```spoke.enabled=true``` и ```spoke.clusterName``` — имя кластера в UI и в
-  метриках, оно же попадёт в ```hub.remoteClusters```;
-- ```agent.*``` — тот же DaemonSet, что и в мастер-кластере (сокет CRI, toleration
+- `spoke.enabled=true` и `spoke.clusterName` — имя кластера в UI и в метриках;
+  оно же идёт в `hub.managedClusters` мастер-кластера;
+- `spoke.hub.enabled=true`, `spoke.hub.url=https://prepuller.example.com` (хост
+  ingress'а мастер-кластера) и `spoke.hub.syncInterval=3s` — рендерятся во флаги
+  `-hub-url` / `-hub-sync-interval`;
+- `spoke.replicaCount=1` — обязательно: очередь команд hub'а рассчитана на одну
+  реплику spoke, при `>1` чарт падает на рендере;
+- `agent.*` — тот же DaemonSet, что и в мастер-кластере (сокет CRI, toleration
   control-plane, метрики на :9444).
 
-Дальше свяжите кластеры токеном. Сделайте его фиксированным заранее
-(```secret.clusterToken```) или прочитайте сгенерированный:
+Порядок раскатки:
 
-```bash
-TOKEN="$(kubectl --context <managed-context> -n prepuller get secret \
-  prepuller-image-prepuller-secret -o jsonpath='{.data.cluster-token}' | base64 -d)"
+1. **Egress.** Разрешите из ведомого кластера DNS и TCP 443 до хоста ingress'а
+   мастер-кластера. Если у hub'а внутренний CA, положите его в trust store образа
+   или задайте `SSL_CERT_FILE=/path/to/ca.pem` (Go учитывает эту переменную);
+   отдельного флага для CA нет.
+2. **Установите ведомый** (outbound уже включён в overlay):
+   ```bash
+   helm upgrade --install prepuller deploy/helm/image-prepuller \
+     --namespace prepuller --create-namespace --kube-context <managed-context> \
+     -f deploy/values/managed-cluster.yaml \
+     --set spoke.clusterName=talos-stage \
+     --set spoke.hub.url=https://prepuller.example.com
+   ```
+3. **Прочитайте cluster-token** ведомого релиза (или задайте его заранее через
+   `secret.clusterToken`, чтобы GitOps не читал Secret обратно):
+   ```bash
+   TOKEN="$(kubectl --context <managed-context> -n prepuller get secret \
+     prepuller-image-prepuller-secret -o jsonpath='{.data.cluster-token}' | base64 -d)"
+   ```
+4. **Зарегистрируйте ведомый на hub'е** в `hub.managedClusters` (формат
+   `name=token`; в `deploy/values/hub-cluster.yaml` уже стоит placeholder):
+   ```bash
+   helm upgrade prepuller deploy/helm/image-prepuller --namespace prepuller \
+     -f deploy/values/hub-cluster.yaml --reuse-values \
+     --set "hub.managedClusters=talos-stage=${TOKEN}"
+   ```
+   В production положите эту строку в Secret под ключом `managed-clusters` и
+   используйте `secret.existingSecret` — токен не попадёт в историю Helm.
+5. **Проверьте** канал (см. чеклист ниже).
 
-# на мастер-кластере: зарегистрировать ведомый в hub
-helm upgrade prepuller deploy/helm/image-prepuller --namespace prepuller \
-  -f deploy/values/hub-cluster.yaml --reuse-values \
-  --set "hub.remoteClusters=talos-stage=http://prepuller-image-prepuller-spoke.prepuller.svc:8081=${TOKEN}"
-```
+Проверка и диагностика:
 
-Spoke ходит по HTTP внутри кластера; если hub не может достучаться до
-cluster-internal Service, опубликуйте spoke через Internal LoadBalancer или
-Ingress с TLS и подставьте этот адрес в ```hub.remoteClusters```.
+| Что проверить | Команда / признак | Вывод |
+| --- | --- | --- |
+| Канал поднялся на spoke | `kubectl --context <managed-context> -n prepuller logs deploy/prepuller-image-prepuller-spoke \| grep OUTBOUND` | `spoke OUTBOUND MODE: dialing hub ...`; повторяющиеся `state-push`/`command-poll` ошибки — нет связи |
+| Hub зарегистрировал кластер | `kubectl -n prepuller logs deploy/prepuller-image-prepuller \| grep talos-stage` | `managed cluster "talos-stage" registered for the outbound spoke channel` |
+| Кластер виден в API | `curl -fsS -b /tmp/cookies http://127.0.0.1:8080/api/v1/clusters \| jq` | `role=remote`, `endpoint=outbound` |
+| Кластер онлайн и состояние свежее | `/metrics`: `prepuller_cluster_up{cluster="talos-stage"}`, `prepuller_cluster_sync_partial{cluster="talos-stage"}`, `prepuller_snapshot_age_seconds{cluster="talos-stage"}` | `1`, `0` и возраст порядка `syncInterval`; если `cluster_up=0` — смотрите логи spoke и hub, а также health кластера (`/api/v1/health`) |
+| 401 в логах spoke | `grep -E '401\|invalid cluster token'` | hub не знает этот кластер или токен не совпал: сверьте имя в `hub.managedClusters` и `cluster-token` релиза |
+| Состояния нет вообще | нет ни 401, ни принятого state | DNS/egress/firewall: `curl -v https://prepuller.example.com/healthz` из пода spoke |
 
-Проверка со стороны hub'а:
+Если hub не может достучаться до ведомого (общая сеть или опубликованный spoke),
+используйте direct-вариант: уберите `spoke.hub.*`, опубликуйте spoke через Internal
+LoadBalancer/Ingress и зарегистрируйте его в `hub.remoteClusters` строкой
+`talos-stage=<url>=<token>` ([§7.2](#72-direct-hub-ходит-в-spoke-по-http)).
 
-```bash
-kubectl -n prepuller logs deploy/prepuller-image-prepuller | grep -i 'talos-stage'
-curl -fsS -b /tmp/cookies http://127.0.0.1:8080/api/v1/clusters | jq
-```
-
-В UI ведомый появится вторым кластером со своей матрицей ```image × node```;
-если он недоступен, снапшот помечается ```offline```/```partial```, а не роняет
-мастер-кластер.
+В UI ведомый появится вторым кластером со своей матрицей `image × node`; если он
+недоступен, снапшот помечается `offline`/`partial`, а не роняет мастер-кластер.

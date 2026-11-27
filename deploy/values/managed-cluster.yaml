@@ -1,6 +1,7 @@
 # Overlay: MANAGED (spoke) cluster — no hub, no ingress: a headless spoke API
-# plus a node agent on every node. The master cluster's hub talks to this
-# cluster over the spoke (docs/DEPLOY.md section 14.10).
+# plus a node agent on every node. The spoke dials the master cluster's hub
+# ingress and holds that connection open (outbound/"pull" mode), so only egress
+# managed-cluster -> hub:443 is required (docs/DEPLOY.md section 14.10).
 #
 # This repository is PUBLIC: real hostnames, IPs and pinned image tags belong in
 # the private GitOps repository. Copy this file there and replace the
@@ -26,10 +27,20 @@ hub:
   enabled: false
 
 spoke:
-  # Headless backend for exactly this cluster. The name must match the entry you
-  # put into hub.remoteClusters on the master cluster.
+  # Headless backend for exactly this cluster. This cluster's name plus this
+  # release's cluster-token must be added to the hub's hub.managedClusters:
+  #   hub.managedClusters: "talos-stage=<cluster token of this release>"
   enabled: true
   clusterName: talos-stage
+  # Outbound ("pull") mode: the spoke dials the hub ingress and holds the
+  # connection open. No ingress is needed on this cluster and no inbound route
+  # from the hub; only egress from this cluster to the hub host on 443.
+  # Replace the URL with the hub ingress host (hub.ingress.hosts[0].host).
+  hub:
+    enabled: true
+    url: https://prepuller.example.com
+  # Exactly one replica in outbound mode: the hub command queue assumes a single
+  # spoke replica.
   replicaCount: 1
   mock: false
   service:
@@ -38,8 +49,8 @@ spoke:
     metricsPort: 9091
 
 secret:
-  # Bearer token the hub uses to call this spoke (PREPULLER_CLUSTER_TOKEN on the
-  # spoke, token in hub.remoteClusters on the master). Empty -> random on
+  # Cluster token of this spoke (PREPULLER_CLUSTER_TOKEN). The hub's
+  # hub.managedClusters entry must carry it in outbound mode. Empty -> random on
   # install; then read it and paste it into the master overlay:
   #   kubectl -n prepuller get secret prepuller-image-prepuller-secret \
   #     -o jsonpath='{.data.cluster-token}' | base64 -d
@@ -80,3 +91,8 @@ agent:
 
 # No hub here, so no hub ServiceMonitor; the spoke has its own /metrics if you
 # need cluster-level series from this side (not chart-managed today).
+#
+# Direct ("push") mode note: hub.remoteClusters with the in-cluster Service DNS
+# (http://<release>-image-prepuller-spoke.<namespace>.svc:8081) only works when
+# the hub shares this cluster's network, i.e. for a spoke in the same cluster.
+# A separate managed cluster is registered in hub.managedClusters (outbound).

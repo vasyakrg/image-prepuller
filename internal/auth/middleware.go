@@ -79,3 +79,30 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
+
+// SpokeTokenLookup returns the registered cluster token for a managed cluster.
+// It reports false when the cluster is not registered; an empty token never
+// authenticates.
+type SpokeTokenLookup func(cluster string) (string, bool)
+
+// RequireSpokeToken authenticates a managed-cluster request of the outbound
+// spoke channel by the Bearer token registered for the cluster in the {cluster}
+// path wildcard. Unlike RequireToken, an empty token never disables the check:
+// the hub only ever accepts spokes it was configured with. Comparison is
+// constant time.
+func RequireSpokeToken(lookup SpokeTokenLookup, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cluster := r.PathValue("cluster")
+		want, ok := lookup(cluster)
+		if !ok || want == "" {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown managed cluster"})
+			return
+		}
+		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if got == "" || subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid cluster token"})
+			return
+		}
+		next(w, r)
+	}
+}

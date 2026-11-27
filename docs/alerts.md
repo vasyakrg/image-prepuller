@@ -94,11 +94,23 @@ job'а придётся задать самому.
 | `prepuller_cluster_up == 0`, но агенты healthy (`prepuller_agent_up == 1`) | сломан канал hub ↔ spoke (или API кластера) | `/internal/v1/*`, сеть до spoke, токен кластера |
 | `prepuller_agent_up == 1`, но `prepuller_agent_last_contact_timestamp_seconds{endpoint="snapshot"}` старый | агент жив, hub перестал к нему ходить | hub: рестарты, логи, ошибки снапшота |
 | `prepuller_agent_cri_up == 0` при `prepuller_agent_up == 1` | процесс жив, CRI сломан | сокет/containerd на ноде |
+| `prepuller_cluster_up{cluster=X} == 0` для outbound-кластера (X в `hub.managedClusters`), при этом агенты в X живы | spoke в X перестал пушить состояние: нет egress до hub, сменился токен, hub потерял сессию после рестарта | логи пода spoke (`spoke outbound channel: state-push/command-poll`), 401 на hub, DNS/egress 443 до hub ingress, совпадение кластерного токена с `hub.managedClusters` |
 
 `prepuller_node_last_seen_timestamp_seconds{cluster,node}` (последний успешный
 контакт hub → агент по ноде) удобно накладывать на
 `prepuller_agent_last_contact_timestamp_seconds`: расхождение направлений
 показывает, кто именно перестал видеть другого.
+
+Для кластеров в **outbound-режиме** (`-hub-url` на spoke +
+`hub.managedClusters` на hub) направление обратное: соединение открывает spoke,
+а hub лишь отдаёт UI и метрикам последнее присланное состояние. Поэтому
+«hub ослеп» здесь означает «spoke перестал пушить»: свежесть данных равна
+`-hub-sync-interval` (3 s по умолчанию, плюс TTL провайдера 2 s), а молчание
+дольше `max(3*syncInterval, 10 s)` переводит кластер в offline
+(`prepuller_cluster_up == 0`, `prepuller_snapshot_age_seconds` растёт,
+`PullCounters` пустеет). Правила `PrepullerClusterDown` и
+`PrepullerSnapshotStale` работают без изменений; отдельного правила «spoke
+давно не выходил на связь» не нужно — это те же серии.
 
 ## 4. Как включить
 

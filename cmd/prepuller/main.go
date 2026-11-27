@@ -17,6 +17,7 @@ import (
 	"github.com/local/image-prepuller/internal/metrics"
 	"github.com/local/image-prepuller/internal/provider"
 	"github.com/local/image-prepuller/internal/reconcile"
+	"github.com/local/image-prepuller/internal/spokeclient"
 	"github.com/local/image-prepuller/internal/web"
 )
 
@@ -45,6 +46,8 @@ func runController(args []string) {
 	mockMode := fs.Bool("mock", false, "Run with interactive in-memory mock data (no Kubernetes required)")
 	clusterName := fs.String("cluster-name", "talos-prod-eu", "Local cluster name")
 	autoWarm := fs.Bool("auto-warm", false, "Enable the auto-pull reconciler for local clusters (Stage 2/3)")
+	hubURL := fs.String("hub-url", os.Getenv("PREPULLER_HUB_URL"), "Spoke only: hub base URL (usually the hub ingress). Set it to run the spoke in outbound mode, where the spoke dials the hub instead of being reachable from it")
+	hubSync := fs.Duration("hub-sync-interval", hubSyncIntervalFromEnv(), "Spoke only: how often the outbound spoke pushes cluster state to the hub")
 	_ = fs.Parse(args)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -67,8 +70,31 @@ func runController(args []string) {
 		}
 		reg.Register(provider.ClusterEntry{ID: *clusterName, Name: *clusterName, Role: "local", Provider: localProv})
 		token := os.Getenv("PREPULLER_CLUSTER_TOKEN")
+		spokeHandler := web.NewSpokeServer(localProv, token)
+
+		// Outbound mode: the hub cannot reach this cluster (NAT, no ingress
+		// here), so the spoke dials the hub and keeps the channel open. The
+		// local listener stays for probes and metrics only.
+		if target := strings.TrimSpace(*hubURL); target != "" {
+			client, err := spokeclient.New(spokeclient.Config{
+				HubURL:       target,
+				Cluster:      *clusterName,
+				Token:        token,
+				Handler:      spokeHandler,
+				Provider:     localProv,
+				SyncInterval: *hubSync,
+			})
+			if err != nil {
+				log.Fatalf("outbound spoke channel: %v", err)
+			}
+			go client.Run(ctx)
+			log.Printf("spoke OUTBOUND MODE: dialing hub %s as cluster %q, state every %s (no inbound route to this cluster is needed)", target, *clusterName, *hubSync)
+		} else {
+			log.Printf("spoke DIRECT MODE: the hub must be able to reach this cluster's API over HTTP")
+		}
+
 		log.Printf("starting prepuller SPOKE (headless) cluster=%s on %s", *clusterName, *httpAddr)
-		serve(ctx, *httpAddr, *metricsAddr, web.NewSpokeServer(localProv, token), metrics.Handler(reg))
+		serve(ctx, *httpAddr, *metricsAddr, spokeHandler, metrics.Handler(reg))
 		return
 	}
 
@@ -133,7 +159,36 @@ func runController(args []string) {
 		}
 	}
 
-	webSrv, err := web.NewServer(reg, authMgr)
+	// Managed clusters that connect outbound: the hub accepts their state and
+	// hands out commands instead of calling them over HTTP.
+	var serverOpts []web.Option
+	if raw := strings.TrimSpace(os.Getenv("PREPULLER_MANAGED_CLUSTERS")); raw != "" {
+		clusters, err := parseManagedClusters(raw)
+		if err != nil {
+			log.Fatalf("PREPULLER_MANAGED_CLUSTERS: %v", err)
+		}
+		pushHub := provider.NewSpokeHub(provider.SpokeHubConfig{})
+		for _, cluster := range clusters {
+			if err := pushHub.AddCluster(cluster.name, cluster.token); err != nil {
+				log.Fatalf("PREPULLER_MANAGED_CLUSTERS: %v", err)
+			}
+			managed, err := pushHub.Provider(cluster.name)
+			if err != nil {
+				log.Fatalf("PREPULLER_MANAGED_CLUSTERS: %v", err)
+			}
+			reg.Register(provider.ClusterEntry{
+				ID:       cluster.name,
+				Name:     cluster.name,
+				Role:     "remote",
+				Endpoint: "outbound",
+				Provider: managed,
+			})
+			log.Printf("managed cluster %q registered for the outbound spoke channel (it dials this hub)", cluster.name)
+		}
+		serverOpts = append(serverOpts, web.WithSpokeHub(pushHub))
+	}
+
+	webSrv, err := web.NewServer(reg, authMgr, serverOpts...)
 	if err != nil {
 		log.Fatalf("init web server: %v", err)
 	}
@@ -193,4 +248,58 @@ func serve(ctx context.Context, httpAddr, metricsAddr string, mainHandler, metri
 	defer cancel()
 	_ = uiHTTP.Shutdown(shutdownCtx)
 	_ = metricsHTTP.Shutdown(shutdownCtx)
+}
+
+// hubSyncIntervalFromEnv resolves the outbound state-push interval: the
+// PREPULLER_HUB_SYNC_INTERVAL env var wins over the built-in default.
+func hubSyncIntervalFromEnv() time.Duration {
+	const fallback = 3 * time.Second
+	raw := strings.TrimSpace(os.Getenv("PREPULLER_HUB_SYNC_INTERVAL"))
+	if raw == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		log.Printf("PREPULLER_HUB_SYNC_INTERVAL=%q is not a positive duration, using %s", raw, fallback)
+		return fallback
+	}
+	return d
+}
+
+// managedCluster is one entry of PREPULLER_MANAGED_CLUSTERS.
+type managedCluster struct {
+	name  string
+	token string
+}
+
+// parseManagedClusters parses "name=token,name2=token2": the managed clusters
+// whose spokes dial this hub outbound. Each token is the cluster token of that
+// spoke release (PREPULLER_CLUSTER_TOKEN).
+func parseManagedClusters(raw string) ([]managedCluster, error) {
+	var out []managedCluster
+	seen := make(map[string]bool)
+	for _, item := range strings.Split(raw, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		parts := strings.SplitN(item, "=", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("entry %q: expected name=token", item)
+		}
+		name := strings.TrimSpace(parts[0])
+		token := strings.TrimSpace(parts[1])
+		if name == "" || token == "" {
+			return nil, fmt.Errorf("entry %q: name and token are required", item)
+		}
+		if seen[name] {
+			return nil, fmt.Errorf("cluster %q is listed twice", name)
+		}
+		seen[name] = true
+		out = append(out, managedCluster{name: name, token: token})
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no name=token entries")
+	}
+	return out, nil
 }

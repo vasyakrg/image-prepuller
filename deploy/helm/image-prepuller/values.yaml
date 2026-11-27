@@ -59,7 +59,8 @@ securityContext:
 # install (retrieve with `kubectl get secret ... -o jsonpath ...`).
 # In production, set secret.existingSecret to a pre-created Secret that has the
 # same keys (auth-user, auth-pass, session-secret, cluster-token, agent-token)
-# and set create: false.
+# and set create: false. A hub release additionally reads the optional
+# "managed-clusters" key (PREPULLER_MANAGED_CLUSTERS, outbound mode).
 secret:
   create: true
   existingSecret: ""
@@ -102,10 +103,17 @@ hub:
   # Secure cookie attribute. Keep true behind TLS ingress; set false only for
   # plain-HTTP local development.
   cookieSecure: true
-  # Optional extra spokes, PREPULLER_REMOTE_CLUSTERS format:
-  # "name=url=token,name2=url2=token2". Prefer remoteClusters for the hub to
-  # reach spoke releases deployed in other clusters.
+  # Direct ("push") mode: extra spokes in PREPULLER_REMOTE_CLUSTERS format
+  # "name=url=token,name2=url2=token2". The hub calls each spoke URL itself, so
+  # the hub must be able to reach it (same network, or a route into the managed
+  # cluster). Use it for spokes the hub can reach directly.
   remoteClusters: ""
+  # Outbound ("pull") mode. Map of managed cluster name -> its cluster token,
+  # rendered as PREPULLER_MANAGED_CLUSTERS ("name=token,name2=token2"). A spoke
+  # started with -hub-url registers here; it dials this hub's ingress, so no
+  # inbound route into the managed cluster is needed. Prefer a pre-created
+  # secret.existingSecret with the same "managed-clusters" key in production.
+  managedClusters: ""
   service:
     type: ClusterIP
     httpPort: 8080
@@ -167,6 +175,16 @@ spoke:
   mock: true
   clusterName: talos-prod-kz
   replicaCount: 1
+  # Outbound ("pull") mode: the spoke dials the hub ingress instead of being
+  # exposed on the managed cluster's DNS. Required when the hub cannot reach
+  # the managed cluster (NAT, no ingress there). replicaCount must stay 1 in
+  # this mode: the command queue assumes a single spoke replica.
+  hub:
+    enabled: false
+    # Hub base URL, e.g. https://prepuller.example.com (hub.ingress host).
+    url: ""
+    # How often the spoke pushes cluster state to the hub.
+    syncInterval: 3s
   service:
     type: ClusterIP
     httpPort: 8081
