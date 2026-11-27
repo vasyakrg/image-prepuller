@@ -271,3 +271,22 @@ type Snapshot struct {
 	Activity    []PullEvent `json:"activity"`
 	Tasks       []PullTask  `json:"tasks,omitempty"`
 }
+
+// Normalize replaces nil collections with empty ones. The wire contract declares
+// workloads, nodes, activity and tasks as arrays; a provider that had nothing to
+// list (for example no workload matches the label selector) would otherwise
+// marshal them as null and the UI would crash on .map of null.
+func (s *Snapshot) Normalize() {
+	if s.Workloads == nil {
+		s.Workloads = []Workload{}
+	}
+	if s.Nodes == nil {
+		s.Nodes = []NodeInfo{}
+	}
+	if s.Activity == nil {
+		s.Activity = []PullEvent{}
+	}
+	if s.Tasks == nil {
+		s.Tasks = []PullTask{}
+	}
+}

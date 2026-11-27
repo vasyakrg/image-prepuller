@@ -111,6 +111,14 @@
 
 ### Fixed
 
+- **UI больше не падает с «can't access property "map", snap.workloads is null»,
+  когда в области действия нет workload'ов.** Контракт обещает массивы, а пустой Go-слайс
+  сериализовался как `null` (типичный сценарий — чарт 0.6.0 с `prepull=true` и ни одной
+  помеченной workload'ы). `model.Snapshot.Normalize()` заполняет `workloads`/`nodes`/
+  `activity`/`tasks` пустыми массивами в провайдерах (K8s, mock, remote/push, offline) и
+  на обеих HTTP-границах (hub `/api/v1/snapshot`, `/api/v1/pull-tasks`, spoke
+  `/internal/v1/snapshot`); UI дополнительно страхуется `|| []` и вместо пустой таблицы
+  подсказывает проверить метку `-workload-selector`.
 - Pull в недоступный реестр больше не держит слот image×node до 10 минут. Node-agent
   перед pull делает TCP-пробу реестра (`-registry-probe-timeout`, 5 s) и отдаёт
   `502 registry unreachable` за секунды, а зависший посреди загрузки pull отменяет

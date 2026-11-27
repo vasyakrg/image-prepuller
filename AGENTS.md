@@ -352,6 +352,12 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
   вне области не существует ни workload'ов, ни слотов: не показывать «на всякий случай»
   нельзя, их просто нет в снапшоте. Метка ставится на объект workload'а (Deployment/STS/DS),
   не на pod template. `MockProvider` демо-данные не фильтрует — это только UI-режим.
+  Пустая область — это **пустые массивы, а не `null`**: `model.Snapshot.Normalize()`
+  вызывается в провайдерах и на HTTP-границах (hub и spoke), потому что UI делает
+  `.map`/`.length` по `workloads`/`nodes` и падает на `null`. Новый провайдер или
+  новый сериализатор снапшота обязан сохранить это свойство (тесты
+  `TestSnapshotNormalizeJSON`, `TestK8sProviderEmptyScopeKeepsArrays`,
+  `TestSnapshotHandlerEmitsArrays`).
 - **Чарт 0.6.0: `hub.workloadSelector`/`spoke.workloadSelector` по умолчанию `prepull=true`.**
   Это поведенческое (ломающее) изменение: без метки workload'ы не видны и не прогреваются.
   Снять ограничение — `--set hub.workloadSelector=`. Overlay'и дополнительно ставят

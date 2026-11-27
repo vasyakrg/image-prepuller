@@ -377,13 +377,15 @@ func (p *RemoteProvider) Snapshot(ctx context.Context) model.Snapshot {
 // an empty snapshot marked offline and partial, never an error (Provider cannot
 // return one).
 func offlineSnapshot(cluster string) model.Snapshot {
-	return model.Snapshot{
+	snap := model.Snapshot{
 		ClusterName: cluster,
 		APIVersion:  model.APIVersion,
 		UpdatedAt:   time.Now(),
 		SyncStatus:  model.SyncOffline,
 		Partial:     true,
 	}
+	snap.Normalize()
+	return snap
 }
 
 // normalizeSnapshot fills the fields a spoke or state push may omit, so the UI
@@ -398,6 +400,7 @@ func normalizeSnapshot(cluster string, snap *model.Snapshot) {
 	if snap.SyncStatus == "" {
 		snap.SyncStatus = model.SyncUnknown
 	}
+	snap.Normalize()
 }
 
 func (p *RemoteProvider) TriggerPull(ctx context.Context, req model.PullRequest) (model.PullTask, error) {

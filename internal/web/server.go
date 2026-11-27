@@ -142,7 +142,9 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request, _ string
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "cluster not found"})
 		return
 	}
-	writeJSON(w, http.StatusOK, entry.Provider.Snapshot(r.Context()))
+	snap := entry.Provider.Snapshot(r.Context())
+	snap.Normalize()
+	writeJSON(w, http.StatusOK, snap)
 }
 
 func (s *Server) handleManualPull(w http.ResponseWriter, r *http.Request, user string) {
@@ -228,6 +230,7 @@ func (s *Server) handlePullTasks(w http.ResponseWriter, r *http.Request, _ strin
 		return
 	}
 	snap := entry.Provider.Snapshot(r.Context())
+	snap.Normalize()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"cluster": entry.ID,
 		"tasks":   snap.Tasks,

@@ -141,7 +141,14 @@
       }
       renderClusterSelect();
       const qs = state.activeCluster ? `?cluster=${encodeURIComponent(state.activeCluster)}` : "";
-      state.snapshot = await api(`/api/v1/snapshot${qs}`);
+      const snap = await api(`/api/v1/snapshot${qs}`);
+      // An older spoke (or a provider with nothing to list) may send null where
+      // the contract promises an array; the render code below relies on arrays.
+      snap.workloads = snap.workloads || [];
+      snap.nodes = snap.nodes || [];
+      snap.tasks = snap.tasks || [];
+      snap.activity = snap.activity || [];
+      state.snapshot = snap;
       render();
       if (state.nodeDetail) await refreshNodeDetail();
     } catch (err) {
@@ -223,7 +230,10 @@
 
     const tbody = $("workloads-tbody");
     if (filtered.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="6" class="muted" style="text-align:center;padding:28px">Нет сервисов по выбранным фильтрам</td></tr>';
+      const empty = snap.workloads.length === 0
+        ? "В области действия нет workload'ов. Проверьте, что объекты (Deployment/StatefulSet/DaemonSet) помечены меткой из -workload-selector (в чарте по умолчанию prepull=true)."
+        : "Нет сервисов по выбранным фильтрам";
+      tbody.innerHTML = `<tr><td colspan="6" class="muted" style="text-align:center;padding:28px">${esc(empty)}</td></tr>`;
       return;
     }
 

@@ -53,7 +53,9 @@ func NewSpokeServer(p provider.Provider, clusterToken string) http.Handler {
 	}
 
 	mux.HandleFunc("GET /internal/v1/snapshot", requireToken(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, p.Snapshot(r.Context()))
+		snap := p.Snapshot(r.Context())
+		snap.Normalize()
+		writeJSON(w, http.StatusOK, snap)
 	}))
 
 	mux.HandleFunc("POST /internal/v1/pull", requireToken(func(w http.ResponseWriter, r *http.Request) {

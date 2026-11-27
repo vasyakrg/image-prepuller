@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync/atomic"
@@ -649,5 +650,39 @@ func TestNewK8sProviderValidation(t *testing.T) {
 	}
 	if _, err := NewK8sProvider("", &rest.Config{Host: "https://127.0.0.1:6443"}); err != nil {
 		t.Fatalf("empty cluster id must fall back to a default: %v", err)
+	}
+}
+
+// A selector that matches nothing must still produce arrays, not nil: the JSON
+// contract says arrays and the UI calls .map on them (regression: snap.workloads
+// was null and the whole page failed to render).
+func TestK8sProviderEmptyScopeKeepsArrays(t *testing.T) {
+	cs := kubefake.NewSimpleClientset(
+		testNode("worker-01", true),
+		testDeployment("prod", "api", 1,
+			[]corev1.Container{testContainer("app", "acme/api:1.0.0", corev1.PullIfNotPresent)}, nil),
+	)
+	p := newTestProvider(cs, map[string]NodeInventory{}, WithLabelSelector("prepull=true"))
+
+	snap := p.Snapshot(context.Background())
+	if snap.Workloads == nil {
+		t.Fatal("workloads is nil, want an empty slice")
+	}
+	if len(snap.Workloads) != 0 {
+		t.Fatalf("workloads = %d, want 0 (nothing carries the label)", len(snap.Workloads))
+	}
+	if snap.Nodes == nil || snap.Activity == nil || snap.Tasks == nil {
+		t.Fatalf("nil collections after normalize: nodes=%v activity=%v tasks=%v", snap.Nodes, snap.Activity, snap.Tasks)
+	}
+
+	raw, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+	if strings.Contains(string(raw), `:null`) {
+		t.Fatalf("snapshot serialised null collections: %s", raw)
+	}
+	if !strings.Contains(string(raw), `"workloads":[]`) {
+		t.Fatalf("snapshot = %s, want workloads:[]", raw)
 	}
 }

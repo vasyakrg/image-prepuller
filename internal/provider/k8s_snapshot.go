@@ -145,6 +145,7 @@ func (p *K8sProvider) buildSnapshot(ctx context.Context, now time.Time) model.Sn
 		p.lastSyncAt = now
 		snap.LastSyncAt = now
 	}
+	snap.Normalize()
 	return snap
 }
 

@@ -215,3 +215,71 @@ func TestSpokePullErrorStatuses(t *testing.T) {
 		}
 	}
 }
+
+// zeroSnapshotProvider is a cluster that has nothing to report (e.g. no workload
+// carries the scope label). The HTTP layer must still serialise arrays, because
+// the UI maps over workloads/nodes and used to crash on null.
+type zeroSnapshotProvider struct{ provider.Provider }
+
+func (zeroSnapshotProvider) Snapshot(context.Context) model.Snapshot { return model.Snapshot{} }
+
+func TestSnapshotHandlerEmitsArrays(t *testing.T) {
+	mgr, err := auth.NewManager(auth.Config{
+		Username:      "admin",
+		Password:      "pass123",
+		SessionSecret: []byte("unit-test-secret"),
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	reg := provider.NewRegistry()
+	reg.Register(provider.ClusterEntry{ID: "empty", Name: "empty", Role: "local", Provider: zeroSnapshotProvider{}})
+	srv, err := NewServer(reg, mgr)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	loginBody, _ := json.Marshal(map[string]string{"username": "admin", "password": "pass123"})
+	loginRec := httptest.NewRecorder()
+	srv.ServeHTTP(loginRec, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewReader(loginBody)))
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("login = %d", loginRec.Code)
+	}
+	cookie := loginRec.Result().Cookies()[0]
+
+	checkArrays := func(t *testing.T, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		var body map[string]json.RawMessage
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode snapshot: %v (%s)", err, rec.Body.String())
+		}
+		for _, field := range []string{"workloads", "nodes", "activity"} {
+			raw, ok := body[field]
+			if !ok {
+				t.Fatalf("%s is missing: %s", field, rec.Body.String())
+			}
+			if string(raw) == "null" {
+				t.Fatalf("%s is null, want an array: %s", field, rec.Body.String())
+			}
+			if !strings.HasPrefix(string(raw), "[") {
+				t.Fatalf("%s = %s, want an array", field, raw)
+			}
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/snapshot?cluster=empty", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("snapshot = %d", rec.Code)
+	}
+	checkArrays(t, rec)
+
+	spokeRec := httptest.NewRecorder()
+	NewSpokeServer(zeroSnapshotProvider{}, "").ServeHTTP(spokeRec, httptest.NewRequest(http.MethodGet, "/internal/v1/snapshot", nil))
+	if spokeRec.Code != http.StatusOK {
+		t.Fatalf("spoke snapshot = %d", spokeRec.Code)
+	}
+	checkArrays(t, spokeRec)
+}

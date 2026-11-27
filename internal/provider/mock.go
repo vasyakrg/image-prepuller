@@ -413,7 +413,7 @@ func (m *MockProvider) Snapshot(_ context.Context) model.Snapshot {
 		syncStatus = model.SyncDegraded
 	}
 
-	return model.Snapshot{
+	snap := model.Snapshot{
 		ClusterName: m.clusterName,
 		APIVersion:  model.APIVersion,
 		MockMode:    true,
@@ -427,6 +427,8 @@ func (m *MockProvider) Snapshot(_ context.Context) model.Snapshot {
 		Activity:    activity,
 		Tasks:       tasks,
 	}
+	snap.Normalize()
+	return snap
 }
 
 func mockConditions(n *mockNode) []model.NodeCondition {
