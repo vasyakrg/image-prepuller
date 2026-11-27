@@ -485,3 +485,61 @@ input:focus-visible {
   font-size: 12.5px;
 }
 .node-image-empty { font-size: 12px; margin-bottom: 8px; }
+
+/* Stats tab: read-only view over the optional PostgreSQL store. The placeholder
+   card carries the "collection is off" message, which is a normal operating
+   state, not an error - hence a neutral card, not an error-banner. */
+.stats-placeholder { padding: 26px 28px; margin-bottom: 16px; }
+.stats-placeholder-title { font-size: 18px; font-weight: 600; margin-bottom: 10px; }
+.stats-placeholder-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+  max-width: 820px;
+}
+.stats-placeholder-body code {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 5px;
+  color: var(--text);
+}
+.stats-section { margin-top: 22px; }
+.stats-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.stats-section-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.stats-filters { margin-bottom: 10px; }
+.stats-filters .input { min-width: 200px; }
+.stats-kpi { margin-bottom: 8px; }
+.stats-kpi .kpi-value { font-size: 22px; }
+.stats-table th, .stats-table td { padding: 8px 12px; }
+.stats-table tbody tr:hover { background: var(--hover); }
+.stats-img {
+  display: block;
+  max-width: 360px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.stats-nowrap { white-space: nowrap; }
+.stats-pill-tiny { padding: 0 6px; font-size: 10.5px; }
+.stats-pct-amber { color: var(--amber); font-weight: 600; }
+.stats-pct-red { color: var(--red); font-weight: 600; }
+.stats-section .error-banner { margin-bottom: 10px; }
+

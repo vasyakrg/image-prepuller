@@ -44,6 +44,28 @@ type Store interface {
 	Close() error
 }
 
+// Querier is the read side of the statistics database, used by the hub UI
+// (internal/web stays stdlib-only and talks to this interface through its own
+// StatsSource port). postgresStore implements both Store and Querier; the
+// service keeps them apart so the writer path cannot accidentally depend on the
+// reader and tests can fake either side.
+type Querier interface {
+	// Ping reports whether the database answers right now.
+	Ping(context.Context) error
+	// Overview returns the aggregate header of the statistics tab.
+	Overview(context.Context, time.Duration) (model.StatsOverview, error)
+	// Nodes returns the newest sample of every known node.
+	Nodes(context.Context) ([]model.StatsNodeSample, error)
+	// Images returns one page of image presence intervals.
+	Images(context.Context, model.StatsImageQuery) (model.StatsImagePage, error)
+	// GCEvents returns one page of image-collector events.
+	GCEvents(context.Context, model.StatsEventQuery) (model.StatsGCPage, error)
+	// Repulls returns one page of re-pulls after a collector removal.
+	Repulls(context.Context, model.StatsEventQuery) (model.StatsRepullPage, error)
+	// Tasks returns one page of the pull-task log.
+	Tasks(context.Context, model.StatsTaskQuery) (model.StatsTaskPage, error)
+}
+
 // Batch is one collector step for one cluster. The zero value is a valid empty
 // batch (Apply still runs the idempotent DDL).
 type Batch struct {

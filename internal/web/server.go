@@ -25,6 +25,7 @@ type Server struct {
 	auth     *auth.Manager
 	spokeHub *provider.SpokeHub
 	history  *tasks.Store
+	stats    StatsSource
 	mux      *http.ServeMux
 }
 
@@ -87,6 +88,17 @@ func NewServer(reg *provider.Registry, a *auth.Manager, opts ...Option) (*Server
 
 	// Operator-only feed of the recent security audit events.
 	s.mux.HandleFunc("GET /api/v1/audit", auth.RequireOperator(s.auth)(s.handleAudit))
+
+	// Read-only statistics tab over the optional PostgreSQL pipeline (ADR-002).
+	// Authenticated like every other hub endpoint; a disabled pipeline answers the
+	// tab's "administrator disabled it" state from /stats/status instead of data.
+	s.mux.HandleFunc("GET /api/v1/stats/status", auth.RequireAuth(s.auth, s.handleStatsStatus))
+	s.mux.HandleFunc("GET /api/v1/stats/overview", auth.RequireAuth(s.auth, s.handleStatsOverview))
+	s.mux.HandleFunc("GET /api/v1/stats/nodes", auth.RequireAuth(s.auth, s.handleStatsNodes))
+	s.mux.HandleFunc("GET /api/v1/stats/images", auth.RequireAuth(s.auth, s.handleStatsImages))
+	s.mux.HandleFunc("GET /api/v1/stats/gc", auth.RequireAuth(s.auth, s.handleStatsGCEvents))
+	s.mux.HandleFunc("GET /api/v1/stats/repulls", auth.RequireAuth(s.auth, s.handleStatsRepulls))
+	s.mux.HandleFunc("GET /api/v1/stats/tasks", auth.RequireAuth(s.auth, s.handleStatsTasks))
 
 	// Inbound endpoints of managed clusters that connect outbound (optional).
 	s.registerSpokeHubRoutes()

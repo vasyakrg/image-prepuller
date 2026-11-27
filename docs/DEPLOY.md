@@ -1194,7 +1194,7 @@ PostgreSQL. По умолчанию **выключено** и на работу 
    ```
 
 4. Проверка: в логе hub'а `statistics: writing to PostgreSQL every 30s, retention 2160h`,
-   а в базе появляются строки:
+   в UI появляется вкладка **Stats** (см. ниже), а в базе появляются строки:
 
    ```bash
    kubectl -n prepuller logs deploy/prepuller-image-prepuller | grep statistics
@@ -1202,6 +1202,17 @@ PostgreSQL. По умолчанию **выключено** и на работу 
    psql "$DSN" -c 'select node, occurred_at, removed_count, removed_bytes from prepuller_gc_events order by occurred_at desc limit 10;'
    psql "$DSN" -c 'select image, removed_at, finished_at, lag_seconds from prepuller_repulls order by finished_at desc limit 10;'
    ```
+
+5. Вкладка **Stats** в UI hub'а — читать статистику без SQL. Внутри: окно
+   (`1h`/`6h`/`24h`/`7d`/`30d`/`90d`), фильтр по кластеру, KPI (ноды, образы в кэше,
+   GC, перепулы, задачи) и таблицы «Ноды (последний срез)», «Присутствие образов»,
+   «События сборщика (GC)», «Перепулы», «Лог pull-задач» с пагинацией и фильтрами.
+   Проверка:
+   `curl -b /tmp/pc 'localhost:8080/api/v1/stats/status' | jq` (`enabled:true, ok:true`),
+   `curl -b /tmp/pc 'localhost:8080/api/v1/stats/overview?window=24h' | jq '.nodes, .openImages, .tasks'`.
+   Если `hub.stats.enabled=false` (нет DSN), вкладка честно пишет «Сбор статистики
+   выключен администратором» — это ожидаемо, а не ошибка деплоя; если база недоступна —
+   баннер «База статистики недоступна» с кнопкой «Повторить».
 
 Таблицы (`prepuller_image_presence`, `prepuller_gc_events`, `prepuller_repulls`,
 `prepuller_tasks`, `prepuller_node_samples`) и готовые SQL-запросы — в

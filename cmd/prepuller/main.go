@@ -238,13 +238,16 @@ func runController(args []string) {
 
 	// Optional PostgreSQL statistics pipeline: image lifetimes on nodes, the
 	// image collector's cleanups, re-pull frequency/lag and the pull-task log.
-	// Disabled without a DSN; the hub never blocks on it (best effort).
-	startStatistics(ctx, reg, *statsDSN, stats.Config{
+	// Disabled without a DSN; the hub never blocks on it (best effort). The same
+	// service is the read side of the Stats tab, so the UI can honestly report
+	// that the administrator disabled the collection.
+	statsService := startStatistics(ctx, reg, *statsDSN, stats.Config{
 		Interval:        *statsInterval,
 		SnapshotTimeout: *statsTimeout,
 		Retention:       *statsRetention,
 		PruneInterval:   *statsPrune,
 	})
+	serverOpts = append(serverOpts, web.WithStats(statsService))
 
 	webSrv, err := web.NewServer(reg, authMgr, serverOpts...)
 	if err != nil {
@@ -340,20 +343,17 @@ func pullHistoryLimitFromEnv() int {
 	return n
 }
 
-// startStatistics runs the optional PostgreSQL statistics pipeline: every
-// cluster registered on the hub is sampled on an interval, diffed into image
-// presence intervals, GC events, re-pulls and a pull-task log, and written to
-// the database. No DSN means no statistics and no extra goroutine.
+// startStatistics builds the optional statistics service: every registered
+// cluster is sampled on an interval, diffed into image presence intervals, GC
+// events, re-pulls and a pull-task log, and written to PostgreSQL. No DSN means
+// no connection and no goroutine, but the service is still returned so the Stats
+// tab can report that the administrator disabled the collection.
 //
-// The hub must not depend on the database: a failed connect is retried with
-// backoff, a failed write is logged and retried by the next sample (the
+// The hub must not depend on the database: the service retries a failed connect
+// with backoff, a failed write is logged and retried by the next sample (the
 // collector only commits a diff after a successful write), and a write outage
 // never blocks the UI, the metrics scrape or a pull.
-func startStatistics(ctx context.Context, reg *provider.Registry, dsn string, cfg stats.Config) {
-	dsn = strings.TrimSpace(dsn)
-	if dsn == "" {
-		return
-	}
+func startStatistics(ctx context.Context, reg *provider.Registry, dsn string, cfg stats.Config) *stats.Service {
 	ids := reg.AllIDs()
 	clusters := make([]stats.Cluster, 0, len(ids))
 	for _, id := range ids {
@@ -363,45 +363,16 @@ func startStatistics(ctx context.Context, reg *provider.Registry, dsn string, cf
 		}
 		clusters = append(clusters, stats.Cluster{ID: id, Snapshot: entry.Provider.Snapshot})
 	}
+	service := stats.NewService(dsn, cfg, clusters)
+	if !service.Enabled() {
+		return service
+	}
 	if len(clusters) == 0 {
 		log.Printf("statistics: no clusters registered, pipeline not started")
-		return
+		return service
 	}
-	go func() {
-		backoff := time.Second
-		for {
-			if ctx.Err() != nil {
-				return
-			}
-			store, err := stats.OpenPostgres(ctx, dsn)
-			if err != nil {
-				log.Printf("statistics: PostgreSQL unavailable (%v), retrying in %s", err, backoff)
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(backoff):
-				}
-				if backoff < time.Minute {
-					backoff *= 2
-				}
-				continue
-			}
-			backoff = time.Second
-			log.Printf("statistics: writing to PostgreSQL every %s, retention %s, clusters: %s",
-				cfg.Interval, cfg.Retention, strings.Join(ids, ","))
-			// Run owns the store: it closes it when the context is canceled.
-			stats.Run(ctx, cfg, clusters, store, log.Printf)
-			if ctx.Err() != nil {
-				return
-			}
-			log.Printf("statistics: writer stopped, reconnecting")
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(backoff):
-			}
-		}
-	}()
+	go service.Run(ctx, log.Printf)
+	return service
 }
 
 // durationFromEnv resolves a positive duration from an environment variable,

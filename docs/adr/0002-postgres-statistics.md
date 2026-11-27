@@ -114,6 +114,36 @@ DDL (`CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`) выполня�
 `run`) зависят только от stdlib и `internal/model`. Это позволяет тестировать diff и
 цикл без БД и без драйвера.
 
+### Чтение для вкладки Stats
+
+Статистика не должна быть доступна только через `psql`, поэтому hub отдаёт её UI через
+read-only `/api/v1/stats/*`. Граница зависимостей при этом не двигается:
+
+| Слой | Что делает | Импорты |
+| --- | --- | --- |
+| `internal/stats` (`query.go`) | SQL-чтение: `Overview`, `Nodes`, `Images`, `GCEvents`, `Repulls`, `Tasks`; реализует `Querier` | stdlib (`database/sql`) + `internal/model` |
+| `internal/stats` (`service.go`) | жизненный цикл: connect/backoff, `Run`, состояние «включено/ok/недоступно» | stdlib + `internal/model` |
+| `internal/web` (`server_stats.go`) | HTTP-ручки и парсинг параметров; объявляет собственный порт `StatsSource` | только stdlib (как и раньше) |
+| `cmd/prepuller/main.go` | собирает `stats.Service`, передаёт его в `web.WithStats` | `internal/stats` + `internal/web` |
+
+`internal/web` **не импортирует** `internal/stats`: иначе `pgx` попал бы в web транзитивно.
+Поэтому типы ответа лежат в `internal/model/stats.go`, а web видит только узкий порт
+`StatsSource`. Порядок такой же, как у `tasks.Store`: web — слой представления, пакет
+статистики — единственный, кто знает про SQL.
+
+Правила чтения:
+
+- все ручки требуют cookie, как остальной hub-API; viewer достаточно (это чтение);
+- у каждой ручки свой таймаут (`5 s` на запрос, `3 s` на ping статуса): подвисшая БД не
+  должна вешать UI;
+- выключенный пайплайн — не ошибка: `/stats/status` отвечает `enabled:false`, data-ручки —
+  `503` с понятным текстом; UI рисует «Сбор статистики выключен администратором»;
+- сырые ошибки драйвера наружу не отдаются (могут содержать host/DSN) — только
+  «база статистики недоступна»;
+- ответы всегда несут массивы (а не `null`), как и остальной контракт;
+- `window` клампится в [5m, 90d], `limit` — в 1..200: один запрос не должен сканировать
+  всю историю.
+
 ## Последствия
 
 Положительные:
@@ -154,11 +184,20 @@ DDL (`CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`) выполня�
   `hub.stats.snapshotTimeout`, `hub.stats.retention`, `hub.stats.pruneInterval`;
   без `enabled` env/флаги не выставляются.
 - `README.md`/`docs/DEPLOY.md`: раздел про необязательную статистику и retention.
+- `internal/web`: порт `StatsSource` и ручки `/api/v1/stats/*` (только stdlib);
+  `web.WithStats` получает `stats.Service`; без сервиса или с выключенным DSN ручки
+  отдают состояние «администратор выключил сбор».
+- UI (`internal/web/static`): вкладка `Stats` — окно, фильтр по кластеру, KPI, таблицы
+  нод/образов/GC/перепулов/задач, пагинация; disabled/unavailable состояния.
 
 ## Compliance
 
 - `go test ./internal/stats/` зелёный без реальной БД; `go vet` и `gofmt` чистые.
 - Импорт `pgx` только в `internal/stats`; в `internal/model`, `internal/web`,
   `internal/provider` и остальных пакетах он запрещён.
-- Любое изменение публичного контракта (`Config`, `Cluster`, `Store`, `Collector`,
-  `Run`) согласуется с `cmd/prepuller/main.go` и чартом.
+- Любое изменение публичного контракта (`Config`, `Cluster`, `Store`, `Querier`,
+  `Collector`, `Run`, `Service`) согласуется с `cmd/prepuller/main.go` и чартом.
+- Читающий слой (`Querier`) тестируется фейковым `database/sql`-драйвером с
+  `QueryContext`/rows: проверяются текст запроса, аргументы, NULL-поля и пустые срезы.
+  `internal/web/server_stats_test.go` проверяет авторизацию, парсинг параметров,
+  disabled/unavailable состояния и отсутствие утечки текста ошибки драйвера.

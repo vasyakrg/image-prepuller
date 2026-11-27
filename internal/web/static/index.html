@@ -47,6 +47,7 @@
           <button class="tab" data-tab="tasks">Pull Tasks <span id="tab-tasks-count" class="tab-count">0</span></button>
           <button class="tab" data-tab="nodes">Nodes <span id="tab-nodes-count" class="tab-count">0</span></button>
           <button class="tab" data-tab="activity">Activity</button>
+          <button class="tab" data-tab="stats">Stats</button>
         </nav>
       </div>
       <div class="topbar-right">
@@ -189,6 +190,263 @@
             </thead>
             <tbody id="activity-tbody"></tbody>
           </table>
+        </div>
+      </section>
+
+      <!-- Stats Tab -->
+      <section id="tab-stats" class="tab-panel hidden">
+        <div class="toolbar">
+          <select id="stats-window" class="select" title="Окно выборки статистики. Сервер сам клампит его под retention БД.">
+            <option value="1h">Окно: 1 час</option>
+            <option value="6h">Окно: 6 часов</option>
+            <option value="24h" selected>Окно: 24 часа</option>
+            <option value="7d">Окно: 7 дней</option>
+            <option value="30d">Окно: 30 дней</option>
+            <option value="90d">Окно: 90 дней</option>
+          </select>
+          <select id="stats-cluster" class="select" title="Кластер для списков ниже. KPI всегда считаются по всем кластерам: у /api/v1/stats/overview нет параметра cluster.">
+            <option value="">Все кластеры</option>
+          </select>
+          <button id="stats-refresh" class="btn btn-secondary" title="Перечитать статистику из БД">↻ Обновить</button>
+          <span class="toolbar-spacer"></span>
+          <span id="stats-updated" class="muted" style="font-size:12px">—</span>
+          <span id="stats-collect" class="muted" style="font-size:12px"></span>
+        </div>
+
+        <div id="stats-loading" class="card stats-placeholder">
+          <div class="stats-placeholder-title">Загрузка статистики…</div>
+          <div class="muted" style="font-size:13px">Читаем состояние сборщика и срез из PostgreSQL.</div>
+        </div>
+
+        <div id="stats-disabled" class="card stats-placeholder hidden">
+          <div class="stats-placeholder-title">Сбор статистики выключен администратором</div>
+          <div class="stats-placeholder-body muted">
+            <div>Hub не подключён к PostgreSQL, поэтому исторические данные не собираются: присутствие образов, события GC, перепулы и лог pull-задач недоступны.</div>
+            <div>Включение — в values чарта: <code>hub.stats.enabled=true</code> и DSN базы в Secret (<code>hub.stats.existingSecret</code>). Порядок настройки БД — <code>docs/DEPLOY.md</code> §14.12.</div>
+            <div>Сбор идёт с момента включения: данные за время, пока статистика была выключена, не восстанавливаются.</div>
+          </div>
+          <div style="margin-top:14px">
+            <button id="stats-retry-disabled" class="btn btn-secondary btn-xs">Проверить снова</button>
+          </div>
+        </div>
+
+        <div id="stats-error-block" class="hidden">
+          <div id="stats-error-msg" class="error-banner">База статистики недоступна</div>
+          <button id="stats-retry" class="btn btn-secondary">Повторить</button>
+        </div>
+
+        <div id="stats-content" class="hidden">
+          <div id="stats-overview-err" class="error-banner hidden"></div>
+
+          <section class="kpi-grid stats-kpi">
+            <div class="kpi-card" title="Ноды, по которым есть samples в выбранном retention">
+              <div class="kpi-label">Ноды</div>
+              <div id="stats-kpi-nodes" class="kpi-value">—</div>
+              <div id="stats-kpi-nodes-sub" class="kpi-sub muted">—</div>
+            </div>
+            <div class="kpi-card" title="Образы, лежащие на нодах сейчас, и их суммарный размер. KPI не фильтруется выбранным кластером.">
+              <div class="kpi-label">Образов в кэше</div>
+              <div id="stats-kpi-images" class="kpi-value">—</div>
+              <div id="stats-kpi-images-sub" class="kpi-sub muted">—</div>
+            </div>
+            <div class="kpi-card" title="Запуски сборщика мусора и сколько образов/байт он удалил за окно">
+              <div class="kpi-label">GC</div>
+              <div id="stats-kpi-gc" class="kpi-value">—</div>
+              <div id="stats-kpi-gc-sub" class="kpi-sub muted">—</div>
+            </div>
+            <div class="kpi-card" title="Образ удалён с ноды и снова на неё притянут; лаг — время между этими событиями">
+              <div class="kpi-label">Перепулы</div>
+              <div id="stats-kpi-repulls" class="kpi-value">—</div>
+              <div id="stats-kpi-repulls-sub" class="kpi-sub muted">—</div>
+            </div>
+            <div class="kpi-card" title="Pull-задачи, записанные в PostgreSQL; сюда попадают и задачи, завершившиеся до рестарта hub">
+              <div class="kpi-label">Задачи</div>
+              <div id="stats-kpi-tasks" class="kpi-value">—</div>
+              <div id="stats-kpi-tasks-sub" class="kpi-sub muted">—</div>
+            </div>
+          </section>
+
+          <div class="stats-section">
+            <div class="stats-section-head">
+              <h2 class="stats-section-title">Ноды (последний срез)</h2>
+              <span id="stats-nodes-summary" class="muted" style="font-size:12px">—</span>
+            </div>
+            <div id="stats-nodes-err" class="error-banner hidden"></div>
+            <div class="card table-wrap">
+              <table class="data-table stats-table">
+                <thead>
+                  <tr>
+                    <th>Cluster</th>
+                    <th>Node</th>
+                    <th>Sample</th>
+                    <th>ImageFS used / cap</th>
+                    <th class="right">Cached images</th>
+                    <th>Ready</th>
+                    <th>Agent</th>
+                    <th>Disk</th>
+                  </tr>
+                </thead>
+                <tbody id="stats-nodes-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="stats-section">
+            <div class="stats-section-head">
+              <h2 class="stats-section-title">Присутствие образов</h2>
+              <span id="stats-images-total" class="muted" style="font-size:12px"></span>
+            </div>
+            <div class="toolbar stats-filters">
+              <input id="stats-images-q" class="input" type="search" placeholder="Поиск по образу (имя, тег, digest)..." autocomplete="off" />
+              <select id="stats-images-state" class="select" title="Фильтр по состоянию присутствия">
+                <option value="">Состояние: Все</option>
+                <option value="open">Лежат сейчас</option>
+                <option value="removed">Удалены</option>
+              </select>
+              <span class="toolbar-spacer"></span>
+              <label class="muted" style="font-size:12px" for="stats-images-page-size">На странице</label>
+              <select id="stats-images-page-size" class="select">
+                <option value="25">25</option>
+                <option value="50" selected>50</option>
+                <option value="100">100</option>
+              </select>
+              <span id="stats-images-page-info" class="muted" style="font-size:12px">—</span>
+              <button id="stats-images-prev" class="btn btn-secondary btn-xs" disabled>← Назад</button>
+              <button id="stats-images-next" class="btn btn-secondary btn-xs" disabled>Вперёд →</button>
+            </div>
+            <div id="stats-images-err" class="error-banner hidden"></div>
+            <div class="card table-wrap">
+              <table class="data-table stats-table">
+                <thead>
+                  <tr>
+                    <th>Cluster</th>
+                    <th>Node</th>
+                    <th>Image</th>
+                    <th>First seen</th>
+                    <th>Removed at</th>
+                    <th class="right">Lifetime</th>
+                    <th class="right">Size</th>
+                  </tr>
+                </thead>
+                <tbody id="stats-images-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="stats-section">
+            <div class="stats-section-head">
+              <h2 class="stats-section-title">События сборщика (GC)</h2>
+              <span id="stats-gc-total" class="muted" style="font-size:12px"></span>
+            </div>
+            <div class="toolbar stats-filters">
+              <span class="toolbar-spacer"></span>
+              <label class="muted" style="font-size:12px" for="stats-gc-page-size">На странице</label>
+              <select id="stats-gc-page-size" class="select">
+                <option value="25">25</option>
+                <option value="50" selected>50</option>
+                <option value="100">100</option>
+              </select>
+              <span id="stats-gc-page-info" class="muted" style="font-size:12px">—</span>
+              <button id="stats-gc-prev" class="btn btn-secondary btn-xs" disabled>← Назад</button>
+              <button id="stats-gc-next" class="btn btn-secondary btn-xs" disabled>Вперёд →</button>
+            </div>
+            <div id="stats-gc-err" class="error-banner hidden"></div>
+            <div class="card table-wrap">
+              <table class="data-table stats-table">
+                <thead>
+                  <tr>
+                    <th>Occurred at</th>
+                    <th>Cluster</th>
+                    <th>Node</th>
+                    <th class="right">Removed images</th>
+                    <th class="right">Removed bytes</th>
+                    <th class="right">Window</th>
+                  </tr>
+                </thead>
+                <tbody id="stats-gc-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="stats-section">
+            <div class="stats-section-head">
+              <h2 class="stats-section-title">Перепулы (удалён → снова на ноде)</h2>
+              <span id="stats-repulls-total" class="muted" style="font-size:12px"></span>
+            </div>
+            <div class="toolbar stats-filters">
+              <span class="toolbar-spacer"></span>
+              <label class="muted" style="font-size:12px" for="stats-repulls-page-size">На странице</label>
+              <select id="stats-repulls-page-size" class="select">
+                <option value="25">25</option>
+                <option value="50" selected>50</option>
+                <option value="100">100</option>
+              </select>
+              <span id="stats-repulls-page-info" class="muted" style="font-size:12px">—</span>
+              <button id="stats-repulls-prev" class="btn btn-secondary btn-xs" disabled>← Назад</button>
+              <button id="stats-repulls-next" class="btn btn-secondary btn-xs" disabled>Вперёд →</button>
+            </div>
+            <div id="stats-repulls-err" class="error-banner hidden"></div>
+            <div class="card table-wrap">
+              <table class="data-table stats-table">
+                <thead>
+                  <tr>
+                    <th>Removed at</th>
+                    <th>Finished at</th>
+                    <th class="right">Lag</th>
+                    <th>Cluster</th>
+                    <th>Node</th>
+                    <th>Image</th>
+                  </tr>
+                </thead>
+                <tbody id="stats-repulls-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="stats-section">
+            <div class="stats-section-head">
+              <h2 class="stats-section-title">Лог pull-задач (PostgreSQL)</h2>
+              <span id="stats-tasks-total" class="muted" style="font-size:12px"></span>
+            </div>
+            <div class="toolbar stats-filters">
+              <input id="stats-tasks-q" class="input" type="search" placeholder="Поиск по образу..." autocomplete="off" />
+              <select id="stats-tasks-state" class="select" title="Фильтр по состоянию задачи">
+                <option value="">Состояние: Все</option>
+                <option value="active">Только активные</option>
+                <option value="succeeded">Succeeded</option>
+                <option value="failed">Failed</option>
+                <option value="canceled">Canceled</option>
+              </select>
+              <span class="toolbar-spacer"></span>
+              <label class="muted" style="font-size:12px" for="stats-tasks-page-size">На странице</label>
+              <select id="stats-tasks-page-size" class="select">
+                <option value="25">25</option>
+                <option value="50" selected>50</option>
+                <option value="100">100</option>
+              </select>
+              <span id="stats-tasks-page-info" class="muted" style="font-size:12px">—</span>
+              <button id="stats-tasks-prev" class="btn btn-secondary btn-xs" disabled>← Назад</button>
+              <button id="stats-tasks-next" class="btn btn-secondary btn-xs" disabled>Вперёд →</button>
+            </div>
+            <div id="stats-tasks-err" class="error-banner hidden"></div>
+            <div class="card table-wrap">
+              <table class="data-table stats-table">
+                <thead>
+                  <tr>
+                    <th>Observed at</th>
+                    <th>Cluster</th>
+                    <th>Node</th>
+                    <th>Image</th>
+                    <th>State</th>
+                    <th>Trigger</th>
+                    <th class="right">Duration</th>
+                    <th>Error</th>
+                  </tr>
+                </thead>
+                <tbody id="stats-tasks-tbody"></tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </section>
     </main>

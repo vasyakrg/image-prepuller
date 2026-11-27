@@ -106,6 +106,13 @@ workload'ы и ноды и строит матрицу `image × node`; `node-ag
   команды, поэтому входящий маршрут в управляемый кластер не нужен. Это режим по
   умолчанию для кластеров за NAT и без ingress: наружу нужен только исходящий HTTPS
   на 443.
+- **Stats (вкладка UI)** — если включена PostgreSQL-статистика (`hub.stats`), в меню
+  появляется вкладка `Stats`: история без SQL — окно 1h…90d, фильтр по кластеру, KPI
+  (ноды, образы в кэше и их размер, GC, перепулы, задачи) и таблицы «Ноды (последний
+  срез)», «Присутствие образов» (поиск, «лежат сейчас / удалены»), «События сборщика»,
+  «Перепулы» и «Лог pull-задач» с пагинацией. Если DSN не задан, вкладка честно пишет
+  «Сбор статистики выключен администратором»; если база недоступна — баннер с
+  «Повторить». Ручки — `GET /api/v1/stats/*` (read-only, cookie), см. «HTTP API».
 - **Prometheus** — отдельный порт `:9090/metrics`, метрики по кластерам, нодам, слотам,
   pull-задачам и свежести синка.
 
@@ -517,6 +524,13 @@ Cookie-сессии подписаны HMAC-SHA256 и несут роль; cooki
 | `GET /api/v1/nodes/{node}/images?cluster=ID` | cookie | Кэш образов и ImageFS одной ноды (v2) |
 | `GET /api/v1/health?cluster=ID` | cookie | `model.Health` провайдера кластера (v2) |
 | `GET /api/v1/audit` | cookie, `operator` | Последние 500 событий аудита `{events:[{time,actor,role,action,target,result,remoteAddr}]}` |
+| `GET /api/v1/stats/status` | cookie | Состояние пайплайна статистики: `{enabled,ok,error,clusters,intervalSeconds,retentionSeconds,connectedAt,checkedAt}`. `enabled=false` — администратор не настроил DSN; `enabled=true, ok=false` — база недоступна, `error` — готовая для UI строка |
+| `GET /api/v1/stats/overview?window=24h` | cookie | Агрегаты окна (`StatsOverview`): ноды, открытые интервалы образов и их байты, медиана/p95 времени жизни, GC (прогоны/образы/байты), перепулы (медианный/максимальный лаг), задачи (всего/succeeded/failed/active/средняя длительность), `lastSampleAt`/`lastTaskAt`. `window` — Go-duration; `7d`/`30d`/`90d` тоже; клампится в [5m, 90d], невалидное — 400 |
+| `GET /api/v1/stats/nodes` | cookie | `{rows:[StatsNodeSample]}` — последний срез по каждой ноде: ImageFS, кэш образов, ready/agent/disk |
+| `GET /api/v1/stats/images?window=24h&cluster=&state=open\|removed&q=&limit=50&offset=0` | cookie | Страница интервалов присутствия образов `{total,offset,limit,rows[]}`: `open` — лежат на ноде, `removed` — удалены в окне, пусто — оба; `q` — подстрока образа; `limit` 1..200 (по умолчанию 50) |
+| `GET /api/v1/stats/gc?window=24h&cluster=&limit=50&offset=0` | cookie | Страница событий сборщика мусора: когда, на какой ноде, сколько образов/байт и за какое окно |
+| `GET /api/v1/stats/repulls?window=24h&cluster=&limit=50&offset=0` | cookie | Страница перепулов «удалён → снова на ноде»: `removedAt`, `finishedAt`, `lagSeconds` |
+| `GET /api/v1/stats/tasks?window=24h&cluster=&state=&trigger=&q=&limit=50&offset=0` | cookie | Страница лога pull-задач из PostgreSQL; `state=active` — queued+running; `trigger` — manual/auto/reconcile |
 
 Spoke (только если задан `PREPULLER_CLUSTER_TOKEN` — Bearer):
 
@@ -532,6 +546,11 @@ Spoke (только если задан `PREPULLER_CLUSTER_TOKEN` — Bearer):
 
 Тело запроса ограничено 1 МиБ (413), неизвестный `apiVersion` — 400; все ошибки —
 `{"error":"..."}`.
+
+Ручки статистики (`/api/v1/stats/*`) — только чтение и только с cookie (viewer достаточно).
+Если статистика выключена администратором, `/stats/status` отвечает `200 {enabled:false}`, а
+data-ручки — `503 {"error":"сбор статистики выключен..."}`; сырые ошибки драйвера в ответ не
+попадают (только готовая строка «база статистики недоступна»).
 
 Поле `apiVersion` в запросах обязательно только для новых клиентов: пустое значение и
 `v1` принимаются в течение одного релиза (см. [docs/PLAN.md](docs/PLAN.md) §10).
@@ -662,6 +681,19 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
 Схема создаётся сама (`CREATE TABLE IF NOT EXISTS`) при первом подключении; нужны права
 на `CREATE` в схеме и `INSERT/SELECT/DELETE` на таблицы. Старые строки прунятся раз в
 `hub.stats.pruneInterval` по `hub.stats.retention` (90 дней по умолчанию).
+
+**Вкладка Stats в UI.** Если DSN задан, в меню hub'а появляется вкладка `Stats` —
+единственное место, где статистика читается без SQL. Внутри: окно (`1h`/`6h`/`24h`/`7d`/`30d`/`90d`),
+фильтр по кластеру, KPI (ноды, образы в кэше и их размер, GC, перепулы, задачи) и секции
+«Ноды (последний срез)», «Присутствие образов» (поиск по образу, фильтр «лежат сейчас /
+удалены», пагинация), «События сборщика (GC)», «Перепулы» и «Лог pull-задач» с
+пагинацией и фильтрами по состоянию/триггеру. Данные обновляются при открытии вкладки,
+по кнопке и при смене окна/фильтров (статистика и так пишется раз в `-stats-interval`,
+поэтому 5-секундное автообновление остальных вкладок ей не нужно). Если администратор
+выключил сбор, вкладка показывает «Сбор статистики выключен администратором» и подсказку,
+как включить (`hub.stats.enabled=true` + DSN в Secret); если база недоступна — баннер с
+ошибкой и кнопкой «Повторить». Ручки, которые она использует, — в разделе
+[HTTP API](#http-api).
 
 **Таблицы.**
 

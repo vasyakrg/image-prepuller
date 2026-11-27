@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,8 @@ import (
 type fakeDB struct {
 	mu        sync.Mutex
 	execs     []fakeExec
+	queries   []fakeExec
+	results   []fakeRowSet
 	begins    int
 	commits   int
 	rollbacks int
@@ -29,6 +32,15 @@ type fakeDB struct {
 type fakeExec struct {
 	query string
 	args  []any
+}
+
+// fakeRowSet is one canned result set for the next QueryContext call. Values are
+// driver.Value, so a test can enqueue int64, float64, string, time.Time or nil
+// exactly like a real driver would return.
+type fakeRowSet struct {
+	columns []string
+	rows    [][]driver.Value
+	err     error
 }
 
 func (f *fakeDB) record(query string, args []driver.NamedValue) error {
@@ -57,6 +69,57 @@ func (f *fakeDB) reset() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.execs = nil
+	f.queries = nil
+	f.results = nil
+}
+
+// enqueue pushes one canned result set in query order.
+func (f *fakeDB) enqueue(columns []string, rows ...[]driver.Value) *fakeDB {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.results = append(f.results, fakeRowSet{columns: columns, rows: rows})
+	return f
+}
+
+// enqueueErr pushes a result set that fails once its rows are exhausted; an
+// empty row list makes the query fail on the first Next, which is how
+// database/sql surfaces a mid-stream driver error.
+func (f *fakeDB) enqueueErr(columns []string, err error, rows ...[]driver.Value) *fakeDB {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.results = append(f.results, fakeRowSet{columns: columns, rows: rows, err: err})
+	return f
+}
+
+// querySnapshot returns the recorded queries with their bind arguments.
+func (f *fakeDB) querySnapshot() []fakeExec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]fakeExec, len(f.queries))
+	copy(out, f.queries)
+	return out
+}
+
+// recordQuery logs the statement and pops the next canned result. A missing
+// fixture fails loudly instead of silently returning zero rows, so a test cannot
+// pass because a query was never answered.
+func (f *fakeDB) recordQuery(query string, args []driver.NamedValue) (fakeRowSet, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	values := make([]any, len(args))
+	for i, arg := range args {
+		values[i] = arg.Value
+	}
+	f.queries = append(f.queries, fakeExec{query: query, args: values})
+	if f.failOn != "" && strings.Contains(query, f.failOn) {
+		return fakeRowSet{}, errors.New("fake database failure")
+	}
+	if len(f.results) == 0 {
+		return fakeRowSet{}, fmt.Errorf("fake: no rows queued for query %q", query)
+	}
+	result := f.results[0]
+	f.results = f.results[1:]
+	return result, nil
 }
 
 func (f *fakeDB) counts() (begins, commits, rollbacks int) {
@@ -95,6 +158,39 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 		return nil, err
 	}
 	return driver.RowsAffected(1), nil
+}
+func (c *fakeConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	result, err := c.db.recordQuery(query, args)
+	if err != nil {
+		return nil, err
+	}
+	return &fakeRows{columns: result.columns, rows: result.rows, err: result.err}, nil
+}
+
+// fakeRows replays one canned result set. Next yields io.EOF after the last row
+// and returns the canned error (if any) once the rows are exhausted.
+type fakeRows struct {
+	columns []string
+	rows    [][]driver.Value
+	err     error
+	next    int
+}
+
+func (r *fakeRows) Columns() []string { return r.columns }
+func (r *fakeRows) Close() error      { return nil }
+func (r *fakeRows) Next(dest []driver.Value) error {
+	if r.next >= len(r.rows) {
+		if r.err != nil {
+			return r.err
+		}
+		return io.EOF
+	}
+	copy(dest, r.rows[r.next])
+	r.next++
+	return nil
 }
 
 type fakeTx struct{ db *fakeDB }

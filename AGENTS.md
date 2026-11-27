@@ -109,7 +109,7 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
   | `internal/spokeclient` | stdlib + `internal/model`, `internal/provider` |
   | `internal/reconcile` | stdlib + `internal/model`, `internal/provider` |
   | `internal/tasks` | stdlib + `internal/model` |
-  | `internal/stats` | stdlib + `internal/model` + `github.com/jackc/pgx/v5/stdlib` (только в `postgres.go`) |
+  | `internal/stats` | stdlib (`database/sql`) + `internal/model` + `github.com/jackc/pgx/v5/stdlib` (только в `postgres.go`): запись, SQL-чтение для вкладки Stats и `Service` |
   | `internal/testutil` | stdlib + внутренние пакеты |
 
   `go.mod`/`go.sum` — зона интегратора: feature-ветки их не меняют, новая зависимость
@@ -138,6 +138,7 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 | `internal/auth/middleware.go` | `RequireAuth` (hub cookie), `RequireToken` (spoke Bearer), `RequireRole`/`RequireOperator` |
 | `internal/web/server.go` | hub-роутер, hub-хендлеры, `writeJSON`, опции сервера (`WithSpokeHub`) |
 | `internal/web/server_spoke.go` | spoke-роутер `/internal/v1/*` (contract v2) |
+| `internal/web/server_stats.go` | read-only ручки `/api/v1/stats/*` для вкладки Stats: порт `StatsSource` (web не импортирует `internal/stats`, чтобы не тянуть `pgx`), парсинг `window`/`limit`/`offset`/`state`/`trigger`/`q`, таймауты 5 s/3 s, состояния disabled/unavailable |
 | `internal/web/server_spoke_hub.go` | hub-эндпоинты управляемых кластеров `/internal/v1/spokes/{cluster}/{state,commands,commands/{id}/result}` (Bearer-токен кластера, `auth.RequireSpokeToken`) |
 | `internal/web/static/` | UI: `index.html`, `app.js`, `styles.css` |
 | `internal/metrics/prometheus.go` | сборка `/metrics` по всем кластерам |
@@ -146,7 +147,8 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 | `internal/provider/k8s_registry.go` | резолв кредов реестра из `imagePullSecrets` workload'ов: `.dockerconfigjson`/`.dockercfg`, матчинг хоста по правилам distribution, кэш Secret (5 мин / 1 мин на ошибку), индекс image → secret'ы из снапшота |
 | `internal/reconcile/` | политика авто-прогрева: очередь, приоритеты (failed > missing, prod > staging > infra), лимиты, backoff |
 | `internal/tasks/` | hub-история pull-задач: upsert по cluster+id, фильтр по состоянию, пагинация, ограничение ёмкости (активные не вытесняются), персистентность JSONL (атомная компакция, битые строки пропускаются) |
-| `internal/stats/` | опциональная статистика в PostgreSQL (ADR-002): срез по кластерам, diff присутствия образов на нодах, события сборщика мусора, перепулы с лагом «удалён → перетянут», лог pull-задач, samples нод; `Collector` (чистый diff), `Postgres` (SQL), `Run` (цикл hub'а, best effort) |
+| `internal/stats/` | опциональная статистика в PostgreSQL (ADR-002): срез по кластерам, diff присутствия образов на нодах, события сборщика мусора, перепулы с лагом «удалён → перетянут», лог pull-задач, samples нод; `Collector` (чистый diff), `Postgres` (SQL), `Run` (цикл hub'а, best effort), `query.go` (`Querier` — чтение для вкладки Stats), `service.go` (`Service`: connect/backoff, состояние enabled/ok, делегирование чтения) |
+| `internal/model/stats.go` | типы вкладки Stats: `StatsInfo`, `StatsOverview`, срезы нод/образов/GC/перепулов/задач, страницы и фильтры. Hub-UI контракт, не часть spoke v2 |
 | `internal/testutil/` | фейковый spoke/hub, golden-снапшот v2, контрактные тесты |
 | `cmd/prepuller/agent.go` | `runAgent()`: флаги агента, запуск HTTP/JSON сервера, graceful shutdown |
 | `.github/workflows/ci.yaml` | **Единственный** CI на GitHub: гейты `test` (gofmt, vet, test, build linux/amd64+arm64, гейт зависимостей ADR-001, `govulncheck`) и `helm` (lint/template), затем `image` (buildx amd64+arm64, публикация в GHCR на `GITHUB_TOKEN`, теги `sha-*`/latest/версия, `needs: [test, helm]`) и `chart` (OCI-чарт, только с релизного тега `v*` и `needs: [test, helm, image]`) |
@@ -218,6 +220,16 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
     идемпотентным (spoke дедуплицирует по id команды, `TriggerPull` — по image+node).
     Outbound-режим предполагает ровно одну реплику spoke.
 
+13. **Вкладка Stats — только чтение, опциональна и не тянет pgx в web.**
+    `/api/v1/stats/*` ходят через узкий порт `web.StatsSource`; `internal/web` не
+    импортирует `internal/stats` (иначе `pgx` попал бы в web транзитивно), типы ответа
+    живут в `internal/model/stats.go`. Выключенный DSN — это `200 {enabled:false}` на
+    `/stats/status` и `503` с понятным текстом на data-ручках, а не `500`; сырые ошибки
+    драйвера наружу не отдаются. У каждой ручки свой таймаут (`5 s` запрос, `3 s` ping),
+    `window` клампится в [5m, 90d], `limit` — в 1..200, ответы всегда несут массивы.
+    Новый stats-запрос добавляется в `stats.Querier`, `stats.Service`, `web.StatsSource`,
+    ручку и тесты (stats + web), а UI берёт его из `/api/v1/stats/*`.
+
 ## 6. Соглашения по коду
 
 - `gofmt` обязателен; имена пакетов короткие, ошибки в нижнем регистре без точки
@@ -271,6 +283,17 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 - `internal/web/server_test.go` — дополнительно к API: пагинация и state-фильтр
   `/api/v1/pull-tasks` из истории, fallback на снапшот без истории, 400 на плохие
   `limit`/`state`, `handleSnapshot` пополняет историю.
+- `internal/stats/query_test.go` — SQL-чтение на фейковом `database/sql`-драйвере
+  с `QueryContext`/rows: `Overview` (несколько запросов, NULL → 0/nil), `Nodes`,
+  `Images` (open/removed/поиск/пагинация/lifetime), `GCEvents`, `Repulls`,
+  `Tasks` (active/trigger/search); проверяются текст запроса, аргументы (`$n`, без
+  интерполяции) и пустые срезы вместо `nil`.
+- `internal/stats/service_test.go` — состояния disabled/unavailable/ok, ping в `Info`,
+  делегирование чтения, attach/detach в `Service.Run` (фейковый opener).
+- `internal/web/server_stats_test.go` — статистика: 401 без cookie, disabled (status 200
+  `enabled=false`, data 503), unavailable (enabled+not ok), парсинг
+  `window`/`limit`/`offset`/`state`/`trigger`, массивы вместо `null`, отсутствие
+  утечки текста ошибки БД.
 - `internal/testutil/contract_test.go` — контракт hub↔spoke на фейковом spoke:
   снапшот v2, `TriggerPull`→`PullTask`, идемпотентность, отмена, counters, health,
   заглушки hub-API (`pull-tasks`, `nodes/{node}/images`, `pulls/{id}/cancel`, `health`),
@@ -490,6 +513,17 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 - **`.gocache/`, `bin/`, `.gomodcache/` в корне** — локальные кэши сборки и модулей,
   они в `.gitignore` и в историю не попадают; не коммитьте их принудительно и не удаляйте
   вслепую, если в них завязан прогон. `bin/prepuller` — артефакт сборки.
+- **Вкладка Stats: disabled ≠ unavailable.** Нет DSN — `/stats/status` отвечает
+  200 `{enabled:false}` (UI: «Сбор статистики выключен администратором»), и data-ручки
+  намеренно отдают 503: не превращайте это в 500 и не пытайтесь ходить в БД «на всякий
+  случай». DSN есть, но база молчит — `enabled=true, ok=false` + `error` для UI,
+  данные не отдаются; сырой текст ошибки драйвера (host/DSN) наружу не выпускается.
+  `Service.Info` пингует БД, поэтому вызывается только из `/stats/status` с таймаутом 3 s.
+- **Stats-окно и лимиты — это защита от тяжёлых запросов.** `window` клампится в
+  [5m, 90d] (по умолчанию 24h), `limit` — в 1..200 (по умолчанию 50), `q` обрезается до
+  200 символов; всё это делает HTTP-слой до SQL (`internal/web/server_stats.go`), а SQL
+  дополнительно защищается от отрицательных limit/offset. Не снимайте клампы, не добавив
+  индексы: таблицы маленькие только пока retention 90 дней.
 - **git обязателен.** Работа идёт через ветки и worktree (`docs/PLAN.md` §3, §6.1);
   baseline Stage 1 — коммит `18aaaa5`, ADR-001 — `216e0d2`, контракт Stage 2/3 —
   тег `contract-v2` (от него режутся все feature-ветки).
@@ -513,6 +547,10 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 - [ ] Статистика (если тронута): `go test ./internal/stats/` зелёный без реальной БД,
   `helm template --set hub.stats.enabled=true --set hub.stats.dsn=...` содержит env/флаги,
   а `hub.stats.enabled=true` без DSN падает на рендере.
+- [ ] Вкладка Stats (если тронута): `go test ./internal/web/ ./internal/stats/` зелёные;
+  при выключенном DSN UI показывает «Сбор статистики выключен администратором», при
+  недоступной БД — баннер с «Повторить»; все stats-ответы содержат массивы, а не `null`;
+  `node --check internal/web/static/app.js` чистый.
 
 ## 10. Документация
 
