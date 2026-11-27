@@ -4,12 +4,12 @@
 из workload'ов реально лежат на каждой ноде, позволяет дотянуть недостающие, следит за
 заполнением ImageFS и отдаёт метрики Prometheus для multi-cluster контура.
 
-> Текущее состояние — **Stage 1 (mock) + contract-v2**: работают Web UI, авторизация,
-> multi-cluster реестр, headless spoke API и Prometheus-метрики на in-memory провайдере.
-> Контракт Stage 2/3 заморожен (тег `contract-v2`): Provider v2, pull-задачи, отмена,
-> counters на spoke, скелет node-agent и K8s-провайдера. Живые CRI/Kubernetes появятся
-> в Stage 2–3 (см. [Roadmap](#roadmap)); внешние зависимости и их границы — в
-> [ADR-001](docs/adr/0001-dependencies.md).
+> Текущее состояние — **Stage 2/3 (integration)**: live-путь собран — `K8sProvider`
+> (client-go) и `node-agent` (CRI containerd), авто-прогрев под флагом `-auto-warm`;
+> mock-режим (`-mock`) остаётся для демо и UI-разработки. Контракт заморожен тегом
+> `contract-v2`: Provider v2, pull-задачи и отмена, counters на spoke, agent wire v1.
+> Что уже готово и что дальше — [Roadmap](#roadmap); внешние зависимости и их границы —
+> в [ADR-001](docs/adr/0001-dependencies.md).
 
 ## Зачем это нужно
 
