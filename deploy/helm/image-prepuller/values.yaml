@@ -12,7 +12,7 @@ image:
   # Empty -> a concrete tag is resolved, never a placeholder:
   #   * released chart (Chart.version == Chart.appVersion) -> that version;
   #   * unreleased chart from main -> "latest", the newest build published by
-  #     .github/workflows/build-image.yaml;
+  #     .github/workflows/ci.yaml;
   #   * values.image.tag set -> used verbatim.
   # Production should pin an immutable tag: the sha-<commit> of the same build
   # that produced the chart (docs/DEPLOY.md 14.2).

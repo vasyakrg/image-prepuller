@@ -136,11 +136,9 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 | `internal/reconcile/` | политика авто-прогрева: очередь, приоритеты (failed > missing, prod > staging > infra), лимиты, backoff |
 | `internal/testutil/` | фейковый spoke/hub, golden-снапшот v2, контрактные тесты |
 | `cmd/prepuller/agent.go` | `runAgent()`: флаги агента, запуск HTTP/JSON сервера, graceful shutdown |
-| `.github/workflows/ci.yaml` | CI на GitHub: gofmt, vet, test, build linux/amd64+arm64, гейт зависимостей ADR-001, `govulncheck`, helm lint/template |
-| `.github/workflows/build-image.yaml` | Сборка образа (buildx, amd64+arm64) и публикация образа + OCI-чарта в GHCR на `GITHUB_TOKEN`; теги `sha-*`/latest/версия |
+| `.github/workflows/ci.yaml` | **Единственный** CI на GitHub: гейты `test` (gofmt, vet, test, build linux/amd64+arm64, гейт зависимостей ADR-001, `govulncheck`) и `helm` (lint/template), затем `image` (buildx amd64+arm64, публикация в GHCR на `GITHUB_TOKEN`, теги `sha-*`/latest/версия) и `chart` (OCI-чарт) — оба `needs: [test, helm]` |
 | `hack/e2e-k3d.sh` | Локальный e2e-смоук на k3d: live-провайдер, агенты по CRI, policy violations, деградация/восстановление, метрики |
-| `.gitea/workflows/ci.yaml` | CI для Gitea (зеркало `.github/`): gofmt, vet, test, build linux/amd64+arm64, `govulncheck`, helm lint/template |
-| `.gitea/workflows/build-image.yaml` | Сборка и публикация образа (buildx, amd64+arm64) и Helm-чарта в реестр |
+| `.gitea/workflows/ci.yaml` | CI для Gitea (зеркало `.github/`): те же гейты `test` + `helm`, затем `image` (buildx, публикация в реестр по `vars.REGISTRY`/`vars.IMAGE`) и `chart` (если задан `vars.CHART_OCI_REPO`) |
 | `.github/workflows/pr-agent.yml` | Ревью pull request'ов моделью (PR-Agent): `review` на открытие PR, `command` на комментарий со слэшем (только владелец), `doctor` вручную. Секреты — `OPENAI_API_BASE`/`OPENAI_KEY`; подробности в `docs/pr-agent.md` |
 | `Dockerfile` | multi-stage образ: golang:1.26.11 builder → distroless nonroot (65532) |
 | `deploy/helm/image-prepuller/` | Helm-чарт: hub (`hub.enabled`), spoke (прямой режим или `spoke.hub.*` outbound), agent DaemonSet, RBAC, ingress, Service метрик агента, `agent.networkPolicy`, `ServiceMonitor` и `PrometheusRule` раздельно для hub и агента, `hub.managedClusters` |

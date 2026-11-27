@@ -1,9 +1,27 @@
 name: ci
 
+# Один workflow на весь путь коммита: сначала гейты (test + helm), и только после
+# них — сборка и публикация образа (и, если задан CHART_OCI_REPO, OCI-чарта).
+# Раньше это были два независимых workflow (ci.yaml и build-image.yaml): они
+# стартовали параллельно на один и тот же push, дублировали гейты и давали два
+# прогона в списке. Зеркало `.github/workflows/ci.yaml`.
+#
+# Теги образа: <REGISTRY>/<IMAGE>:<short12> (+ latest на main), плюс smoke-test.
+# Чарт публикуется только если задана переменная CHART_OCI_REPO.
+#
+# Required repository variables (Settings -> Actions -> Variables):
+#   REGISTRY       registry host, e.g. gitea.example.com:5000 (no scheme)
+#   IMAGE          image path inside the registry, e.g. ops/image-prepuller
+#   CHART_OCI_REPO optional; when set, the chart is pushed to oci://REGISTRY/CHART_OCI_REPO
+# Required repository secrets:
+#   REGISTRY_USERNAME / REGISTRY_PASSWORD   registry credentials
+#   REGISTRY_INSECURE  optional; "true" enables plain-HTTP registry access
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
+  workflow_dispatch:
 
 env:
   # Зеркало модулей вместо vendor/ (ADR-001). direct — fallback, если зеркало недоступно.
@@ -194,3 +212,121 @@ jobs:
                   raise SystemExit(path + ": no manifests rendered")
               print(path + ": " + str(len(docs)) + " manifests OK")
           PY
+
+  image:
+    # PRs validate only; pushes build and publish.
+    if: github.event_name != 'pull_request'
+    needs: [test, helm]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve image reference
+        id: meta
+        run: |
+          set -eu
+          registry="${REGISTRY:?set the REGISTRY repository variable}"
+          image="${IMAGE:?set the IMAGE repository variable}"
+          short_sha="$(git rev-parse --short=12 HEAD)"
+          ref="${registry}/${image}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=${ref}:${short_sha}" >> "$GITHUB_OUTPUT"
+          echo "sha=${short_sha}" >> "$GITHUB_OUTPUT"
+        env:
+          REGISTRY: ${{ vars.REGISTRY }}
+          IMAGE: ${{ vars.IMAGE }}
+
+      - name: Log in to the registry
+        run: |
+          set -eu
+          echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login "${REGISTRY}" \
+            --username "${{ secrets.REGISTRY_USERNAME }}" \
+            --password-stdin
+        env:
+          REGISTRY: ${{ vars.REGISTRY }}
+
+      - name: Set up buildx
+        run: |
+          docker buildx create --name prepuller --use --driver docker-container
+          docker buildx inspect --bootstrap
+
+      - name: Build and push (linux/amd64, linux/arm64)
+        run: |
+          set -eu
+          registry="${REGISTRY:?}"
+          insecure=""
+          if [ "${REGISTRY_INSECURE:-false}" = "true" ]; then
+            insecure="--allow-insecure-registry"
+          fi
+          docker buildx build $insecure \
+            --platform linux/amd64,linux/arm64 \
+            --build-arg VERSION="${VERSION}" \
+            --build-arg COMMIT="${COMMIT}" \
+            --build-arg GOPROXY="${GOPROXY}" \
+            --label "org.opencontainers.image.version=${VERSION}" \
+            --label "org.opencontainers.image.revision=${COMMIT}" \
+            --cache-from "type=registry,ref=${registry}/${IMAGE}:buildcache" \
+            --cache-to "type=registry,ref=${registry}/${IMAGE}:buildcache,mode=max" \
+            --tag "${registry}/${IMAGE}:${SHORT_SHA}" \
+            --tag "${registry}/${IMAGE}:latest" \
+            --push \
+            .
+        env:
+          REGISTRY: ${{ vars.REGISTRY }}
+          IMAGE: ${{ vars.IMAGE }}
+          VERSION: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+          SHORT_SHA: ${{ steps.meta.outputs.sha }}
+          REGISTRY_INSECURE: ${{ vars.REGISTRY_INSECURE }}
+
+      - name: Smoke-test the published image (mock hub)
+        run: |
+          set -eu
+          docker run --rm -d --name prepuller-smoke \
+            -e PREPULLER_AUTH_USER=admin \
+            -e PREPULLER_AUTH_PASS=admin \
+            -e PREPULLER_SESSION_SECRET=smoke-secret \
+            -p 18080:8080 \
+            "${REGISTRY}/${IMAGE}:${SHORT_SHA}"
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/healthz >/dev/null 2>&1; then
+              echo "healthz OK"; docker rm -f prepuller-smoke; exit 0
+            fi
+            sleep 1
+          done
+          echo "image did not become healthy"; docker logs prepuller-smoke || true
+          docker rm -f prepuller-smoke || true
+          exit 1
+        env:
+          REGISTRY: ${{ vars.REGISTRY }}
+          IMAGE: ${{ vars.IMAGE }}
+          SHORT_SHA: ${{ steps.meta.outputs.sha }}
+
+  chart:
+    # Optional: publish the Helm chart as an OCI artifact. Skipped when
+    # CHART_OCI_REPO is empty or the event is a pull request.
+    if: github.event_name != 'pull_request' && vars.CHART_OCI_REPO != ''
+    needs: [test, helm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to the registry (OCI)
+        run: |
+          set -eu
+          echo "${{ secrets.REGISTRY_PASSWORD }}" | helm registry login "${REGISTRY}" \
+            --username "${{ secrets.REGISTRY_USERNAME }}" \
+            --password-stdin
+        env:
+          REGISTRY: ${{ vars.REGISTRY }}
+
+      - name: Package and push the chart
+        run: |
+          set -eu
+          helm package deploy/helm/image-prepuller --destination /tmp/chart
+          helm push /tmp/chart/image-prepuller-*.tgz "oci://${REGISTRY}/${CHART_OCI_REPO}"
+        env:
+          REGISTRY: ${{ vars.REGISTRY }}
+          CHART_OCI_REPO: ${{ vars.CHART_OCI_REPO }}

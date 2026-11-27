@@ -267,8 +267,9 @@ curl -s -b /tmp/pc 'localhost:8080/api/v1/snapshot?cluster=talos-prod-kz' | jq '
 ## Деплой
 
 Релизные образ и чарт публикуются в GHCR workflow
-[`.github/workflows/build-image.yaml`](.github/workflows/build-image.yaml) (теги `v*`
-и `main`, амд64+arm64). Полный чеклист (секреты, стенд в k3d, e2e-сценарий из
+[`.github/workflows/ci.yaml`](.github/workflows/ci.yaml): сначала гейты `test` + `helm`,
+и только после них — сборка `image`/`chart` (теги `v*` и `main`, амд64+arm64).
+Полный чеклист (секреты, стенд в k3d, e2e-сценарий из
 [docs/PLAN.md](docs/PLAN.md) §9) — [docs/DEPLOY.md](docs/DEPLOY.md).
 
 ```bash
@@ -318,7 +319,7 @@ helm upgrade --install prepuller-agents deploy/helm/image-prepuller \
 `cluster-token`, `agent-token`). Публикация в GHCR идёт на штатном `GITHUB_TOKEN`
 (права `packages: write`), внешних секретов не нужно; старый Gitea-вариант с
 `REGISTRY`/`IMAGE` и `REGISTRY_USERNAME`/`REGISTRY_PASSWORD` остался в
-[`.gitea/workflows/build-image.yaml`](.gitea/workflows/build-image.yaml) как зеркало.
+[`.gitea/workflows/ci.yaml`](.gitea/workflows/ci.yaml) как зеркало.
 
 ### Кластеры: мастер и ведомый (Talos)
 
@@ -627,8 +628,9 @@ go mod download && go test ./...
 `.gocache/`, `.gopath/`, `.gomodcache/` и `bin/` — в `.gitignore`. Правила, инварианты
 и зоны записи для агентов — в [AGENTS.md](AGENTS.md) и [docs/PLAN.md](docs/PLAN.md).
 
-Гейты (gofmt/vet/test/helm) и сборка релиза — [`.github/workflows/ci.yaml`](.github/workflows/ci.yaml)
-и [`.github/workflows/build-image.yaml`](.github/workflows/build-image.yaml). E2E в CI
+Гейты (gofmt/vet/test/helm) и сборка релиза живут в одном workflow —
+[`.github/workflows/ci.yaml`](.github/workflows/ci.yaml): джобы `test` и `helm` идут
+первыми, `image` и `chart` стартуют только после них (`needs: [test, helm]`). E2E в CI
 намеренно не гоняется: приёмка Stage 2/3 запускается локально перед пушем в `main`
 (нужны docker и k3d):
 

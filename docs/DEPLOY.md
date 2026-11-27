@@ -594,10 +594,11 @@ k3d cluster delete prepuller
 
 ## 13. Релизные артефакты (v0.2.0)
 
-Образ и Helm-чарт публикуются в GHCR workflow
-`.github/workflows/build-image.yaml` по тегу `v*` или пушу в `main` — на
-встроенном `GITHUB_TOKEN` (`packages: write`), поэтому дополнительных секретов
-репозитория не нужно.
+Образ и Helm-чарт публикуются в GHCR workflow `.github/workflows/ci.yaml`
+по тегу `v*` или пушу в `main` — на встроенном `GITHUB_TOKEN`
+(`packages: write`), поэтому дополнительных секретов репозитория не нужно.
+Публикация стоит после гейтов: джобы `image`/`chart` объявлены с
+`needs: [test, helm]`, поэтому образ не собирается из красного коммита.
 
 | Артефакт | Ссылка для v0.2.0 | Digest |
 | --- | --- | --- |

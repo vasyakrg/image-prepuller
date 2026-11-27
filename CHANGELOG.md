@@ -60,6 +60,15 @@
   `latest` (с предупреждением в NOTES), явный тег — как есть.
 ### Changed
 
+- **Один CI-workflow вместо двух.** На GitHub и в Gitea теперь один workflow
+  ([`.github/workflows/ci.yaml`](.github/workflows/ci.yaml) и его зеркало
+  [`.gitea/workflows/ci.yaml`](.gitea/workflows/ci.yaml)): сначала гейты `test` и
+  `helm`, и только после них — `image` и `chart` (`needs: [test, helm]`).
+  Раньше `ci.yaml` и `build-image.yaml` запускались на один и тот же push
+  параллельно: дублировали гейты, давали два прогона в списке, и образ мог
+  публиковаться, пока тесты ещё красные. Второй файл удалён; helm-гейт остался один
+  (обновлённые ключи values `hub.serviceMonitor`/`agent.metrics.*` вместо устаревших
+  `serviceMonitor`/`agent.serviceMonitor` в удалённой копии).
 - **Чарт 0.6.0: `prepull=true` по умолчанию и control-plane вне области.**
   `hub.workloadSelector`/`spoke.workloadSelector` по умолчанию `prepull=true` —
   поведенческое (ломающее) изменение: workload без метки не виден и не прогревается
