@@ -41,15 +41,21 @@ workload'ы и ноды и строит матрицу `image × node`; `node-ag
 
 ## Что умеет
 
-- **Workloads view** — Deployment / StatefulSet / DaemonSet, их образы (включая init-контейнеры),
-  PullPolicy, покрытие каждого образа по нодам.
+- **Область действия** — контроллер работает только с тем, что помечено: флаг
+  `-workload-selector` ограничивает список workload'ов (в чарте по умолчанию
+  `prepull=true`), `-node-selector` — список нод (например,
+  `!node-role.kubernetes.io/control-plane`, когда агенты стоят только на воркерах).
+  Всё остальное не показывается, не считается в покрытии и не прогревается.
+- **Workloads view** — Deployment / StatefulSet / DaemonSet, попавшие в `-workload-selector`:
+  их образы (включая init-контейнеры), PullPolicy, покрытие каждого образа по нодам.
 - **Матрица image × node** — состояние каждого слота: `present`, `pulling`, `missing`,
   `failed`, `paused_disk`, `offline`; размер, время последней проверки, текст ошибки.
 - **Ручной прогрев** — отдельный слот (image + node) или все образы workload'а сразу на все
   онлайн-ноды.
 - **Pull Tasks** — журнал асинхронных pull-задач (`queued` / `running` / `succeeded` /
   `failed` / `canceled`): попытка, триггер и актор, время создания и длительность, ошибка;
-  активную задачу можно отменить кнопкой (`POST /api/v1/pulls/{id}/cancel`), обновление каждые 5 s.
+  активную задачу можно отменить кнопкой (`POST /api/v1/pulls/{id}/cancel`): в live-режиме
+  отмена закрывает запрос к агенту и прерывает CRI-загрузку на ноде; обновление каждые 5 s.
 - **Nodes view** — ImageFS (used/capacity), порог паузы авто-прогрева (78%) и порог kubelet GC
   (85%), активные pull'ы, список закэшированных образов.
 - **Node detail** — клик по ноде открывает панель: кэшированные образы с размерами, ImageFS
@@ -294,7 +300,10 @@ DaemonSet. Каждый компонент включается своим фл�
 компоненту, чьи серии он покрывает: `hub.serviceMonitor` / `hub.prometheusRule` —
 hub и кластерные серии; `agent.metrics.serviceMonitor` / `agent.metrics.prometheusRule`
 — `prepuller_agent_*` с порта метрик агента (`agent.metrics.enabled`), плюс
-`agent.networkPolicy.enabled` отдельно.
+`agent.networkPolicy.enabled` отдельно. Область действия задаётся
+`hub.workloadSelector` (по умолчанию `prepull=true`) и `hub.nodeLabelSelector`
+(например, `!node-role.kubernetes.io/control-plane`); у ведомого кластера — те же
+ключи под `spoke.*`.
 
 Кластер без UI — только агенты:
 
@@ -364,6 +373,8 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
 | `-mock` | `false` | In-memory провайдер, Kubernetes не нужен |
 | `-cluster-name` | `talos-prod-eu` | Имя локального кластера |
 | `-auto-warm` | `false` | Запустить reconciler авто-прогрева для каждого локального кластера |
+| `-workload-selector` | пусто | Kubernetes label selector workload'ов: всё, что не попало, не листится, не показывается и не прогревается. В чарте — `hub.workloadSelector` / `spoke.workloadSelector` (по умолчанию `prepull=true`; env `PREPULLER_WORKLOAD_SELECTOR`) |
+| `-node-selector` | пусто | Kubernetes label selector нод в области действия (слоты image × node строятся только по ним). Для агентов на воркерах — `!node-role.kubernetes.io/control-plane`; в чарте `hub.nodeLabelSelector` / `spoke.nodeLabelSelector` (env `PREPULLER_NODE_SELECTOR`) |
 | `-hub-url` | пусто | Только spoke: базовый URL hub'а (обычно ingress). Задаёт outbound-режим — spoke сам подключается к hub'у; пусто — direct-режим, и hub должен уметь достучаться до spoke по HTTP (env `PREPULLER_HUB_URL`) |
 | `-hub-sync-interval` | `3s` | Только spoke: как часто outbound-spoke пушит состояние кластера в hub (env `PREPULLER_HUB_SYNC_INTERVAL`) |
 
@@ -408,6 +419,8 @@ stalled`. Hub превращает 504 в `provider.ErrAgentPullStalled` → HTT
 | `PREPULLER_CLUSTER_TOKEN` | spoke | да в outbound, нет в direct | Bearer-токен для `/internal/v1/*`; в direct пустое значение отключает авторизацию, в outbound обязателен (без него spoke не стартует) и должен совпадать с токеном этого кластера в `hub.managedClusters` |
 | `PREPULLER_REMOTE_CLUSTERS` | hub | нет | Direct-режим: дополнительные spoke `name=url=token,name2=url2=token2`; hub должен уметь достучаться до URL |
 | `PREPULLER_MANAGED_CLUSTERS` | hub | нет | Outbound-режим: управляемые кластеры `name=token,name2=token2`; токен = `PREPULLER_CLUSTER_TOKEN` соответствующего релиза spoke. Malformed-запись или дубликат имени — hub не стартует |
+| `PREPULLER_WORKLOAD_SELECTOR` | hub + spoke | нет | Kubernetes label selector workload'ов в области действия (то же, что `-workload-selector`); пусто — все workload'ы |
+| `PREPULLER_NODE_SELECTOR` | hub + spoke | нет | Kubernetes label selector нод в области действия (то же, что `-node-selector`); пусто — все ноды |
 | `PREPULLER_HUB_URL` | spoke | нет | Базовый URL hub'а для outbound-режима (то же, что `-hub-url`); пусто — direct-режим |
 | `PREPULLER_HUB_SYNC_INTERVAL` | spoke | нет | Интервал push состояния в outbound-режиме (Go duration, по умолчанию `3s`; невалидное значение — предупреждение в лог и `3s`) |
 | `PREPULLER_AGENT_TOKEN` | agent + hub + spoke | нет | Bearer-токен агентского API: его проверяет агент (`-token`) и им же hub/spoke ходят в `GET /agent/v1/snapshot` и `POST /agent/v1/pulls`; пусто — без авторизации |
@@ -654,6 +667,10 @@ KEEP=1 bash hack/e2e-k3d.sh   # оставить кластер для разб�
 - В mock `SyncNow` только обновляет `lastSeen`/`lastChecked`; в live-режиме сверку выполняет
   `K8sProvider` (list workload'ов и нод + инвентарь от агента, TTL-кэш 2 s), а авто-прогрев —
   reconciler под флагом `-auto-warm`.
+- **Workload без метки не виден — это правило, а не баг.** Чарт по умолчанию ставит
+  `hub.workloadSelector=prepull=true`: пометьте workload (`kubectl label deploy/... prepull=true`)
+  или снимите ограничение (`--set hub.workloadSelector=`). Так же работает `-node-selector`:
+  ноды вне области не показываются, не считаются в покрытии и не прогреваются.
 - `Missing` в mock почти не возникает: все слоты инициализируются `present`/офлайн/паузой;
   `missing` появляется только после отмены pull-задачи (`POST /api/v1/pulls/{id}/cancel`).
 - `tasks` в mock ограничены 200 последними, `activity` — 100; пагинации пока нет.
@@ -673,9 +690,8 @@ KEEP=1 bash hack/e2e-k3d.sh   # оставить кластер для разб�
 - **Команда в outbound-режиме живёт 5 s на попытку** — тот же бюджет, что у сетевого
   таймаута direct-режима (таймаут одного round trip: ожидание в очереди + исполнение;
   state-changing вызовы ретраятся по тем же правилам, что и в direct-режиме). Живой pull
-  через node-agent синхронный и может идти минутами, поэтому кнопка Pull на
-  outbound-кластере в этом случае вернёт `502` — ровно как в direct-режиме сегодня;
-  сама задача при этом продолжится на spoke и отразится в следующем снапшоте.
+  на spoke запускается асинхронно (возвращается running-задача), поэтому команда укладывается
+  в этот бюджет; сама загрузка идёт в фоне и видна в `tasks` следующего снапшота.
 - **Данные outbound-кластера отстают на интервал синхронизации.** UI, API и `/metrics`
   читают последнее присланное состояние, а не ходят в spoke на каждый запрос: по умолчанию
   задержка ~3 s плюс TTL провайдера. Spoke, молчащий дольше `max(3 × syncInterval, 10s)`,

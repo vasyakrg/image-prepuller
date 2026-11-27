@@ -222,6 +222,31 @@ func newAgentProvider(t *testing.T, server *httptest.Server, objects []runtime.O
 	return NewK8sProviderWithClientset("test-cluster", kubefake.NewSimpleClientset(objects...), allOpts...)
 }
 
+// waitAgentTask waits for one asynchronous pull to reach a terminal state and
+// returns it. It reads the transport registry directly, so it never triggers an
+// extra inventory call the snapshot counters in some tests depend on.
+func waitAgentTask(t *testing.T, provider *K8sProvider, taskID string, want model.TaskState) model.PullTask {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, task := range provider.agent.tasksSnapshot() {
+			if task.ID != taskID {
+				continue
+			}
+			if task.State.Active() {
+				break
+			}
+			if task.State != want {
+				t.Fatalf("task %s reached %q, want %q (%+v)", taskID, task.State, want, task)
+			}
+			return task
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("task %s did not reach %q", taskID, want)
+	return model.PullTask{}
+}
+
 func findTask(t *testing.T, tasks []model.PullTask, taskID string) model.PullTask {
 	t.Helper()
 	for _, task := range tasks {
@@ -530,8 +555,10 @@ func TestAgentTriggerPullSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TriggerPull: %v", err)
 	}
-	if task.State != model.TaskSucceeded {
-		t.Fatalf("task state = %q, want succeeded (%+v)", task.State, task)
+	// Live pulls are asynchronous: TriggerPull returns the running task at once
+	// and the agent request happens in the background.
+	if task.State != model.TaskRunning {
+		t.Fatalf("task state = %q, want running (%+v)", task.State, task)
 	}
 	if task.ID == "" || task.Cluster != "test-cluster" || task.Image != "ghcr.io/acme/app:1.0.0" || task.Node != "worker-01" {
 		t.Fatalf("task identity = %+v", task)
@@ -539,7 +566,11 @@ func TestAgentTriggerPullSuccess(t *testing.T) {
 	if task.Actor != "alice" || task.Trigger != model.TriggerManual {
 		t.Fatalf("task actor/trigger = %+v", task)
 	}
-	if task.StartedAt == nil || task.FinishedAt == nil || task.DurationMs < 0 {
+	if task.StartedAt == nil {
+		t.Fatalf("running task has no StartedAt: %+v", task)
+	}
+	task = waitAgentTask(t, provider, task.ID, model.TaskSucceeded)
+	if task.FinishedAt == nil || task.DurationMs < 0 {
 		t.Fatalf("task timestamps = %+v", task)
 	}
 	if _, pullCalls := agent.stats(); pullCalls != 1 {
@@ -580,14 +611,18 @@ func TestAgentTriggerPullDiskPaused(t *testing.T) {
 	task, err := provider.TriggerPull(context.Background(), model.PullRequest{
 		Image: "ghcr.io/acme/app:1.0.0", Node: "worker-01", Actor: "bob", Trigger: model.TriggerAuto,
 	})
-	if !errors.Is(err, ErrAgentDiskPaused) {
-		t.Fatalf("TriggerPull error = %v, want ErrAgentDiskPaused", err)
+	if err != nil {
+		t.Fatalf("TriggerPull: %v", err)
 	}
-	if !strings.Contains(err.Error(), "paused") {
-		t.Fatalf("error = %q, want the agent disk-pause reason", err)
+	if task.State != model.TaskRunning {
+		t.Fatalf("task state = %q, want running", task.State)
 	}
-	if task.State != model.TaskFailed || !strings.Contains(task.Error, "paused") {
-		t.Fatalf("failed task = %+v, want state failed with paused cause", task)
+	task = waitAgentTask(t, provider, task.ID, model.TaskFailed)
+	if !strings.Contains(task.Error, "paused") {
+		t.Fatalf("failed task = %+v, want the agent disk-pause cause", task)
+	}
+	if !strings.Contains(task.Error, ErrAgentDiskPaused.Error()) {
+		t.Fatalf("task error = %q, want it to carry ErrAgentDiskPaused", task.Error)
 	}
 	if _, pullCalls := agent.stats(); pullCalls != 1 {
 		t.Fatalf("pull calls = %d, want 1", pullCalls)
@@ -622,12 +657,16 @@ func TestAgentPullTimeoutIsConfigurable(t *testing.T) {
 	}, WithAgentPullTimeout(20*time.Millisecond))
 
 	started := time.Now()
-	_, err := provider.TriggerPull(context.Background(), model.PullRequest{Image: "acme/app:1.0.0", Node: "worker-01"})
-	if !errors.Is(err, ErrAgentUnavailable) {
-		t.Fatalf("TriggerPull error = %v, want ErrAgentUnavailable (deadline exceeded)", err)
+	task, err := provider.TriggerPull(context.Background(), model.PullRequest{Image: "acme/app:1.0.0", Node: "worker-01"})
+	if err != nil {
+		t.Fatalf("TriggerPull: %v", err)
 	}
-	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
-		t.Fatalf("pull waited %s, want it bounded by the configured pull timeout", elapsed)
+	task = waitAgentTask(t, provider, task.ID, model.TaskFailed)
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("pull failed after %s, want it bounded by the configured pull timeout", elapsed)
+	}
+	if !strings.Contains(task.Error, "deadline") && !strings.Contains(task.Error, ErrAgentUnavailable.Error()) {
+		t.Fatalf("task error = %q, want the pull deadline", task.Error)
 	}
 }
 
@@ -654,14 +693,15 @@ func TestAgentTriggerPullFailures(t *testing.T) {
 			task, err := provider.TriggerPull(context.Background(), model.PullRequest{
 				Image: "acme/app:1.0.0", Node: "worker-01",
 			})
-			if !errors.Is(err, tt.wantErr) {
-				t.Fatalf("error = %v, want %v", err, tt.wantErr)
+			if err != nil {
+				t.Fatalf("TriggerPull: %v", err)
 			}
-			if !strings.Contains(err.Error(), tt.wantSubstr) {
-				t.Fatalf("error = %q, want substring %q", err, tt.wantSubstr)
+			task = waitAgentTask(t, provider, task.ID, model.TaskFailed)
+			if !strings.Contains(task.Error, tt.wantErr.Error()) {
+				t.Fatalf("task error = %q, want %q", task.Error, tt.wantErr)
 			}
-			if task.State != model.TaskFailed {
-				t.Fatalf("task = %+v, want failed", task)
+			if !strings.Contains(task.Error, tt.wantSubstr) {
+				t.Fatalf("task error = %q, want substring %q", task.Error, tt.wantSubstr)
 			}
 		})
 	}
@@ -674,14 +714,21 @@ func TestAgentTriggerPullUnreachable(t *testing.T) {
 	})
 	server.Close() // connection refused
 
-	_, err := provider.TriggerPull(context.Background(), model.PullRequest{Image: "acme/app:1.0.0", Node: "worker-01"})
-	if !errors.Is(err, ErrAgentUnavailable) {
-		t.Fatalf("error = %v, want ErrAgentUnavailable", err)
+	task, err := provider.TriggerPull(context.Background(), model.PullRequest{Image: "acme/app:1.0.0", Node: "worker-01"})
+	if err != nil {
+		t.Fatalf("TriggerPull: %v", err)
+	}
+	if failed := waitAgentTask(t, provider, task.ID, model.TaskFailed); !strings.Contains(failed.Error, ErrAgentUnavailable.Error()) {
+		t.Fatalf("task error = %q, want ErrAgentUnavailable", failed.Error)
 	}
 
 	// A node without InternalIP cannot be addressed either.
 	noAddress := newAgentProvider(t, server, []runtime.Object{testNode("worker-02", true)})
-	if _, err := noAddress.TriggerPull(context.Background(), model.PullRequest{Image: "acme/app:1.0.0", Node: "worker-02"}); !errors.Is(err, ErrAgentUnavailable) {
+	noAddrTask, err := noAddress.TriggerPull(context.Background(), model.PullRequest{Image: "acme/app:1.0.0", Node: "worker-02"})
+	if err != nil {
+		t.Fatalf("TriggerPull (no address): %v", err)
+	}
+	if failed := waitAgentTask(t, noAddress, noAddrTask.ID, model.TaskFailed); !strings.Contains(failed.Error, ErrAgentUnavailable.Error()) {
 		t.Fatalf("no-address error = %v, want ErrAgentUnavailable", err)
 	}
 }
@@ -697,15 +744,13 @@ func TestAgentTriggerPullIdempotentAndCancel(t *testing.T) {
 	})
 
 	request := model.PullRequest{Image: "acme/app:1.0.0", Node: "worker-01", Trigger: model.TriggerManual}
-	type result struct {
-		task model.PullTask
-		err  error
+	first, err := provider.TriggerPull(context.Background(), request)
+	if err != nil {
+		t.Fatalf("TriggerPull: %v", err)
 	}
-	first := make(chan result, 1)
-	go func() {
-		task, err := provider.TriggerPull(context.Background(), request)
-		first <- result{task: task, err: err}
-	}()
+	if first.State != model.TaskRunning {
+		t.Fatalf("task state = %q, want running", first.State)
+	}
 
 	select {
 	case <-agent.pullStart:
@@ -718,32 +763,37 @@ func TestAgentTriggerPullIdempotentAndCancel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second TriggerPull: %v", err)
 	}
-	if second.State != model.TaskRunning {
-		t.Fatalf("second task state = %q, want running", second.State)
+	if second.ID != first.ID || second.State != model.TaskRunning {
+		t.Fatalf("second task = %+v, want the running first one %q", second, first.ID)
 	}
 	if _, pullCalls := agent.stats(); pullCalls != 1 {
 		t.Fatalf("pull calls = %d, want 1 (idempotent)", pullCalls)
 	}
 
-	// A running synchronous pull cannot be canceled: documented sentinel, not a 500.
-	if err := provider.CancelPull(context.Background(), second.ID); !errors.Is(err, ErrCancelNotSupported) {
-		t.Fatalf("CancelPull(running) = %v, want ErrCancelNotSupported", err)
+	// A running pull is cancelable: the hub cancels the agent request, and the
+	// task ends canceled with a canceled counter (not success/failure).
+	if err := provider.CancelPull(context.Background(), second.ID); err != nil {
+		t.Fatalf("CancelPull(running) = %v, want nil", err)
+	}
+	canceled := waitAgentTask(t, provider, second.ID, model.TaskCanceled)
+	if canceled.FinishedAt == nil || !strings.Contains(canceled.Error, "canceled") {
+		t.Fatalf("canceled task = %+v", canceled)
+	}
+	counters := provider.PullCounters()
+	if len(counters) != 1 || counters[0].Result != "canceled" || counters[0].Count != 1 {
+		t.Fatalf("counters after cancel = %+v", counters)
 	}
 
-	close(agent.pullWait)
-	select {
-	case got := <-first:
-		if got.err != nil {
-			t.Fatalf("first TriggerPull: %v", got.err)
+	// The pull goroutine must not overwrite the canceled state afterwards.
+	time.Sleep(50 * time.Millisecond)
+	var stored model.PullTask
+	for _, task := range provider.agent.tasksSnapshot() {
+		if task.ID == second.ID {
+			stored = task
 		}
-		if got.task.State != model.TaskSucceeded {
-			t.Fatalf("first task state = %q, want succeeded", got.task.State)
-		}
-		if got.task.ID != second.ID {
-			t.Fatalf("task ids differ: %q vs %q", got.task.ID, second.ID)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("first TriggerPull did not finish")
+	}
+	if stored.State != model.TaskCanceled {
+		t.Fatalf("stored task = %+v, want canceled", stored)
 	}
 
 	// Finished tasks follow MockProvider semantics; unknown ids are ErrTaskNotFound.
@@ -751,7 +801,7 @@ func TestAgentTriggerPullIdempotentAndCancel(t *testing.T) {
 	if finishedErr == nil {
 		t.Fatalf("CancelPull(finished) must return an error")
 	}
-	if errors.Is(finishedErr, ErrTaskNotFound) || errors.Is(finishedErr, ErrCancelNotSupported) {
+	if errors.Is(finishedErr, ErrTaskNotFound) {
 		t.Fatalf("CancelPull(finished) = %v, want already-finished semantics", finishedErr)
 	}
 	if !strings.Contains(finishedErr.Error(), "already finished") {
@@ -781,9 +831,17 @@ func TestAgentTriggerWorkloadPull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TriggerWorkloadPull: %v", err)
 	}
-	// 2 images x 1 node with a live agent.
+	// 2 images x 1 node with a live agent: TriggerWorkloadPull counts starts, and
+	// the pulls themselves run asynchronously.
 	if triggered != 2 {
 		t.Fatalf("triggered = %d, want 2", triggered)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, pullCalls := agent.stats(); pullCalls >= 2 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 	if _, pullCalls := agent.stats(); pullCalls != 2 {
 		t.Fatalf("agent pull calls = %d, want 2", pullCalls)

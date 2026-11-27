@@ -97,6 +97,8 @@ Secret. Ключи в Secret:
 | `users` | `PREPULLER_USERS` | hub | Опциональный список пользователей `name:password:role,...` (роли `viewer`/`operator`); multi-user авторизация работает — hub собирает пользователей из этого списка. |
 | — | `PREPULLER_REMOTE_CLUSTERS` | hub | Direct-режим: опциональный список spoke `name=url=token,...`; hub должен уметь достучаться до URL. |
 | `managed-clusters` | `PREPULLER_MANAGED_CLUSTERS` | hub | Outbound-режим: список управляемых кластеров `name=token,...` (токен = `cluster-token` релиза этого spoke). Значение берётся из `hub.managedClusters`; ключ читается с `optional: true`, поэтому старый `existingSecret` без него не ломает hub. Malformed-запись или дубликат имени — hub не стартует. |
+| — | `PREPULLER_WORKLOAD_SELECTOR` | hub + spoke | Kubernetes label selector workload'ов в области действия (в чарте `hub.workloadSelector` / `spoke.workloadSelector`, по умолчанию `prepull=true`). Пусто — все workload'ы. |
+| — | `PREPULLER_NODE_SELECTOR` | hub + spoke | Kubernetes label selector нод в области действия (в чарте `hub.nodeLabelSelector` / `spoke.nodeLabelSelector`). Пусто — все ноды. |
 | — | `PREPULLER_LOGIN_ATTEMPTS_PER_MINUTE` | hub | Опциональный rate-limit логина (по умолчанию 5/мин); проверяется hub. |
 | — | `PREPULLER_LOGIN_BLOCK` | hub | Опциональная длительность блокировки после превышения попыток (Go duration, например `5m`). |
 | — | `PREPULLER_NODE_NAME` | agent | Имя ноды; DaemonSet ставит его из `spec.nodeName`. |
@@ -471,6 +473,8 @@ curl -fsS -H "Authorization: Bearer <agent-token>" \
 | `helm template/upgrade` падает: `spoke.hub.enabled requires spoke.replicaCount=1` | Guard в `deployment-spoke.yaml`: очередь команд hub'а рассчитана на одну реплику spoke | Оставьте `spoke.replicaCount=1`; для HA нужно менять дизайн канала, а не чарт. |
 | Живой Pull на outbound-кластере возвращает `502`, хотя pull на spoke продолжается | Одна попытка команды в outbound-канале ограничена 5 s (как и сетевой таймаут direct-режима), а синхронный pull через node-agent может идти минутами | Это ожидаемо и совпадает с direct-режимом: результат смотрите в следующем снапшоте/`pull-tasks`, задача не потеряна. |
 | Hub отвечает `404 unknown managed cluster` на outbound-ручках | Кластер не перечислен в `PREPULLER_MANAGED_CLUSTERS` (или hub запущен без него) | Добавьте `name=token` в `hub.managedClusters` / ключ `managed-clusters` Secret и перезапустите hub. |
+| Workload виден в kubectl, но не в UI | Он не попал в `hub.workloadSelector` (по умолчанию в чарте `prepull=true`) | `kubectl label deploy/<name> prepull=true` или `--set hub.workloadSelector=` |
+| Нода не видна в панели Nodes | Исключена `hub.nodeLabelSelector` (overlay исключает control-plane) | Уберите/измените селектор; если нужен control-plane — добавьте `agent.tolerations` и очистите `hub.nodeLabelSelector` |
 | Под агента завис в `ContainerCreating`, событие `hostPath type check failed: ... is not a socket file` | `agent.criSocket` указывает на отсутствующий в этом дистрибутиве путь (k3s держит его в `/run/k3s`) | Задайте реальный сокет в `agent.criSocket` (`docker exec <node> ls -l /run/containerd/containerd.sock /run/k3s/containerd/containerd.sock`). |
 | Агент в `CrashLoopBackOff`, `agent config error` или ошибки dial к CRI | Неверный путь к сокету CRI, он не смонтирован или containerd отклоняет соединение | Проверьте `agent.criSocket` и логи агента; для смоука задайте `agent.mock=true` (in-memory образы). |
 | Hub достаёт агента из пробы `kubectl exec`, но ноды всё равно offline | Старый под hub сохранил прежний `agent-token` после смены Secret | `kubectl -n <ns> rollout restart deploy/<hub>` (или передеплой), чтобы окружение перечиталось. |
@@ -649,7 +653,7 @@ workload'ами, так что считайте их ориентировочн�
 | --- | --- |
 | Kubernetes с CRI v1 | агент общается с containerd по gRPC-сокету CRI |
 | сокет containerd на ноде | upstream ```/run/containerd/containerd.sock```; k3s/k3d используют ```/run/k3s/containerd/containerd.sock``` |
-| toleration для control-plane taint | без соответствующей записи ```agent.tolerations``` каждый слот control-plane навсегда остаётся ```offline```, а снапшот — постоянно ```partial``` |
+| область действия нод | агенты из overlay ставятся на воркеры, а `hub.nodeLabelSelector` исключает control-plane (`!node-role.kubernetes.io/control-plane`): такие ноды не показываются и не дают `partial`. Если нужен и control-plane — добавьте `agent.tolerations` и снимите selector |
 | достижимость hub → ```Node.InternalIP:9443``` | агент работает с ```hostNetwork```; hub ходит к нему напрямую, без Service |
 | Prometheus скрейпит IP-адреса нод | агент отдаёт ```/metrics``` на ```:9444``` без авторизации (14.8) |
 | read-only доступ к Nodes и workload'ам | RBAC даёт чарт; не нужен cluster-admin, PVC или локальный registry |
@@ -807,9 +811,10 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
 - ```hub.clusterName``` — имя, которое показывает UI, например ```talos-prod```;
 - ```hub.autoWarm=false``` — reconciler включается после проверки первого
   снапшота (14.7);
-- ```agent.tolerations``` для ```node-role.kubernetes.io/control-plane``` — без
-  него ноды control-plane никогда не получат агента, и снапшот останется
-  partial;
+- ```hub.workloadSelector``` / ```hub.nodeLabelSelector``` — область действия:
+  по умолчанию только workload'ы с ```prepull=true``` и только воркер-ноды
+  (control-plane исключён, поэтому его «нет агента» не превращается в offline-слоты);
+  агенты ставятся на воркеры, toleration для control-plane не нужна;
 - ```hub.tolerations``` — та же toleration для hub: если в кластере нет
   untainted worker-нод (небольшой Talos), без неё под hub'а останется Pending;
 - ```agent.pull.*``` оставлены на дефолтах;
@@ -829,7 +834,7 @@ helm upgrade --install prepuller oci://ghcr.io/vasyakrg/charts/image-prepuller \
 ```bash
 kubectl -n prepuller rollout status deploy/prepuller-image-prepuller --timeout=120s
 kubectl -n prepuller rollout status ds/prepuller-image-prepuller-agent --timeout=120s
-kubectl -n prepuller get pods -o wide      # hub 1/1 + one agent per node, control-plane included
+kubectl -n prepuller get pods -o wide      # hub 1/1 + один агент на воркер-ноду (control-plane вне области)
 kubectl -n prepuller logs ds/prepuller-image-prepuller-agent --tail=5
 # -> backend=cri:/run/containerd/containerd.sock api=v1 auth=true on every node
 ```
@@ -853,7 +858,7 @@ curl -fsS -b /tmp/pc 'http://127.0.0.1:8080/api/v1/snapshot?cluster=<cluster-nam
 | --- | --- |
 | ```clusters[0]``` | ```online=true```, ```readyWorkers=3```, ```totalWorkers=3```, ```totalWorkloads``` ~90, ```coveragePercent``` ~50, ```syncStatus=ok``` |
 | ```summary``` | Deployments ~70, StatefulSets ~10, DaemonSets ~10, ~90 уникальных образов, ~190 из ~375 слотов present |
-| ```nodes[]``` | ```agentUp=true``` везде; ```cachedImageCount``` различается по нодам (нода control-plane кэширует намного меньше) |
+| ```nodes[]``` | ```agentUp=true``` на всех нодах в области действия; ```cachedImageCount``` различается по нодам |
 | ```imageFSUsedBytes``` | масштаба GiB и зависит от ноды; ```imageFSCapacityBytes``` может быть ```0``` — см. 14.7 |
 | ```syncStatus=ok```, ```partial=false``` | ответили все агенты |
 
@@ -887,15 +892,21 @@ curl -fsS -b /tmp/pc 'http://127.0.0.1:8080/api/v1/pull-tasks?cluster=<cluster-n
   | jq '.tasks[] | {image, state, durationMs}'
 ```
 
-В live-провайдере pull синхронный через агента, поэтому ответ ```202``` часто уже
-несёт терминальное состояние (```state=succeeded```) — в скрипте всё равно
-поллите ```/api/v1/pull-tasks```, а не полагайтесь на тело ответа.
+В live-провайдере pull асинхронный: ```202``` несёт ```state=running```, а результат
+(```succeeded```/```failed```/```canceled```) появляется в ```/api/v1/pull-tasks``` и в
+следующем снапшоте — поллите их, а не полагайтесь на тело ответа. ```POST
+/api/v1/pulls/{id}/cancel``` прерывает загрузку: hub закрывает запрос к агенту, и
+агент отменяет CRI ```PullImage``` на ноде.
 
 ### 14.7 Подводные камни кластера
 
-- **Агент на control-plane.** Ноды control-plane помечены taint; DaemonSet
-  требует toleration из overlay, иначе каждый слот control-plane навсегда
-  ```offline``` и ```partial=true```.
+- **Область действия нод.** В overlay агенты ставятся на воркеры, а
+  `hub.nodeLabelSelector: "!node-role.kubernetes.io/control-plane"` убирает
+  control-plane из UI и из слотов. Если нужен и control-plane: верните
+  `agent.tolerations` для `node-role.kubernetes.io/control-plane` **и** очистите
+  `hub.nodeLabelSelector` (иначе нода будет работать, но останется невидимой).
+  Ноду без агента внутри области действия UI показывает как `agentUp=false` +
+  `offline`-слоты — это сигнал сломанного DaemonSet, его не скрывайте.
 - **```imageFSCapacityBytes=0``` на Talos.** ```ImageFsInfo``` в containerd отдаёт
   только used bytes, поэтому disk-guard (```agent.diskPauseRatio```,
   ```ShouldPause```) никогда не срабатывает: нулевая ёмкость считается

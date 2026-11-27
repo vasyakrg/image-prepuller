@@ -46,6 +46,8 @@ func runController(args []string) {
 	mockMode := fs.Bool("mock", false, "Run with interactive in-memory mock data (no Kubernetes required)")
 	clusterName := fs.String("cluster-name", "talos-prod-eu", "Local cluster name")
 	autoWarm := fs.Bool("auto-warm", false, "Enable the auto-pull reconciler for local clusters (Stage 2/3)")
+	workloadSelector := fs.String("workload-selector", os.Getenv("PREPULLER_WORKLOAD_SELECTOR"), "Kubernetes label selector of the workloads this controller manages (default: every workload). Workloads outside it are not listed, shown or pulled: e.g. prepull=true")
+	nodeSelector := fs.String("node-selector", os.Getenv("PREPULLER_NODE_SELECTOR"), "Kubernetes label selector of the nodes in scope (default: every node), e.g. !node-role.kubernetes.io/control-plane when agents run on workers only")
 	hubURL := fs.String("hub-url", os.Getenv("PREPULLER_HUB_URL"), "Spoke only: hub base URL (usually the hub ingress). Set it to run the spoke in outbound mode, where the spoke dials the hub instead of being reachable from it")
 	hubSync := fs.Duration("hub-sync-interval", hubSyncIntervalFromEnv(), "Spoke only: how often the outbound spoke pushes cluster state to the hub")
 	_ = fs.Parse(args)
@@ -61,11 +63,14 @@ func runController(args []string) {
 			localProv = provider.NewMockProvider(*clusterName)
 		} else {
 			liveProv, err := provider.NewK8sProviderFromEnv(*clusterName,
-				provider.WithAgentToken(os.Getenv("PREPULLER_AGENT_TOKEN")))
+				provider.WithAgentToken(os.Getenv("PREPULLER_AGENT_TOKEN")),
+				provider.WithLabelSelector(*workloadSelector),
+				provider.WithNodeSelector(*nodeSelector))
 			if err != nil {
 				log.Fatalf("live Kubernetes provider: %v", err)
 			}
 			log.Printf("live Kubernetes provider for cluster %s (node-agent API v1 on :%d)", *clusterName, provider.DefaultAgentPort)
+			log.Printf("cluster scope: workloads %s, nodes %s", scopeLogValue(*workloadSelector, "all"), scopeLogValue(*nodeSelector, "all"))
 			localProv = liveProv
 		}
 		reg.Register(provider.ClusterEntry{ID: *clusterName, Name: *clusterName, Role: "local", Provider: localProv})
@@ -130,10 +135,13 @@ func runController(args []string) {
 	} else {
 		log.Printf("starting prepuller HUB with the live Kubernetes provider (cluster %s)", *clusterName)
 		liveProv, err := provider.NewK8sProviderFromEnv(*clusterName,
-			provider.WithAgentToken(os.Getenv("PREPULLER_AGENT_TOKEN")))
+			provider.WithAgentToken(os.Getenv("PREPULLER_AGENT_TOKEN")),
+			provider.WithLabelSelector(*workloadSelector),
+			provider.WithNodeSelector(*nodeSelector))
 		if err != nil {
 			log.Fatalf("live Kubernetes provider: %v", err)
 		}
+		log.Printf("cluster scope: workloads %s, nodes %s", scopeLogValue(*workloadSelector, "all"), scopeLogValue(*nodeSelector, "all"))
 		reg.Register(provider.ClusterEntry{ID: *clusterName, Name: *clusterName, Role: "local", Provider: liveProv})
 	}
 
@@ -302,4 +310,12 @@ func parseManagedClusters(raw string) ([]managedCluster, error) {
 		return nil, fmt.Errorf("no name=token entries")
 	}
 	return out, nil
+}
+
+// scopeLogValue renders a label selector for the startup log ("all" when unset).
+func scopeLogValue(selector, empty string) string {
+	if v := strings.TrimSpace(selector); v != "" {
+		return v
+	}
+	return empty
 }

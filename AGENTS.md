@@ -17,6 +17,11 @@ API v1), транспорт провайдер→агент — `internal/provid
 `contract-v2`; agent wire v1 — HTTP/JSON (`/healthz`, `/agent/v1/snapshot`,
 `/agent/v1/images/{ref}`, `/agent/v1/pulls`).
 
+Область действия ограничена метками: `-workload-selector`/`PREPULLER_WORKLOAD_SELECTOR`
+(в чарте по умолчанию `prepull=true`) и `-node-selector`/`PREPULLER_NODE_SELECTOR`
+(overlay исключает control-plane). Всё, что не попало в селектор, не листится, не
+показывается, не считается в покрытии и не прогревается.
+
 Управляемый кластер подключается к hub'у двумя способами: **прямой** (hub → spoke по
 HTTP, `hub.remoteClusters`/`PREPULLER_REMOTE_CLUSTERS`) и **outbound** (spoke сам ходит
 в hub на его ingress, `-hub-url` + `PREPULLER_MANAGED_CLUSTERS`). Второй нужен, когда
@@ -127,7 +132,7 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 | `internal/web/static/` | UI: `index.html`, `app.js`, `styles.css` |
 | `internal/metrics/prometheus.go` | сборка `/metrics` по всем кластерам |
 | `internal/agent/` | node-agent: CRI-клиент (grpc+cri-api), инвентарь образов, disk-guard, preflight-проба реестра и stall-watchdog pull (`registry.go`), HTTP/JSON API v1 |
-| `internal/provider/k8s_*.go` | `K8sProvider` на client-go: list Deployments/STS/DS и Node, слоты image×node, policy-warnings, TTL-кэш снапшота; транспорт к node-agent (snapshot + pull, HTTP/JSON v1, Bearer, таймауты) и `NewK8sProviderFromEnv` |
+| `internal/provider/k8s_*.go` | `K8sProvider` на client-go: list Deployments/STS/DS и Node в области действия (`WithLabelSelector`/`WithNodeSelector`), слоты image×node, policy-warnings, TTL-кэш снапшота; транспорт к node-agent (snapshot + асинхронный pull с отменой, HTTP/JSON v1, Bearer, таймауты) и `NewK8sProviderFromEnv` |
 | `internal/reconcile/` | политика авто-прогрева: очередь, приоритеты (failed > missing, prod > staging > infra), лимиты, backoff |
 | `internal/testutil/` | фейковый spoke/hub, golden-снапшот v2, контрактные тесты |
 | `cmd/prepuller/agent.go` | `runAgent()`: флаги агента, запуск HTTP/JSON сервера, graceful shutdown |
@@ -164,8 +169,13 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
    возвращается как есть (тот же `PullTask.ID`), слот в состоянии `pulling` — no-op
    без ошибки. Офлайн-нода — ошибка, а не тихий успех. `CancelPull` отменяет только
    `queued`/`running`; завершённая задача — ошибка, неизвестный id — `provider.ErrTaskNotFound`.
-5. **Pull-операции асинхронные.** HTTP-ответ `202` (+ `PullTask`), результат — только через
-   следующий `Snapshot.Tasks`/`Snapshot.Activity`. Не делайте хендлер блокирующим.
+   Отмена `running` в live-режиме закрывает запрос к агенту, агент отменяет CRI
+   `PullImage`, задача становится `canceled` (не `failed`), счётчик — `result=canceled`.
+5. **Pull-операции асинхронные, включая live-путь.** HTTP-ответ `202` (+ `PullTask`
+   `state=running`), результат — только через следующий `Snapshot.Tasks`/`Snapshot.Activity`.
+   `K8sProvider.TriggerPull` запускает горутину со своим deadline (`pullTimeout`) и сразу
+   возвращает задачу; контекст HTTP-запроса не переживает загрузку. Не делайте хендлер
+   блокирующим и не привязывайте pull к `r.Context()`.
 6. **Все защищённые ручки hub идут через `requireAuth`.** Публичны только `/healthz`,
    `/readyz`, логин/логаут и статика. `/api/v1/auth/me` проверяет cookie сам.
 7. **Spoke-ручки идут через `requireToken`.** Пустой `PREPULLER_CLUSTER_TOKEN` отключает
@@ -280,10 +290,14 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 - **`K8sProvider` без node-agent**: слоты `offline`, `syncStatus=degraded`, `partial=true` —
   это ожидаемо (агент не отдал инвентарь), а не баг. Pull в live-режиме идёт через агент.
 - **K8sProvider ходит в агент по HTTP на :9443** (`WithAgentPort/Token/Timeout/Scheme`, адрес —
-  `Node.status.addresses` InternalIP). Pull синхронный: `CancelPull` для выполняющегося →
-  `ErrCancelNotSupported` (409), для завершённого → «already finished», для неизвестного →
+  `Node.status.addresses` InternalIP). Pull асинхронный: `TriggerPull` регистрирует задачу,
+  запускает горутину с `pullTimeout` и сразу отдаёт `running`; `CancelPull` для running
+  отменяет контекст горутины (агентский HTTP-запрос закрывается, CRI `PullImage` на ноде
+  отменяется), для завершённой задачи → «already finished», для неизвестного →
   `ErrTaskNotFound` (404). 409 от агента = диск-пауза → failed-задача и
   `errors.Is(err, provider.ErrAgentDiskPaused)`; недоступный агент — `502` (`ErrAgentUnavailable`).
+  `finishTask` переводит задачу только из активного состояния, поэтому гонка «отмена vs
+  завершение» не перезаписывает `canceled` на `failed` и не пишет лишний счётчик.
   `k8s_nodes.go` опрашивает ноды последовательно, поэтому при массовом недоступе агентов
   снапшот тормозит до `WithAgentTimeout` (5 s) на ноду.
 - **Pull-гигиена агента: probe реестра + stall watchdog.** Pull синхронный, и CRI не даёт
@@ -322,9 +336,9 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 - **Команда — 5 s на попытку.** `SpokeHubConfig.CommandTimeout` — таймаут одного
   round trip (очередь long-poll + исполнение), он играет роль 5-секундного сетевого
   таймаута прямого режима, а retry-политика state-changing вызовов остаётся сверху (до 3
-  попыток). Живой pull через node-agent синхронный и дольше: hub ответит `502`, как и в
-  прямом режиме, а задача продолжится на spoke. Не растягивайте таймаут до минут —
-  web-хендлер держит запрос.
+  попыток). Живой pull на spoke стартует асинхронно (202 + running-задача) и в бюджет
+  укладывается; загрузка идёт в фоне, поэтому командный транспорт её больше не ограничивает.
+  Не растягивайте таймаут до минут — web-хендлер ждёт round trip.
 - **Redelivery at-least-once.** Неподтверждённая команда переотправляется через 10 s;
   spoke помнит результаты последних 512 id и повторно их только переотправляет. Меняете
   формат команды — правьте обе стороны (`spoke_wire.go`, `spokeclient`), иначе получите
@@ -333,6 +347,16 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
   `hub.remoteClusters` (`name=url=token`) — прямой; `hub.managedClusters` (`name=token`)
   вместе с `spoke.hub.*` — outbound. Одно имя в обоих списках даст два провайдера на один
   UI-id (последняя регистрация перезапишет первую).
+- **Область действия — это фильтр на входе, а не скрытие в UI.** `WithLabelSelector`
+  уходит в `ListOptions` для Deployments/STS/DS, `WithNodeSelector` — для Nodes, поэтому
+  вне области не существует ни workload'ов, ни слотов: не показывать «на всякий случай»
+  нельзя, их просто нет в снапшоте. Метка ставится на объект workload'а (Deployment/STS/DS),
+  не на pod template. `MockProvider` демо-данные не фильтрует — это только UI-режим.
+- **Чарт 0.6.0: `hub.workloadSelector`/`spoke.workloadSelector` по умолчанию `prepull=true`.**
+  Это поведенческое (ломающее) изменение: без метки workload'ы не видны и не прогреваются.
+  Снять ограничение — `--set hub.workloadSelector=`. Overlay'и дополнительно ставят
+  `nodeLabelSelector: "!node-role.kubernetes.io/control-plane"` и больше не дают агенту
+  toleration control-plane.
 - **Ломающие изменения values 0.4.0 → 0.5.0**: мониторинг переехал в раздел
   компонента, чьи серии он покрывает — `serviceMonitor.*` → `hub.serviceMonitor.*`,
   `prometheusRule.*` → `hub.prometheusRule.*`, `agent.serviceMonitor.*` →
@@ -363,8 +387,10 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
   срабатывает никогда (нулевая ёмкость = «не пауза», fail-open).
   `prepuller_node_imagefs_used_bytes` при этом есть — алертить надо на диск ноды,
   а не на паузу pull'ов; stall watchdog не страдает (он тоже смотрит на used).
-  Control-plane ноды с taint `NoSchedule` требуют toleration в DaemonSet, иначе
-  их слоты вечно `offline` и `partial=true`.
+  Control-plane ноды в overlay вне области действия (`hub.nodeLabelSelector:
+  "!node-role.kubernetes.io/control-plane"`, агенты — только на воркерах), поэтому
+  их taint и отсутствие агента не дают `offline`-слотов. Нужен control-plane —
+  верните `agent.tolerations` **и** очистите `nodeLabelSelector`.
 - **`RemoteProvider.PullCounters()` ходит в `GET /internal/v1/counters`** (contract v2);
   при недоступном spoke возвращает `nil` — это по-прежнему значит «метрик нет», а не «ноль».
 - **Транспорт hub→spoke ретраит только идемпотентные state-changing вызовы** (pull, workload-pull, cancel, reconcile): 3 попытки, backoff 150 ms → 2 s, таймаут 5 s на попытку. `Snapshot`, `counters` и `health` ходят одним запросом, чтобы мёртвый spoke не тормозил UI и скрейп. `ErrSpokeUnavailable`/`ErrSpokeUnauthorized` → `502` (`pullErrorStatus`), `ErrTaskNotActive` → `409`.
@@ -400,7 +426,7 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 
 - [ ] `gofmt -l .` пуст, `go vet ./...` и `go test ./...` зелёные.
 - [ ] `go build -o bin/prepuller ./cmd/prepuller` проходит.
-- [ ] `helm lint deploy/helm/image-prepuller` (defaults, `deploy/values/hub-cluster.yaml`, `deploy/values/managed-cluster.yaml`) и `helm template` проходят: defaults, полный набор (`spoke`, `agent`, `hub.ingress`, `agent.networkPolicy`, `hub.serviceMonitor`, `hub.prometheusRule`, `agent.metrics.serviceMonitor`, `agent.metrics.prometheusRule`, `--api-versions monitoring.coreos.com/v1`), а также `hub.enabled=false`, `agent.enabled=false`, оба overlay'я и outbound-вариант (`spoke.enabled=true`, `spoke.hub.enabled=true`, `spoke.hub.url` задан, `hub.enabled=false`) — компоненты должны реально исчезать из рендера, managed-кластер не рендерить ни Ingress, ни hub-контейнер, outbound-рендер содержать `-hub-url`, а пустой `spoke.hub.url` и `spoke.replicaCount>1` — падать.
+- [ ] `helm lint deploy/helm/image-prepuller` (defaults, `deploy/values/hub-cluster.yaml`, `deploy/values/managed-cluster.yaml`) и `helm template` проходят: defaults, полный набор (`spoke`, `agent`, `hub.ingress`, `agent.networkPolicy`, `hub.serviceMonitor`, `hub.prometheusRule`, `agent.metrics.serviceMonitor`, `agent.metrics.prometheusRule`, `--api-versions monitoring.coreos.com/v1`), область действия (`-workload-selector=prepull=true`, `-node-selector=!node-role.kubernetes.io/control-plane`; пустые селекторы не рендерят флаг), а также `hub.enabled=false`, `agent.enabled=false`, оба overlay'я и outbound-вариант (`spoke.enabled=true`, `spoke.hub.enabled=true`, `spoke.hub.url` задан, `hub.enabled=false`) — компоненты должны реально исчезать из рендера, managed-кластер не рендерить ни Ingress, ни hub-контейнер, outbound-рендер содержать `-hub-url`, а пустой `spoke.hub.url` и `spoke.replicaCount>1` — падать.
 - [ ] Изменённое поведение отражено в `README.md` (API/флаги/метрики) и, если затронута
   архитектура, в `docs/architecture.md`.
 - [ ] Новые эндпоинты и middleware покрыты тестами; UI-путь проверен вручную

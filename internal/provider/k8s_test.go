@@ -258,6 +258,55 @@ func TestK8sProviderNamespaceAndLabelSelector(t *testing.T) {
 	}
 }
 
+func TestK8sProviderNodeLabelSelector(t *testing.T) {
+	worker := testNode("worker-01", true)
+	worker.Labels = map[string]string{"node-role.kubernetes.io/worker": ""}
+	controlPlane := testNode("cp-01", true)
+	controlPlane.Labels = map[string]string{"node-role.kubernetes.io/control-plane": ""}
+
+	cs := kubefake.NewSimpleClientset(
+		worker,
+		controlPlane,
+		testDeployment("prod", "api", 1,
+			[]corev1.Container{testContainer("app", "acme/api:1.0.0", corev1.PullIfNotPresent)}, nil),
+	)
+	var nodeSelectors []string
+	cs.PrependReactor("list", "nodes", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		nodeSelectors = append(nodeSelectors, action.(clienttesting.ListAction).GetListRestrictions().Labels.String())
+		return false, nil, nil
+	})
+
+	p := newTestProvider(cs, map[string]NodeInventory{},
+		WithNodeSelector("!node-role.kubernetes.io/control-plane"))
+
+	snap := p.Snapshot(context.Background())
+	if len(snap.Nodes) != 1 || snap.Nodes[0].Name != "worker-01" {
+		t.Fatalf("nodes = %+v, want only worker-01", snap.Nodes)
+	}
+	if snap.Summary.TotalWorkers != 1 {
+		t.Fatalf("totalWorkers = %d, want 1", snap.Summary.TotalWorkers)
+	}
+	// The slot matrix follows the node scope: no slots for the excluded node.
+	for _, workload := range snap.Workloads {
+		for _, image := range workload.Images {
+			for _, slot := range image.Nodes {
+				if slot.Node != "worker-01" {
+					t.Fatalf("slot for out-of-scope node %q: %+v", slot.Node, slot)
+				}
+			}
+		}
+	}
+	found := false
+	for _, selector := range nodeSelectors {
+		if selector == "!node-role.kubernetes.io/control-plane" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("node selector was not passed to the API: %v", nodeSelectors)
+	}
+}
+
 // --- nodes, conditions, inventory ------------------------------------------
 
 func TestK8sProviderNodesAndConditions(t *testing.T) {

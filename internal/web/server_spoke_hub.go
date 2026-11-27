@@ -116,4 +116,3 @@ func decodeLimitedJSON(w http.ResponseWriter, r *http.Request, dst any, limit in
 	writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
 	return false
 }
-

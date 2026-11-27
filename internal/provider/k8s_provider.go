@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,14 +46,15 @@ type K8sProvider struct {
 	clientset kubernetes.Interface
 	clusterID string
 
-	namespaces     []string // empty means all namespaces
-	labelSelector  string
-	inventory      NodeInventorySource
-	agent          *agentTransport // default inventory + pull transport (k8s_agent.go)
-	diskPauseRatio float64
-	kubeletGCRatio float64
-	snapshotTTL    time.Duration
-	healthTimeout  time.Duration
+	namespaces        []string // empty means all namespaces
+	labelSelector     string   // workload scope ("" = every workload)
+	nodeLabelSelector string   // node scope ("" = every node)
+	inventory         NodeInventorySource
+	agent             *agentTransport // default inventory + pull transport (k8s_agent.go)
+	diskPauseRatio    float64
+	kubeletGCRatio    float64
+	snapshotTTL       time.Duration
+	healthTimeout     time.Duration
 
 	// now and versionFn are seams for deterministic tests; production uses
 	// time.Now and the discovery client.
@@ -89,9 +91,18 @@ func WithNamespaces(namespaces ...string) K8sOption {
 }
 
 // WithLabelSelector restricts workload listing to one label selector,
-// e.g. "prepuller.io/enabled=true".
+// e.g. "prepull=true". Workloads without the label are not listed, so the UI,
+// the reconciler and pull actions never see or touch them.
 func WithLabelSelector(selector string) K8sOption {
-	return func(p *K8sProvider) { p.labelSelector = selector }
+	return func(p *K8sProvider) { p.labelSelector = strings.TrimSpace(selector) }
+}
+
+// WithNodeSelector restricts node listing (and therefore the image x node slot
+// matrix) to one label selector, e.g. "!node-role.kubernetes.io/control-plane"
+// when the agent DaemonSet runs on workers only. Nodes outside the selector are
+// not shown, not counted in coverage and not pulled to.
+func WithNodeSelector(selector string) K8sOption {
+	return func(p *K8sProvider) { p.nodeLabelSelector = strings.TrimSpace(selector) }
 }
 
 // WithSnapshotTTL sets the snapshot cache TTL; zero or negative disables caching.

@@ -114,6 +114,17 @@ hub:
   # inbound route into the managed cluster is needed. Prefer a pre-created
   # secret.existingSecret with the same "managed-clusters" key in production.
   managedClusters: ""
+  # Kubernetes label selector of the workloads this controller manages. Workloads
+  # without the label are not listed, not shown in the UI and cannot be pulled:
+  # the product warms only what is explicitly opted in. Empty string = every
+  # workload. Example: "prepull=true".
+  workloadSelector: "prepull=true"
+  # Kubernetes label selector of the nodes in scope ("" = every node). When the
+  # agent DaemonSet runs on workers only, exclude control-plane nodes here and
+  # their missing agents stop showing up as offline slots/warnings:
+  # "!node-role.kubernetes.io/control-plane". Nodes outside the scope are not
+  # shown, not counted in coverage and never pulled to.
+  nodeLabelSelector: ""
   service:
     type: ClusterIP
     httpPort: 8080
@@ -209,6 +220,10 @@ spoke:
     url: ""
     # How often the spoke pushes cluster state to the hub.
     syncInterval: 3s
+  # Workload/node scope of this spoke (same meaning as under hub: the spoke runs
+  # its own K8sProvider against the cluster it manages).
+  workloadSelector: "prepull=true"
+  nodeLabelSelector: ""
   service:
     type: ClusterIP
     httpPort: 8081

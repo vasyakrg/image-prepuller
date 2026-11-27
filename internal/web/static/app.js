@@ -447,7 +447,7 @@
           <td class="mono">${esc(ev.image)}</td>
           <td>${esc(ev.trigger)}${ev.actor ? " · " + esc(ev.actor) : ""}</td>
           <td class="mono muted">${ev.durationMs ? (ev.durationMs / 1000).toFixed(2) + "s" : "—"}</td>
-          <td>${resBadge}${ev.error ? ` <span class="cell-err">${esc(ev.error)}</span>` : ""}</td>
+          <td>${resBadge}${ev.error ? ` <span class="cell-err cell-err-clip" title="${esc(ev.error)}">${esc(ev.error)}</span>` : ""}</td>
         </tr>
       `;
     }).join("");
@@ -494,7 +494,7 @@
           <td class="mono">#${t.attempt ?? 1}</td>
           <td>${esc(trigger)}</td>
           <td class="mono muted">${created} · ${taskDuration(t)}</td>
-          <td>${t.error ? `<span class="cell-err">${esc(t.error)}</span>` : '<span class="muted">—</span>'}</td>
+          <td>${t.error ? `<span class="cell-err cell-err-clip" title="${esc(t.error)}">${esc(t.error)}</span>` : '<span class="muted">—</span>'}</td>
           <td class="right">${cancelBtn}</td>
         </tr>
       `;

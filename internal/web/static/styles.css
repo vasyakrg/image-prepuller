@@ -429,3 +429,16 @@ input:focus-visible {
   font-size: 13px;
   z-index: 50;
 }
+
+/* Pull tasks / activity: a long agent error must not wrap into a wall of text
+   and stretch the whole row (and the table height) with it. Keep it on one line
+   and expose the full message in the tooltip. */
+.cell-err-clip {
+  display: inline-block;
+  max-width: 320px;
+  vertical-align: middle;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  word-break: normal;
+}

@@ -4,6 +4,14 @@ image-prepuller {{ .Chart.AppVersion }} is installed as "{{ .Release.Name }}" in
 
 Image: {{ include "ip.image" . }}
 Components: hub={{ ternary "on" "off" .Values.hub.enabled }}, spoke={{ ternary "on" "off" .Values.spoke.enabled }}, agent={{ ternary "on" "off" .Values.agent.enabled }}, hub.ingress={{ ternary "on" "off" .Values.hub.ingress.enabled }}.
+{{- if .Values.hub.enabled }}
+
+Scope: workloads {{ with .Values.hub.workloadSelector }}selecting "{{ . }}"{{ else }}in every workload{{ end }}, nodes {{ with .Values.hub.nodeLabelSelector }}selecting "{{ . }}"{{ else }}every node{{ end }}.
+{{- if .Values.hub.workloadSelector }}
+Only workloads that carry that label are listed, shown and warmed; label them or
+set hub.workloadSelector="" to manage every workload in the cluster.
+{{- end }}
+{{- end }}
 {{- if eq (include "ip.imageTag" .) "latest" }}
 
 WARNING: image.tag resolved to "latest" (chart {{ .Chart.Version }} is newer than

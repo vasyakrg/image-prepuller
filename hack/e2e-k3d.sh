@@ -177,6 +177,15 @@ kubectl -n "$NAMESPACE" rollout status "deploy/$RELEASE-image-prepuller" --timeo
 kubectl -n "$NAMESPACE" rollout status "ds/$RELEASE-image-prepuller-agent" --timeout=240s >/dev/null
 ok "hub и агенты в состоянии Ready"
 
+log "4.1 область действия: только workload'ы с label prepull=true"
+# Чарт по умолчанию ставит hub.workloadSelector=prepull=true: в UI, в снапшоте и
+# в авто-прогреве участвуют только отмеченные workload'ы. Проверяем оба края —
+# отмеченный попадает, неотмеченный не появляется вовсе.
+kubectl create deployment e2e-in-scope --image="$IMAGE_REPO:$IMAGE_TAG" --replicas=1 >/dev/null 2>&1 || true
+kubectl label deployment e2e-in-scope prepull=true --overwrite >/dev/null
+kubectl create deployment e2e-out-of-scope --image=ghcr.io/acme/ignored:1 --replicas=1 >/dev/null 2>&1 || true
+ok "workload'ы e2e-in-scope (prepull=true) и e2e-out-of-scope созданы"
+
 log "5. port-forward и авторизация"
 [ -n "$PORT" ] || PORT=$(pick_free_port 18080)
 [ -n "$METRICS_PORT" ] || METRICS_PORT=$(pick_free_port 19090)
@@ -209,9 +218,12 @@ assert_snapshot '[.nodes[].agentVersion] | map(select(. != "")) | length == 3' "
 assert_snapshot '.summary.totalWorkers == 3' "totalWorkers=3"
 assert_snapshot '[.nodes[] | .cachedImageCount] | add > 0' "агенты видят образы в CRI-кэше (cachedImageCount>0)"
 assert_snapshot '.summary.totalSlots > 0 and .summary.presentSlots <= .summary.totalSlots' "слоты посчитаны (present/total)"
+assert_snapshot '([.workloads[].name] | index("e2e-in-scope")) != null' "workload с prepull=true попал в снапшот"
+assert_snapshot '([.workloads[].name] | index("e2e-out-of-scope")) == null' "workload без prepull=true не показывается"
 
 log "7. policy violations: :latest + Always"
 kubectl create deployment e2e-latest --image=ghcr.io/acme/api-gateway:latest --replicas=2 >/dev/null 2>&1 || true
+kubectl label deployment e2e-latest prepull=true --overwrite >/dev/null
 wait_snapshot 120 '[.workloads[] | .images[] | .policyViolations[]?] | length >= 2' "две policy violations для mutable-тега"
 note "violations: $(snapshot | jq -c '[.workloads[].images[].policyViolations[]? | .reason] | unique')"
 

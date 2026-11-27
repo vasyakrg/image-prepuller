@@ -43,6 +43,13 @@ spec:
             {{- if .Values.hub.autoWarm }}
             - -auto-warm
             {{- end }}
+            {{- with .Values.hub.workloadSelector }}
+            {{- /* Quoted: a selector may contain "!", "=" or spaces. */}}
+            - {{ printf "-workload-selector=%s" . | quote }}
+            {{- end }}
+            {{- with .Values.hub.nodeLabelSelector }}
+            - {{ printf "-node-selector=%s" . | quote }}
+            {{- end }}
           env:
             - name: PREPULLER_AUTH_USER
               valueFrom:

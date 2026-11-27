@@ -31,7 +31,7 @@ type k8sNode struct {
 // per-node inventory error degrades that node (offline slots) but never fails the
 // whole snapshot, so one dead agent cannot blank the UI.
 func (p *K8sProvider) listNodes(ctx context.Context) ([]k8sNode, error) {
-	list, err := p.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	list, err := p.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: p.nodeLabelSelector})
 	if err != nil {
 		return nil, fmt.Errorf("list nodes: %w", err)
 	}

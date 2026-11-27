@@ -69,6 +69,13 @@ hub:
   # managed cluster). Format: "<name>=<url>=<cluster-token>". Leave empty to use
   # outbound mode only.
   remoteClusters: ""
+  # Only workloads opted in with this label are listed, shown in the UI and
+  # warmed. Set it to "" to manage every workload in the cluster instead.
+  workloadSelector: "prepull=true"
+  # Agents run on workers only (see agent.* below): control-plane nodes are out
+  # of scope, so they are not shown and their missing agents do not turn into
+  # offline slots / permanent partial snapshots. Set "" to include them.
+  nodeLabelSelector: "!node-role.kubernetes.io/control-plane"
   # Small Talos installs have no untainted worker nodes, so the hub needs the
   # same toleration as the agent or its pod stays Pending.
   tolerations:
@@ -124,13 +131,10 @@ agent:
     stallWatch: true
     stallTimeout: 60s
     timeout: 10m
-  # Control-plane nodes carry a taint and the hub expects an agent on every
-  # node: without this toleration their slots stay offline and the snapshot is
-  # permanently partial.
-  tolerations:
-    - key: node-role.kubernetes.io/control-plane
-      operator: Exists
-      effect: NoSchedule
+  # Agents run on workers only: hub.nodeLabelSelector above excludes
+  # control-plane nodes, so no control-plane toleration is needed here. If you do
+  # want control-plane covered, add the toleration back and set
+  # hub.nodeLabelSelector: "" (nodes outside the scope are never shown).
   # The agent runs with hostNetwork=true, so most CNIs never apply this policy;
   # restrict TCP 9443 (agent API) and 9444 (agent metrics) on the node firewall
   # when the node network is not private.

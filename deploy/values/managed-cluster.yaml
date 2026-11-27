@@ -39,6 +39,12 @@ spoke:
   hub:
     enabled: true
     url: https://prepuller.example.com
+  # Only workloads opted in with this label are listed, shown in the hub UI and
+  # warmed in this cluster. "" = every workload.
+  workloadSelector: "prepull=true"
+  # Agents run on workers only (see agent.* below): control-plane nodes are out
+  # of scope and never show up as offline slots. Set "" to include them.
+  nodeLabelSelector: "!node-role.kubernetes.io/control-plane"
   # Exactly one replica in outbound mode: the hub command queue assumes a single
   # spoke replica.
   replicaCount: 1
@@ -82,10 +88,9 @@ agent:
     stallWatch: true
     stallTimeout: 60s
     timeout: 10m
-  tolerations:
-    - key: node-role.kubernetes.io/control-plane
-      operator: Exists
-      effect: NoSchedule
+  # Agents run on workers only: spoke.nodeLabelSelector above excludes
+  # control-plane nodes, so no control-plane toleration is needed. Add it back and
+  # set spoke.nodeLabelSelector: "" if you want control-plane covered too.
   networkPolicy:
     enabled: false
 

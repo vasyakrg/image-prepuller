@@ -60,6 +60,12 @@ spec:
             - {{ printf "-hub-url=%s" .Values.spoke.hub.url | quote }}
             - -hub-sync-interval={{ .Values.spoke.hub.syncInterval }}
             {{- end }}
+            {{- with .Values.spoke.workloadSelector }}
+            - {{ printf "-workload-selector=%s" . | quote }}
+            {{- end }}
+            {{- with .Values.spoke.nodeLabelSelector }}
+            - {{ printf "-node-selector=%s" . | quote }}
+            {{- end }}
           env:
             - name: PREPULLER_CLUSTER_TOKEN
               valueFrom:

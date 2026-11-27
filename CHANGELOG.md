@@ -4,6 +4,24 @@
 
 ### Added
 
+- **Область действия задаётся метками, а не UI-фильтром.** `-workload-selector`
+  (`PREPULLER_WORKLOAD_SELECTOR`) уходит в `ListOptions` для Deployment/STS/DS, а
+  `-node-selector` (`PREPULLER_NODE_SELECTOR`) — для Nodes: всё, что не попало в
+  селектор, не листится, не показывается, не считается в покрытии и не прогревается.
+  В чарте — `hub.workloadSelector` (по умолчанию `prepull=true`) и `hub.nodeLabelSelector`;
+  у ведомого кластера те же ключи под `spoke.*`. Overlay'и исключают control-plane
+  (`!node-role.kubernetes.io/control-plane`) и больше не дают агенту toleration
+  control-plane: агенты живут на воркерах, а их отсутствие на control-plane не превращается
+  в offline-слоты и вечный `partial`.
+- **Live-pull стал асинхронным и отменяемым.** `K8sProvider.TriggerPull` регистрирует
+  задачу, запускает загрузку в горутине с собственным `pullTimeout` и сразу возвращает
+  `running` — HTTP-запрос больше не висит всю загрузку. `CancelPull` для running-задачи
+  отменяет контекст горутины: hub закрывает запрос к агенту, агент отменяет CRI
+  `PullImage` на ноде, задача становится `canceled` (не `failed`), счётчик пишется с
+  `result=canceled`. Гонка «отмена vs завершение» не перезаписывает состояние.
+- **UI: длинная ошибка в Pull Tasks / Activity больше не растягивает таблицу.** Колонка
+  Error обрезается многоточием (`title` — полный текст), строка и таблица сохраняют
+  высоту.
 - **Outbound-режим spoke: управляемый кластер сам ходит к hub'у на его ingress.**
   Прямой режим (hub → spoke по HTTP) требует, чтобы hub дотягивался до кластера; за NAT
   или без ingress в ведомом кластере это невозможно, поэтому появился второй транспорт:
@@ -42,6 +60,16 @@
   `latest` (с предупреждением в NOTES), явный тег — как есть.
 ### Changed
 
+- **Чарт 0.6.0: `prepull=true` по умолчанию и control-plane вне области.**
+  `hub.workloadSelector`/`spoke.workloadSelector` по умолчанию `prepull=true` —
+  поведенческое (ломающее) изменение: workload без метки не виден и не прогревается
+  (снять: `--set hub.workloadSelector=`). `hub.nodeLabelSelector`/`spoke.nodeLabelSelector`
+  в overlay'ях исключают control-plane; `agent.tolerations` для него убраны.
+- **Live-pull больше не мешает outbound-каналу.** Команда `TriggerPull` теперь только
+  стартует загрузку, поэтому живой pull на outbound-кластере укладывается в 5-секундный
+  бюджет и не отвечает `502`; результат — в `tasks` следующего снапшота.
+- **`TriggerWorkloadPull` возвращает число запущенных pull'ов**, а не успешно
+  завершённых: загрузки асинхронные, их результат — в `Snapshot.Tasks`.
 - **Ломающие изменения values (чарт 0.5.0): мониторинг сгруппирован по компоненту.**
   `serviceMonitor.*` → `hub.serviceMonitor.*`, `prometheusRule.*` →
   `hub.prometheusRule.*` (hub и кластерные серии), `agent.serviceMonitor.*` →

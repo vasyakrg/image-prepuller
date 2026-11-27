@@ -71,9 +71,10 @@ var (
 	// ErrAgentDiskPaused reports an agent 409: auto-prepull is paused because the
 	// node ImageFS is above the disk-pause threshold. The image is not touched.
 	ErrAgentDiskPaused = errors.New("node agent paused: image filesystem above threshold")
-	// ErrCancelNotSupported reports CancelPull for a still-running synchronous
-	// agent pull. There is no cancel endpoint on the agent wire contract yet, so
-	// the task keeps running to completion (or its timeout).
+	// ErrCancelNotSupported reports CancelPull for a running pull on an older
+	// provider/spoke that cannot cancel it (the hub maps it to 409). K8sProvider
+	// cancels running pulls by canceling the agent request, so it no longer
+	// returns this sentinel.
 	ErrCancelNotSupported = errors.New("cancel is not supported for synchronous node-agent pulls")
 	// ErrAgentPullStalled reports an agent 504: the pull timed out or stopped
 	// making progress and was cancelled by the agent. The node is healthy, the
@@ -147,7 +148,8 @@ type agentTransport struct {
 	taskMu    sync.Mutex
 	tasks     map[string]*model.PullTask
 	taskOrder []string
-	active    map[string]string // "image|node" -> in-flight task id
+	active    map[string]string             // "image|node" -> in-flight task id
+	cancels   map[string]context.CancelFunc // task id -> cancel of the in-flight pull
 	taskSeq   atomic.Uint64
 
 	counters sync.Map // "image|node|result" -> *atomic.Uint64
@@ -181,6 +183,7 @@ func newAgentTransport(clientset kubernetes.Interface) *agentTransport {
 		addresses:   make(map[string]cachedNodeAddress),
 		tasks:       make(map[string]*model.PullTask),
 		active:      make(map[string]string),
+		cancels:     make(map[string]context.CancelFunc),
 	}
 }
 
@@ -529,10 +532,14 @@ func cachedImagesFromAgent(images []agentImage) []model.CachedImage {
 
 // --- pull / cancel / counters ----------------------------------------------
 
-// TriggerPull executes a synchronous pull through the node agent: POST
-// /agent/v1/pulls blocks until CRI PullImage returns, so the returned task is
-// already succeeded (or failed). 409 disk-paused does not touch the image and is
-// surfaced both as a failed task and as ErrAgentDiskPaused.
+// TriggerPull starts one asynchronous pull through the node agent and returns
+// the running task immediately (Provider invariant 5). POST /agent/v1/pulls
+// blocks until CRI PullImage returns, so the pull runs in its own goroutine with
+// its own deadline: the caller context only has to survive the start, and the
+// HTTP request that triggered the pull no longer hangs for the whole download.
+// CancelPull cancels that goroutine's context, which closes the agent request and
+// aborts the CRI pull on the node (the agent runs PullImage under the request
+// context). A 409 disk-paused does not touch the image and ends the task failed.
 func (p *K8sProvider) TriggerPull(ctx context.Context, req model.PullRequest) (model.PullTask, error) {
 	if p.agent == nil {
 		return model.PullTask{}, fmt.Errorf("k8s provider: TriggerPull: %w", ErrNotImplemented)
@@ -543,6 +550,9 @@ func (p *K8sProvider) TriggerPull(ctx context.Context, req model.PullRequest) (m
 		return model.PullTask{}, errors.New("k8s provider: TriggerPull: image and node are required")
 	}
 	req.Image, req.Node = image, node
+	if err := ctx.Err(); err != nil {
+		return model.PullTask{}, err
+	}
 
 	task, existing := p.agent.beginTask(p.clusterID, req)
 	if existing != nil {
@@ -550,45 +560,62 @@ func (p *K8sProvider) TriggerPull(ctx context.Context, req model.PullRequest) (m
 		return *existing, nil
 	}
 
-	pullCtx, cancel := context.WithTimeout(ctx, p.agent.pullTimeout)
-	defer cancel()
+	pullCtx, cancel := context.WithTimeout(context.Background(), p.agent.pullTimeout)
+	if !p.agent.registerCancel(task.ID, cancel) {
+		// The task was canceled between beginTask and here: do not start a pull.
+		cancel()
+		return p.agent.taskCopy(task.ID), nil
+	}
+	go p.runAgentPull(pullCtx, task.ID, image, node)
+	return *task, nil
+}
 
-	raw, err := p.agent.request(pullCtx, node, http.MethodPost, agentPullsPath, agentPullRequest{Image: image}, p.agent.pullTimeout)
+// runAgentPull performs one asynchronous agent pull and records its result. Any
+// error from the transport ends the task; a canceled task is already terminal, so
+// finishTask reports false and the goroutine leaves counters untouched.
+func (p *K8sProvider) runAgentPull(ctx context.Context, taskID, image, node string) {
+	raw, err := p.agent.request(ctx, node, http.MethodPost, agentPullsPath, agentPullRequest{Image: image}, p.agent.pullTimeout)
 	if err != nil {
-		p.agent.finishTask(task.ID, model.TaskFailed, err.Error())
-		p.agent.recordPull(image, node, "error")
-		p.invalidateSnapshot()
-		return p.agent.taskCopy(task.ID), err
+		p.finishAgentPull(taskID, image, node, model.TaskFailed, err.Error())
+		return
 	}
 
 	var result agentPullResult
 	if err := json.Unmarshal(raw, &result); err != nil {
 		wrapped := fmt.Errorf("%w: node %q: decode pull response: %v", ErrAgentUnavailable, node, err)
-		p.agent.finishTask(task.ID, model.TaskFailed, wrapped.Error())
-		p.agent.recordPull(image, node, "error")
-		p.invalidateSnapshot()
-		return p.agent.taskCopy(task.ID), wrapped
+		p.finishAgentPull(taskID, image, node, model.TaskFailed, wrapped.Error())
+		return
 	}
 	if result.APIVersion != "" && result.APIVersion != agentAPIVersion {
 		wrapped := fmt.Errorf("%w: node %q: pull apiVersion %q, want %q",
 			ErrAgentUnavailable, node, result.APIVersion, agentAPIVersion)
-		p.agent.finishTask(task.ID, model.TaskFailed, wrapped.Error())
-		p.agent.recordPull(image, node, "error")
-		p.invalidateSnapshot()
-		return p.agent.taskCopy(task.ID), wrapped
+		p.finishAgentPull(taskID, image, node, model.TaskFailed, wrapped.Error())
+		return
 	}
-
-	p.agent.finishTask(task.ID, model.TaskSucceeded, "")
-	p.agent.recordPull(image, node, "success")
-	// The image is on the node now: drop the cached snapshot so the next scrape
-	// (and the UI) sees a present slot without waiting for the TTL.
-	p.invalidateSnapshot()
-	return p.agent.taskCopy(task.ID), nil
+	p.finishAgentPull(taskID, image, node, model.TaskSucceeded, "")
 }
 
-// TriggerWorkloadPull pulls every image of one workload to every ready node with
-// a live agent. It mirrors MockProvider: the count is the number of successful
-// image-node pulls, individual failures are skipped.
+// finishAgentPull terminates a task and, only when the transition actually
+// happened, updates the counters and drops the cached snapshot: a canceled task
+// must not be counted as a success or failure.
+func (p *K8sProvider) finishAgentPull(taskID, image, node string, state model.TaskState, errMessage string) {
+	if !p.agent.finishTask(taskID, state, errMessage) {
+		return
+	}
+	result := "error"
+	if state == model.TaskSucceeded {
+		result = "success"
+	}
+	p.agent.recordPull(image, node, result)
+	// Succeeded: the image is on the node now, so drop the cached snapshot and let
+	// the next scrape see a present slot without waiting for the TTL. Failed:
+	// drop it too, so a retry is not masked by a stale "missing" cell.
+	p.invalidateSnapshot()
+}
+
+// TriggerWorkloadPull starts a pull for every image of one workload on every
+// ready node with a live agent and returns how many were started (the pulls run
+// asynchronously). Individual failures are surfaced through Snapshot.Tasks.
 func (p *K8sProvider) TriggerWorkloadPull(ctx context.Context, req model.WorkloadPullRequest) (int, error) {
 	snapshot := p.Snapshot(ctx)
 
@@ -634,15 +661,19 @@ func (p *K8sProvider) TriggerWorkloadPull(ctx context.Context, req model.Workloa
 	return triggered, nil
 }
 
-// CancelPull follows the Provider contract for synchronous agent pulls: unknown
-// ids are ErrTaskNotFound, finished tasks report the MockProvider-style
-// "already finished" error, and only an in-flight pull yields ErrCancelNotSupported
-// (the agent wire contract has no cancel endpoint yet).
+// CancelPull cancels a queued or running pull. A running pull is canceled through
+// its context: the hub closes the agent request and the agent aborts the CRI pull
+// it started for that request. Unknown ids are ErrTaskNotFound; a finished task
+// reports the MockProvider-style "already finished" error (Provider invariant 4).
 func (p *K8sProvider) CancelPull(_ context.Context, taskID string) error {
 	if p.agent == nil {
 		return fmt.Errorf("k8s provider: CancelPull: %w", ErrNotImplemented)
 	}
-	return p.agent.cancelTask(taskID)
+	if err := p.agent.cancelTask(taskID); err != nil {
+		return err
+	}
+	p.invalidateSnapshot()
+	return nil
 }
 
 // PullCounters returns provider-local pull counters (image x node x result),
@@ -838,13 +869,31 @@ func (a *agentTransport) beginTask(cluster string, req model.PullRequest) (creat
 	return &copied, nil
 }
 
-func (a *agentTransport) finishTask(taskID string, state model.TaskState, errMessage string) {
+// registerCancel stores the cancel func of a freshly started pull. It reports
+// false when the task is already terminal (canceled between beginTask and the
+// goroutine start), in which case the caller must not start the pull at all.
+func (a *agentTransport) registerCancel(taskID string, cancel context.CancelFunc) bool {
 	a.taskMu.Lock()
 	defer a.taskMu.Unlock()
 
 	task, ok := a.tasks[taskID]
-	if !ok {
-		return
+	if !ok || !task.State.Active() {
+		return false
+	}
+	a.cancels[taskID] = cancel
+	return true
+}
+
+// finishTask moves an active task to a terminal state and reports whether the
+// transition happened: a task that was canceled first is left untouched, so the
+// pull goroutine cannot overwrite "canceled" with "failed" or count a counter.
+func (a *agentTransport) finishTask(taskID string, state model.TaskState, errMessage string) bool {
+	a.taskMu.Lock()
+	defer a.taskMu.Unlock()
+
+	task, ok := a.tasks[taskID]
+	if !ok || !task.State.Active() {
+		return false
 	}
 	finished := time.Now()
 	task.State = state
@@ -857,20 +906,46 @@ func (a *agentTransport) finishTask(taskID string, state model.TaskState, errMes
 	if a.active[key] == taskID {
 		delete(a.active, key)
 	}
+	delete(a.cancels, taskID)
+	return true
 }
 
+// cancelTask cancels a queued or running pull. The task is marked canceled under
+// the same lock that owns the registry, then the pull context is canceled: the
+// in-flight agent request is closed and the agent aborts the CRI pull.
 func (a *agentTransport) cancelTask(taskID string) error {
 	a.taskMu.Lock()
-	defer a.taskMu.Unlock()
-
 	task, ok := a.tasks[taskID]
 	if !ok {
+		a.taskMu.Unlock()
 		return fmt.Errorf("%w: %s", ErrTaskNotFound, taskID)
 	}
-	if task.State.Active() {
-		return fmt.Errorf("pull task %s is running on the node agent: %w", taskID, ErrCancelNotSupported)
+	if !task.State.Active() {
+		state := task.State
+		a.taskMu.Unlock()
+		return fmt.Errorf("pull task %s is already finished (%s)", taskID, state)
 	}
-	return fmt.Errorf("pull task %s is already finished (%s)", taskID, task.State)
+	finished := time.Now()
+	task.State = model.TaskCanceled
+	task.Error = "canceled by operator"
+	task.FinishedAt = &finished
+	if task.StartedAt != nil {
+		task.DurationMs = finished.Sub(*task.StartedAt).Milliseconds()
+	}
+	image, node := task.Image, task.Node
+	key := image + "|" + node
+	if a.active[key] == taskID {
+		delete(a.active, key)
+	}
+	cancel := a.cancels[taskID]
+	delete(a.cancels, taskID)
+	a.taskMu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	a.recordPull(image, node, "canceled")
+	return nil
 }
 
 func (a *agentTransport) taskCopy(taskID string) model.PullTask {
