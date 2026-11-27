@@ -4,6 +4,12 @@
 
 ### Added
 
+- **Алерты несут `annotations.title` с именем приложения.** Каждое правило в
+  `<fullname>-rules` помечено `title: prepuller-hub`, в `<fullname>-agent-rules` —
+  `title: prepuller-agent`; по этой аннотации группируют алерты Alertmanager-шаблоны,
+  Karma и дежурные дашборды. Аннотация задана в шаблонах (не в values), а helm-гейт CI
+  проверяет, что число `alert` и число `title` совпадает: новое правило без неё
+  не пройдёт.
 - **Приватный реестр: pull получает креды workload'а (`imagePullSecrets`).** Агент
   тянет образ через CRI, а CRI не знает про `imagePullSecrets` пода, поэтому pull был
   анонимным: реестр с логином отвечал `403`, образ оказывался `present` только на той

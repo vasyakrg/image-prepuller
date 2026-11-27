@@ -1,6 +1,9 @@
 {{- if and .Values.hub.prometheusRule.enabled (or .Values.hub.enabled .Values.spoke.enabled) }}
 {{- include "ip.requireMonitoringCRD" (dict "ctx" . "flag" "hub.prometheusRule.enabled") }}
 {{- $thresholds := .Values.hub.prometheusRule.thresholds }}
+{{- /* annotations.title is the app name these rules belong to: alert routing,
+       Alertmanager templates and dashboards in the ops stack group alerts by it. */}}
+{{- $app := "prepuller-hub" }}
 # PrometheusRule for prometheus-operator: hub/cluster series scraped from the
 # hub (:9090) or a spoke (:9091). Rendered for a hub release and for a
 # spoke-only release (the spoke exposes the same series). Agent-process rules
@@ -31,6 +34,7 @@ spec:
           labels:
             severity: critical
           annotations:
+            title: {{ $app }}
             summary: Node agent is down on a Ready node
             description: The hub cannot reach the node agent for {{ $thresholds.nodeAgentDown }}s while the node is Ready. Check the DaemonSet pod, tolerations and node networking.
 
@@ -40,6 +44,7 @@ spec:
           labels:
             severity: warning
           annotations:
+            title: {{ $app }}
             summary: Hub gets 401 from node agents
             description: The hub's agent token is rejected by node agents. Check PREPULLER_AGENT_TOKEN on the hub and the agents.
 
@@ -51,6 +56,7 @@ spec:
           labels:
             severity: warning
           annotations:
+            title: {{ $app }}
             summary: Cluster snapshot has been partial for a long time
             description: Some node agents do not report inventory for {{ $thresholds.clusterPartial }}s. A deliberately excluded node is fine; anything else is a broken agent.
 
@@ -60,6 +66,7 @@ spec:
           labels:
             severity: critical
           annotations:
+            title: {{ $app }}
             summary: Prepuller cluster backend is down
             description: The hub cannot get a consistent snapshot of the cluster for 2m (spoke unreachable or provider failing).
 
@@ -71,6 +78,7 @@ spec:
           labels:
             severity: warning
           annotations:
+            title: {{ $app }}
             summary: Hub snapshot is stale
             description: No successful snapshot for more than {{ $thresholds.snapshotAge }}s; the hub is serving old data.
 
@@ -82,6 +90,7 @@ spec:
           labels:
             severity: warning
           annotations:
+            title: {{ $app }}
             summary: Hub snapshot scrapes are timing out
             description: The hub hit its own snapshot bound; part of the cluster is unreachable from the hub.
 
@@ -95,6 +104,7 @@ spec:
           labels:
             severity: warning
           annotations:
+            title: {{ $app }}
             summary: Node ImageFS usage is high
             description: ImageFS is above {{ $thresholds.imagefsUsedRatio }} of capacity. Clean up unused images or grow the disk.
 
@@ -106,6 +116,7 @@ spec:
           labels:
             severity: warning
           annotations:
+            title: {{ $app }}
             summary: Image pulls are failing
             description: At least one pull failed in 15m. Check the agent logs and the registry.
 {{- end }}

@@ -191,6 +191,9 @@ hub:
     # so the operator's ruleSelector picks it up.
     labels: {}
     # Extra annotations on the PrometheusRule object (not on the individual alerts).
+    # Each alert itself always carries annotations.title=prepuller-hub: alert
+    # routing/templates group by that app name, so it is baked into the template
+    # (CI checks that every alert has it) rather than left to a values override.
     annotations: {}
     thresholds:
       # Seconds an agent may stay down while its node is Ready.
@@ -298,6 +301,9 @@ agent:
     prometheusRule:
       enabled: false
       labels: {}
+      # Extra annotations on the PrometheusRule object; every alert in it always
+      # carries annotations.title=prepuller-agent (app name for alert routing),
+      # baked into the template and checked by the helm gate in CI.
       annotations: {}
       thresholds:
         # Seconds without a hub request to the agent /agent/v1/snapshot endpoint.

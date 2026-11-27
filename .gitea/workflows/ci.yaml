@@ -165,6 +165,13 @@ jobs:
           grep -q 'kind: Deployment' /tmp/hub-only.yaml
           grep -q 'kind: ServiceMonitor' /tmp/full.yaml
           grep -q 'kind: PrometheusRule' /tmp/full.yaml
+          # Every alert carries annotations.title with the app whose series it
+          # covers (prepuller-hub / prepuller-agent): alert routing and
+          # Alertmanager templates group by it, so a rule without it is a bug.
+          alert_count=$(grep -c '^[[:space:]]*- alert:' /tmp/full.yaml)
+          title_count=$(grep -cE '^[[:space:]]+title: prepuller-(hub|agent)$' /tmp/full.yaml)
+          [ "$alert_count" -eq "$title_count" ] || { echo "alerts=$alert_count with annotations.title=$title_count"; exit 1; }
+          ! grep -q 'title: prepuller-agent' /tmp/hub-only.yaml || { echo "hub-only render carries agent rules"; exit 1; }
           grep -q 'replacement: prepuller-agent' /tmp/full.yaml
           grep -q 'kind: Ingress' /tmp/hub-cluster.yaml
           grep -q 'name: ci-image-prepuller-spoke' /tmp/managed-cluster.yaml
