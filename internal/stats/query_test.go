@@ -225,7 +225,7 @@ func TestOverviewAssemblesWindowAggregates(t *testing.T) {
 	}.enqueue(db)
 
 	window := 6 * time.Hour
-	got, err := store.Overview(context.Background(), window)
+	got, err := store.Overview(context.Background(), model.StatsOverviewQuery{Window: window})
 	if err != nil {
 		t.Fatalf("Overview: %v", err)
 	}
@@ -296,9 +296,12 @@ func TestOverviewNullsBecomeZeroAndNil(t *testing.T) {
 		lastSample: nil, lastTask: nil,
 	}.enqueue(db)
 
-	got, err := store.Overview(context.Background(), time.Hour)
+	got, err := store.Overview(context.Background(), model.StatsOverviewQuery{Window: time.Hour})
 	if err != nil {
 		t.Fatalf("Overview: %v", err)
+	}
+	if got.Cluster != "" {
+		t.Fatalf("Cluster = %q, want empty for the all-clusters call", got.Cluster)
 	}
 	if got.Clusters == nil || len(got.Clusters) != 0 {
 		t.Fatalf("Clusters = %#v, want an empty non-nil slice", got.Clusters)
@@ -322,7 +325,7 @@ func TestOverviewClampsNonPositiveWindow(t *testing.T) {
 		store, db := openFakeQuerier(t)
 		overviewFixture{}.enqueue(db)
 
-		got, err := store.Overview(context.Background(), window)
+		got, err := store.Overview(context.Background(), model.StatsOverviewQuery{Window: window})
 		if err != nil {
 			t.Fatalf("Overview(%v): %v", window, err)
 		}
@@ -337,6 +340,62 @@ func TestOverviewClampsNonPositiveWindow(t *testing.T) {
 	}
 }
 
+// TestOverviewClusterFilter covers the cluster filter of the KPI header: every
+// aggregate takes the cluster as an extra bind argument, the echo reports it, and
+// the cluster list stays global so the UI select keeps every option.
+func TestOverviewClusterFilter(t *testing.T) {
+	store, db := openFakeQuerier(t)
+	overviewFixture{clusters: []string{"c1", "c2"}, nodes: 1}.enqueue(db)
+
+	got, err := store.Overview(context.Background(), model.StatsOverviewQuery{Window: 2 * time.Hour, Cluster: " c1 "})
+	if err != nil {
+		t.Fatalf("Overview: %v", err)
+	}
+	if got.Cluster != "c1" {
+		t.Fatalf("Cluster = %q, want the trimmed filter c1", got.Cluster)
+	}
+	if !reflect.DeepEqual(got.Clusters, []string{"c1", "c2"}) {
+		t.Fatalf("Clusters = %#v, want the unfiltered list for the UI select", got.Clusters)
+	}
+
+	// 0: cluster list (global), 1: nodes, 2: open images, 3: closed intervals,
+	// 4: gc, 5: repulls, 6: tasks, 7: last sample, 8: last task.
+	if len(db.querySnapshot()) != 9 {
+		t.Fatalf("Overview ran %d queries, want 9", len(db.querySnapshot()))
+	}
+	wantSQL(t, queryAt(t, db, 0), "UNION", "ORDER BY cluster")
+	wantArgs(t, queryAt(t, db, 0))
+
+	nodesQuery := queryAt(t, db, 1)
+	wantSQL(t, nodesQuery, "DISTINCT cluster, node", "WHERE cluster = $1")
+	wantArgs(t, nodesQuery, "c1")
+
+	openQuery := queryAt(t, db, 2)
+	wantSQL(t, openQuery, "removed_at IS NULL", "AND cluster = $1")
+	wantArgs(t, openQuery, "c1")
+
+	closedQuery := queryAt(t, db, 3)
+	wantSQL(t, closedQuery, "removed_at >= $1", "cluster = $2")
+	wantWindowArg(t, closedQuery, got.From)
+	wantArgs(t, closedQuery, got.From, "c1")
+
+	for _, index := range []int{4, 5, 6} {
+		exec := queryAt(t, db, index)
+		wantSQL(t, exec, "cluster = $2")
+		wantWindowArg(t, exec, got.From)
+		wantArgs(t, exec, got.From, "c1")
+	}
+
+	wantSQL(t, queryAt(t, db, 7), "MAX(sampled_at)", "WHERE cluster = $1")
+	wantArgs(t, queryAt(t, db, 7), "c1")
+	wantSQL(t, queryAt(t, db, 8), "MAX(observed_at)", "WHERE cluster = $1")
+	wantArgs(t, queryAt(t, db, 8), "c1")
+
+	for index := 0; index < len(db.querySnapshot()); index++ {
+		wantPlaceholdersMatchArgs(t, queryAt(t, db, index))
+	}
+}
+
 func TestNodesReturnsLatestSamplePerNode(t *testing.T) {
 	store, db := openFakeQuerier(t)
 	later := baseTime.Add(time.Minute)
@@ -345,7 +404,7 @@ func TestNodesReturnsLatestSamplePerNode(t *testing.T) {
 		[]driver.Value{"c1", "n2", baseTime, false, false, true, int64(0), int64(0), true, int64(0)},
 	)
 
-	nodes, err := store.Nodes(context.Background())
+	nodes, err := store.Nodes(context.Background(), "")
 	if err != nil {
 		t.Fatalf("Nodes: %v", err)
 	}
@@ -375,7 +434,7 @@ func TestNodesEmptyResultIsEmptySlice(t *testing.T) {
 	store, db := openFakeQuerier(t)
 	db.enqueue(nodeColumns)
 
-	nodes, err := store.Nodes(context.Background())
+	nodes, err := store.Nodes(context.Background(), "")
 	if err != nil {
 		t.Fatalf("Nodes: %v", err)
 	}
@@ -385,6 +444,28 @@ func TestNodesEmptyResultIsEmptySlice(t *testing.T) {
 	if len(nodes) != 0 {
 		t.Fatalf("Nodes = %+v, want empty", nodes)
 	}
+}
+
+// TestNodesClusterFilter narrows the node slice on the server, so the nodes table
+// follows the tab's cluster filter instead of slicing all clusters in the browser.
+func TestNodesClusterFilter(t *testing.T) {
+	store, db := openFakeQuerier(t)
+	db.enqueue(nodeColumns,
+		[]driver.Value{"c1", "n1", baseTime, true, true, false, int64(10), int64(20), false, int64(1)},
+	)
+
+	nodes, err := store.Nodes(context.Background(), "c1")
+	if err != nil {
+		t.Fatalf("Nodes: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].Cluster != "c1" || nodes[0].Node != "n1" {
+		t.Fatalf("Nodes = %+v, want the single c1/n1 sample", nodes)
+	}
+
+	query := queryAt(t, db, 0)
+	wantSQL(t, query, "DISTINCT ON (cluster, node)", "WHERE cluster = $1", "ORDER BY cluster, node, sampled_at DESC")
+	wantArgs(t, query, "c1")
+	wantPlaceholdersMatchArgs(t, query)
 }
 
 func TestImagesStateFilters(t *testing.T) {
@@ -785,11 +866,11 @@ func TestQueryErrorsAreWrapped(t *testing.T) {
 		call   func(context.Context, *postgresStore) error
 	}{
 		{"overview", "stats: overview:", func(ctx context.Context, store *postgresStore) error {
-			_, err := store.Overview(ctx, time.Hour)
+			_, err := store.Overview(ctx, model.StatsOverviewQuery{Window: time.Hour})
 			return err
 		}},
 		{"nodes", "stats: nodes:", func(ctx context.Context, store *postgresStore) error {
-			_, err := store.Nodes(ctx)
+			_, err := store.Nodes(ctx, "")
 			return err
 		}},
 		{"images", "stats: images:", func(ctx context.Context, store *postgresStore) error {
@@ -829,7 +910,7 @@ func TestQuerierPassesRequestContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := store.Nodes(ctx)
+	_, err := store.Nodes(ctx, "")
 	if err == nil {
 		t.Fatal("Nodes succeeded with a canceled context")
 	}

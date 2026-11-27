@@ -22,17 +22,18 @@ type fakeStats struct {
 	enabled bool
 	info    model.StatsInfo
 
-	overviewWindow time.Duration
-	overview       model.StatsOverview
-	nodes          []model.StatsNodeSample
-	imagesQuery    *model.StatsImageQuery
-	imagesPage     model.StatsImagePage
-	gcQuery        *model.StatsEventQuery
-	gcPage         model.StatsGCPage
-	repullsQuery   *model.StatsEventQuery
-	repullsPage    model.StatsRepullPage
-	tasksQuery     *model.StatsTaskQuery
-	tasksPage      model.StatsTaskPage
+	overviewQuery *model.StatsOverviewQuery
+	overview      model.StatsOverview
+	nodesCluster  string
+	nodes         []model.StatsNodeSample
+	imagesQuery   *model.StatsImageQuery
+	imagesPage    model.StatsImagePage
+	gcQuery       *model.StatsEventQuery
+	gcPage        model.StatsGCPage
+	repullsQuery  *model.StatsEventQuery
+	repullsPage   model.StatsRepullPage
+	tasksQuery    *model.StatsTaskQuery
+	tasksPage     model.StatsTaskPage
 
 	err error
 }
@@ -41,12 +42,13 @@ func (f *fakeStats) Enabled() bool { return f.enabled }
 
 func (f *fakeStats) Info(context.Context) model.StatsInfo { return f.info }
 
-func (f *fakeStats) Overview(_ context.Context, window time.Duration) (model.StatsOverview, error) {
-	f.overviewWindow = window
+func (f *fakeStats) Overview(_ context.Context, q model.StatsOverviewQuery) (model.StatsOverview, error) {
+	f.overviewQuery = &q
 	return f.overview, f.err
 }
 
-func (f *fakeStats) Nodes(context.Context) ([]model.StatsNodeSample, error) {
+func (f *fakeStats) Nodes(_ context.Context, cluster string) ([]model.StatsNodeSample, error) {
+	f.nodesCluster = cluster
 	return f.nodes, f.err
 }
 
@@ -199,16 +201,25 @@ func TestStatsOverviewWindow(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("overview = %d: %s", rec.Code, rec.Body.String())
 	}
-	if fake.overviewWindow != 24*time.Hour {
-		t.Fatalf("default window = %s, want 24h", fake.overviewWindow)
+	if fake.overviewQuery == nil || fake.overviewQuery.Window != 24*time.Hour || fake.overviewQuery.Cluster != "" {
+		t.Fatalf("default overview query = %+v, want 24h and no cluster", fake.overviewQuery)
 	}
 
 	rec = doAuthed(srv, http.MethodGet, "/api/v1/stats/overview?window=7d", "", cookie)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("overview 7d = %d: %s", rec.Code, rec.Body.String())
 	}
-	if fake.overviewWindow != 7*24*time.Hour {
-		t.Fatalf("7d window = %s, want 168h", fake.overviewWindow)
+	if fake.overviewQuery.Window != 7*24*time.Hour {
+		t.Fatalf("7d window = %s, want 168h", fake.overviewQuery.Window)
+	}
+
+	// The cluster filter must reach the source: the KPI cards follow it.
+	rec = doAuthed(srv, http.MethodGet, "/api/v1/stats/overview?window=7d&cluster=%20talos-kz%20", "", cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("overview cluster = %d: %s", rec.Code, rec.Body.String())
+	}
+	if fake.overviewQuery.Cluster != "talos-kz" {
+		t.Fatalf("overview cluster = %q, want the trimmed talos-kz", fake.overviewQuery.Cluster)
 	}
 
 	rec = doAuthed(srv, http.MethodGet, "/api/v1/stats/overview?window=banana", "", cookie)
@@ -308,6 +319,29 @@ func TestStatsNodesEmptyArray(t *testing.T) {
 	decodeJSON(t, rec, &raw)
 	if string(raw["rows"]) != "[]" {
 		t.Fatalf("nodes rows = %s, want []", raw["rows"])
+	}
+}
+
+// TestStatsNodesClusterWiring checks the nodes endpoint takes the same cluster
+// filter as the lists, so the nodes table follows the tab's selection.
+func TestStatsNodesClusterWiring(t *testing.T) {
+	fake := &fakeStats{enabled: true, nodes: []model.StatsNodeSample{{
+		Cluster: "talos-kz", Node: "worker-1", Ready: true, AgentUp: true,
+	}}}
+	srv, cookie := newStatsServer(t, fake)
+	rec := doAuthed(srv, http.MethodGet, "/api/v1/stats/nodes?cluster=talos-kz", "", cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("nodes = %d: %s", rec.Code, rec.Body.String())
+	}
+	if fake.nodesCluster != "talos-kz" {
+		t.Fatalf("nodes cluster = %q, want talos-kz", fake.nodesCluster)
+	}
+	var payload struct {
+		Rows []model.StatsNodeSample `json:"rows"`
+	}
+	decodeJSON(t, rec, &payload)
+	if len(payload.Rows) != 1 || payload.Rows[0].Cluster != "talos-kz" {
+		t.Fatalf("rows = %+v", payload.Rows)
 	}
 }
 

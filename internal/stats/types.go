@@ -52,10 +52,12 @@ type Store interface {
 type Querier interface {
 	// Ping reports whether the database answers right now.
 	Ping(context.Context) error
-	// Overview returns the aggregate header of the statistics tab.
-	Overview(context.Context, time.Duration) (model.StatsOverview, error)
-	// Nodes returns the newest sample of every known node.
-	Nodes(context.Context) ([]model.StatsNodeSample, error)
+	// Overview returns the aggregate header of the statistics tab, narrowed to
+	// the query's cluster when it is set.
+	Overview(context.Context, model.StatsOverviewQuery) (model.StatsOverview, error)
+	// Nodes returns the newest sample of every known node, of one cluster when
+	// cluster is not empty.
+	Nodes(context.Context, string) ([]model.StatsNodeSample, error)
 	// Images returns one page of image presence intervals.
 	Images(context.Context, model.StatsImageQuery) (model.StatsImagePage, error)
 	// GCEvents returns one page of image-collector events.

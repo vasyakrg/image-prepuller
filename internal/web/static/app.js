@@ -1052,12 +1052,21 @@
     return p.toString();
   }
 
+  // The KPI header and the nodes table take the same cluster filter as the
+  // lists: selecting a cluster must move every card on the tab, not only the
+  // tables below them.
+  function statsClusterQuery() {
+    return state.stats.cluster ? "cluster=" + encodeURIComponent(state.stats.cluster) : "";
+  }
+
   async function loadStatsOverview() {
     const st = state.stats;
     if (st.mode !== "ok") return;
     const seq = statsNextReq("overview");
+    const cluster = statsClusterQuery();
     try {
-      const data = await api(`/api/v1/stats/overview?window=${encodeURIComponent(st.window)}`);
+      const data = await api(`/api/v1/stats/overview?window=${encodeURIComponent(st.window)}` +
+        (cluster ? "&" + cluster : ""));
       if (!statsReqCurrent("overview", seq)) return;
       st.overview = data || null;
       st.overviewError = "";
@@ -1073,8 +1082,9 @@
     const st = state.stats;
     if (st.mode !== "ok") return;
     const seq = statsNextReq("nodes");
+    const cluster = statsClusterQuery();
     try {
-      const data = await api("/api/v1/stats/nodes");
+      const data = await api("/api/v1/stats/nodes" + (cluster ? "?" + cluster : ""));
       if (!statsReqCurrent("nodes", seq)) return;
       st.nodes = data.rows || [];
       st.nodesError = "";
@@ -1264,7 +1274,7 @@
     sel.value = st.cluster;
     sel.disabled = clusters.length === 0;
     sel.title = clusters.length
-      ? "Кластер для списков ниже. KPI всегда по всем кластерам: у /api/v1/stats/overview нет параметра cluster."
+      ? "Показать KPI и списки только по выбранному кластеру."
       : "Backend не вернул ни одного кластера статистики";
   }
 
@@ -1284,7 +1294,8 @@
     }
     const clusters = o.clusters || [];
     $("stats-kpi-nodes").textContent = statsNum(o.nodes);
-    $("stats-kpi-nodes-sub").textContent = "последний срез " + fmtStamp(o.lastSampleAt) + " · кластеров " + clusters.length;
+    $("stats-kpi-nodes-sub").textContent = "последний срез " + fmtStamp(o.lastSampleAt) +
+      (o.cluster ? " · кластер " + o.cluster : " · кластеров " + clusters.length);
     $("stats-kpi-images").textContent = statsNum(o.openImages);
     $("stats-kpi-images-sub").textContent = fmtBytes(Number(o.openImagesBytes) || 0) +
       " · медиана жизни " + fmtSeconds(o.medianLifetimeSeconds) +
@@ -1301,22 +1312,25 @@
       " fail · " + statsNum(o.tasksActive) + " активных · ср. " + fmtDur(Number(o.tasksAvgDurationMs) || 0);
   }
 
-  // The nodes endpoint has no cluster parameter: the last sample slice always
-  // covers every cluster, so the selected cluster filters these rows in the
-  // browser and the header says which slice is on screen.
+  // The nodes endpoint takes the same cluster filter as the lists, so these rows
+  // are already narrowed on the server and the header only says which slice is
+  // on screen.
   function renderStatsNodes() {
     const st = state.stats;
     const errEl = $("stats-nodes-err");
     errEl.textContent = st.nodesError ? "Не удалось загрузить ноды: " + st.nodesError : "";
     errEl.classList.toggle("hidden", !st.nodesError);
-    const all = st.nodes || [];
-    const rows = st.cluster ? all.filter((n) => n.cluster === st.cluster) : all;
+    const rows = st.nodes || [];
     $("stats-nodes-summary").textContent = rows.length === 0
-      ? "нет данных"
+      ? (st.cluster ? "нет данных по кластеру " + st.cluster : "нет данных")
       : rows.length + " нод · " + (st.cluster ? "кластер " + st.cluster : "все кластеры");
     const tbody = $("stats-nodes-tbody");
     if (rows.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="8" class="empty-row">Нет последних срезов: сборщик ещё не записал ни одной ноды</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="8" class="empty-row">` +
+        (st.cluster
+          ? "По кластеру " + esc(st.cluster) + " нет последних срезов нод"
+          : "Нет последних срезов: сборщик ещё не записал ни одной ноды") +
+        `</td></tr>`;
       return;
     }
     tbody.innerHTML = rows.map((n) => {

@@ -32,14 +32,27 @@ type StatsInfo struct {
 	CheckedAt time.Time `json:"checkedAt"`
 }
 
+// StatsOverviewQuery is the filter of the aggregate header. Window is clamped
+// by the store (non-positive means the 24h default); Cluster narrows every
+// aggregate to one cluster, the same filter the list endpoints take.
+type StatsOverviewQuery struct {
+	Window  time.Duration
+	Cluster string
+}
+
 // StatsOverview is the header of the statistics tab: one window of aggregates
-// computed from all five tables.
+// computed from all five tables, narrowed to one cluster when the query asked
+// for it.
 type StatsOverview struct {
 	// WindowSeconds is the effective window (the API clamps the request).
 	WindowSeconds int64     `json:"windowSeconds"`
 	From          time.Time `json:"from"`
 	To            time.Time `json:"to"`
-	Clusters      []string  `json:"clusters"`
+	// Cluster is the filter the aggregates were computed for; empty means all
+	// clusters. Clusters below always lists every known cluster so the UI can
+	// still populate its filter select while a cluster is selected.
+	Cluster  string   `json:"cluster,omitempty"`
+	Clusters []string `json:"clusters"`
 
 	// Nodes is the number of (cluster, node) pairs with at least one sample.
 	Nodes int `json:"nodes"`

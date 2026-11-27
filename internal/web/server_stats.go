@@ -22,10 +22,12 @@ type StatsSource interface {
 	Enabled() bool
 	// Info reports the pipeline state and pings the database.
 	Info(ctx context.Context) model.StatsInfo
-	// Overview returns the aggregate header of the tab for one window.
-	Overview(ctx context.Context, window time.Duration) (model.StatsOverview, error)
-	// Nodes returns the newest sample of every known node.
-	Nodes(ctx context.Context) ([]model.StatsNodeSample, error)
+	// Overview returns the aggregate header of the tab for one window, narrowed
+	// to the query's cluster when it is set (the KPI cards follow the filter).
+	Overview(ctx context.Context, q model.StatsOverviewQuery) (model.StatsOverview, error)
+	// Nodes returns the newest sample of every known node, of one cluster when
+	// cluster is not empty.
+	Nodes(ctx context.Context, cluster string) ([]model.StatsNodeSample, error)
 	// Images returns one page of image presence intervals.
 	Images(ctx context.Context, q model.StatsImageQuery) (model.StatsImagePage, error)
 	// GCEvents returns one page of image-collector events.
@@ -77,19 +79,26 @@ func (s *Server) handleStatsStatus(w http.ResponseWriter, r *http.Request, _ str
 	writeJSON(w, http.StatusOK, info)
 }
 
-// handleStatsOverview returns the aggregate header of the tab.
+// handleStatsOverview returns the aggregate header of the tab. The optional
+// cluster parameter narrows every aggregate to one cluster, so selecting a
+// cluster in the UI moves the KPI cards together with the lists below them.
 func (s *Server) handleStatsOverview(w http.ResponseWriter, r *http.Request, _ string) {
 	ctx, cancel, ok := s.statsContext(w, r)
 	if !ok {
 		return
 	}
 	defer cancel()
-	window, err := parseStatsWindow(r.URL.Query().Get("window"))
+	query := r.URL.Query()
+	window, err := parseStatsWindow(query.Get("window"))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	out, err := s.stats.Overview(ctx, window)
+	out, err := s.stats.Overview(ctx, model.StatsOverviewQuery{
+		Window: window,
+		// Same trim/bound as the search box: a cluster id is a short opaque key.
+		Cluster: statsSearch(query.Get("cluster")),
+	})
 	if err != nil {
 		writeStatsError(w, err)
 		return
@@ -100,14 +109,15 @@ func (s *Server) handleStatsOverview(w http.ResponseWriter, r *http.Request, _ s
 	writeJSON(w, http.StatusOK, out)
 }
 
-// handleStatsNodes returns the newest inventory sample of every node.
+// handleStatsNodes returns the newest inventory sample of every node, or only
+// one cluster when the cluster parameter is set.
 func (s *Server) handleStatsNodes(w http.ResponseWriter, r *http.Request, _ string) {
 	ctx, cancel, ok := s.statsContext(w, r)
 	if !ok {
 		return
 	}
 	defer cancel()
-	rows, err := s.stats.Nodes(ctx)
+	rows, err := s.stats.Nodes(ctx, statsSearch(r.URL.Query().Get("cluster")))
 	if err != nil {
 		writeStatsError(w, err)
 		return

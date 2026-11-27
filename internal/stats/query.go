@@ -26,21 +26,41 @@ func (s *postgresStore) Ping(ctx context.Context) error {
 	return nil
 }
 
-// Overview returns the aggregate header of the stats tab. It runs several small
-// sequential queries: the statistics tables are tiny (one row per node sample or
-// task) and one statement per aggregate keeps every NULL/COALESCE explicit
-// instead of a single unreadable UNION.
+// clusterPredicate returns the SQL fragment that narrows a stats query to one
+// cluster and appends its bind argument. glue is " WHERE " for a query whose
+// statement has no predicate yet and " AND " when it already has one. An empty
+// cluster returns "" and leaves args untouched, so the bind count never grows
+// past the placeholders (pgx rejects a statement with an unused $n).
+func clusterPredicate(cluster, glue string, args []any) (string, []any) {
+	if cluster == "" {
+		return "", args
+	}
+	args = append(args, cluster)
+	return fmt.Sprintf("%scluster = $%d", glue, len(args)), args
+}
+
+// Overview returns the aggregate header of the stats tab, narrowed to one
+// cluster when q.Cluster is set (the cluster filter of the tab must move the KPI
+// cards, not only the lists below them). It runs several small sequential
+// queries: the statistics tables are tiny (one row per node sample or task) and
+// one statement per aggregate keeps every NULL/COALESCE explicit instead of a
+// single unreadable UNION.
+//
+// The cluster list is deliberately NOT filtered: the UI needs every known
+// cluster to populate its select while one of them is selected.
 //
 // A non-positive window falls back to defaultQueryWindow; the effective values
 // are echoed in the result so the UI can render the window it actually got.
-func (s *postgresStore) Overview(ctx context.Context, window time.Duration) (model.StatsOverview, error) {
-	window = normalizeQueryWindow(window)
+func (s *postgresStore) Overview(ctx context.Context, q model.StatsOverviewQuery) (model.StatsOverview, error) {
+	window := normalizeQueryWindow(q.Window)
+	cluster := strings.TrimSpace(q.Cluster)
 	now := time.Now()
 	from := now.Add(-window)
 	out := model.StatsOverview{
 		WindowSeconds: int64(window / time.Second),
 		From:          from,
 		To:            now,
+		Cluster:       cluster,
 		Clusters:      []string{},
 	}
 
@@ -50,8 +70,9 @@ func (s *postgresStore) Overview(ctx context.Context, window time.Duration) (mod
 	}
 	out.Clusters = clusters
 
+	nodesPred, nodesArgs := clusterPredicate(cluster, " WHERE ", nil)
 	var nodes int64
-	if err := s.db.QueryRowContext(ctx, overviewNodesSQL).Scan(&nodes); err != nil {
+	if err := s.db.QueryRowContext(ctx, fmt.Sprintf(overviewNodesSQL, nodesPred), nodesArgs...).Scan(&nodes); err != nil {
 		return model.StatsOverview{}, fmt.Errorf("stats: overview: nodes: %w", err)
 	}
 	out.Nodes = int(nodes)
@@ -59,11 +80,12 @@ func (s *postgresStore) Overview(ctx context.Context, window time.Duration) (mod
 	// SUM/percentile/AVG over an empty window return SQL NULL; the SQL already
 	// wraps them in COALESCE, and the sql.Null* scans below keep a NULL from any
 	// driver or fake from panicking the read path: NULL means 0.
+	openPred, openArgs := clusterPredicate(cluster, " AND ", nil)
 	var (
 		openImages int64
 		openBytes  sql.NullInt64
 	)
-	if err := s.db.QueryRowContext(ctx, overviewOpenImagesSQL).Scan(&openImages, &openBytes); err != nil {
+	if err := s.db.QueryRowContext(ctx, fmt.Sprintf(overviewOpenImagesSQL, openPred), openArgs...).Scan(&openImages, &openBytes); err != nil {
 		return model.StatsOverview{}, fmt.Errorf("stats: overview: open images: %w", err)
 	}
 	out.OpenImages = int(openImages)
@@ -74,7 +96,8 @@ func (s *postgresStore) Overview(ctx context.Context, window time.Duration) (mod
 		median sql.NullFloat64
 		p95    sql.NullFloat64
 	)
-	if err := s.db.QueryRowContext(ctx, overviewClosedSQL, from).Scan(&closed, &median, &p95); err != nil {
+	closedPred, closedArgs := clusterPredicate(cluster, " AND ", []any{from})
+	if err := s.db.QueryRowContext(ctx, fmt.Sprintf(overviewClosedSQL, closedPred), closedArgs...).Scan(&closed, &median, &p95); err != nil {
 		return model.StatsOverview{}, fmt.Errorf("stats: overview: closed intervals: %w", err)
 	}
 	out.ClosedIntervals = int(closed)
@@ -86,7 +109,8 @@ func (s *postgresStore) Overview(ctx context.Context, window time.Duration) (mod
 		gcImages sql.NullInt64
 		gcBytes  sql.NullInt64
 	)
-	if err := s.db.QueryRowContext(ctx, overviewGCSQL, from).Scan(&gcRuns, &gcImages, &gcBytes); err != nil {
+	gcPred, gcArgs := clusterPredicate(cluster, " AND ", []any{from})
+	if err := s.db.QueryRowContext(ctx, fmt.Sprintf(overviewGCSQL, gcPred), gcArgs...).Scan(&gcRuns, &gcImages, &gcBytes); err != nil {
 		return model.StatsOverview{}, fmt.Errorf("stats: overview: gc events: %w", err)
 	}
 	out.GCRuns = int(gcRuns)
@@ -98,7 +122,8 @@ func (s *postgresStore) Overview(ctx context.Context, window time.Duration) (mod
 		repullMed sql.NullFloat64
 		repullMax sql.NullFloat64
 	)
-	if err := s.db.QueryRowContext(ctx, overviewRepullsSQL, from).Scan(&repulls, &repullMed, &repullMax); err != nil {
+	repullPred, repullArgs := clusterPredicate(cluster, " AND ", []any{from})
+	if err := s.db.QueryRowContext(ctx, fmt.Sprintf(overviewRepullsSQL, repullPred), repullArgs...).Scan(&repulls, &repullMed, &repullMax); err != nil {
 		return model.StatsOverview{}, fmt.Errorf("stats: overview: repulls: %w", err)
 	}
 	out.Repulls = int(repulls)
@@ -112,7 +137,8 @@ func (s *postgresStore) Overview(ctx context.Context, window time.Duration) (mod
 		active    sql.NullInt64
 		avgMs     sql.NullFloat64
 	)
-	if err := s.db.QueryRowContext(ctx, overviewTasksSQL, from).Scan(&tasks, &succeeded, &failed, &active, &avgMs); err != nil {
+	taskPred, taskArgs := clusterPredicate(cluster, " AND ", []any{from})
+	if err := s.db.QueryRowContext(ctx, fmt.Sprintf(overviewTasksSQL, taskPred), taskArgs...).Scan(&tasks, &succeeded, &failed, &active, &avgMs); err != nil {
 		return model.StatsOverview{}, fmt.Errorf("stats: overview: tasks: %w", err)
 	}
 	out.Tasks = int(tasks)
@@ -121,13 +147,15 @@ func (s *postgresStore) Overview(ctx context.Context, window time.Duration) (mod
 	out.TasksActive = int(nullInt64(active))
 	out.TasksAvgDurationMs = nullFloat64(avgMs)
 
-	lastSample, err := s.queryNullTime(ctx, overviewLastSampleSQL)
+	samplePred, sampleArgs := clusterPredicate(cluster, " WHERE ", nil)
+	lastSample, err := s.queryNullTime(ctx, fmt.Sprintf(overviewLastSampleSQL, samplePred), sampleArgs...)
 	if err != nil {
 		return model.StatsOverview{}, fmt.Errorf("stats: overview: last sample: %w", err)
 	}
 	out.LastSampleAt = lastSample
 
-	lastTask, err := s.queryNullTime(ctx, overviewLastTaskSQL)
+	lastTaskPred, lastTaskArgs := clusterPredicate(cluster, " WHERE ", nil)
+	lastTask, err := s.queryNullTime(ctx, fmt.Sprintf(overviewLastTaskSQL, lastTaskPred), lastTaskArgs...)
 	if err != nil {
 		return model.StatsOverview{}, fmt.Errorf("stats: overview: last task: %w", err)
 	}
@@ -137,9 +165,12 @@ func (s *postgresStore) Overview(ctx context.Context, window time.Duration) (mod
 }
 
 // Nodes returns the newest sample of every known node: DISTINCT ON keeps the
-// first row per (cluster, node) after the descending sampled_at sort.
-func (s *postgresStore) Nodes(ctx context.Context) ([]model.StatsNodeSample, error) {
-	rows, err := s.db.QueryContext(ctx, nodesSQL)
+// first row per (cluster, node) after the descending sampled_at sort. A non-empty
+// cluster narrows the slice on the server, so the nodes table follows the tab's
+// cluster filter instead of filtering an all-cluster slice in the browser.
+func (s *postgresStore) Nodes(ctx context.Context, cluster string) ([]model.StatsNodeSample, error) {
+	pred, args := clusterPredicate(strings.TrimSpace(cluster), " WHERE ", nil)
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(nodesSQL, pred), args...)
 	if err != nil {
 		return nil, fmt.Errorf("stats: nodes: %w", err)
 	}
@@ -585,34 +616,37 @@ const (
 	SELECT cluster FROM prepuller_node_samples
 ) AS all_clusters ORDER BY cluster`
 
+	// Every overview statement carries a %s slot for the optional cluster
+	// predicate built by clusterPredicate; an unfiltered call passes "" and the
+	// statement is identical to the all-clusters form.
 	overviewNodesSQL = `SELECT COUNT(*)::bigint FROM (
-	SELECT DISTINCT cluster, node FROM prepuller_node_samples
+	SELECT DISTINCT cluster, node FROM prepuller_node_samples%s
 ) AS node_pairs`
 
 	overviewOpenImagesSQL = `SELECT COUNT(*)::bigint, COALESCE(SUM(size_bytes), 0)::bigint
 FROM prepuller_image_presence
-WHERE removed_at IS NULL`
+WHERE removed_at IS NULL%s`
 
 	overviewClosedSQL = `SELECT
 	COUNT(*)::bigint,
 	COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(epoch FROM removed_at - first_seen_at)), 0)::double precision,
 	COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(epoch FROM removed_at - first_seen_at)), 0)::double precision
 FROM prepuller_image_presence
-WHERE removed_at IS NOT NULL AND removed_at >= $1`
+WHERE removed_at IS NOT NULL AND removed_at >= $1%s`
 
 	overviewGCSQL = `SELECT
 	COUNT(*)::bigint,
 	COALESCE(SUM(removed_count), 0)::bigint,
 	COALESCE(SUM(removed_bytes), 0)::bigint
 FROM prepuller_gc_events
-WHERE occurred_at >= $1`
+WHERE occurred_at >= $1%s`
 
 	overviewRepullsSQL = `SELECT
 	COUNT(*)::bigint,
 	COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY lag_seconds), 0)::double precision,
 	COALESCE(MAX(lag_seconds), 0)::double precision
 FROM prepuller_repulls
-WHERE finished_at >= $1`
+WHERE finished_at >= $1%s`
 
 	overviewTasksSQL = `SELECT
 	COUNT(*)::bigint,
@@ -621,16 +655,16 @@ WHERE finished_at >= $1`
 	COALESCE(SUM(CASE WHEN state IN ('queued', 'running') THEN 1 ELSE 0 END), 0)::bigint,
 	COALESCE(AVG(duration_ms) FILTER (WHERE state IN ('succeeded', 'failed', 'canceled')), 0)::double precision
 FROM prepuller_tasks
-WHERE observed_at >= $1`
+WHERE observed_at >= $1%s`
 
-	overviewLastSampleSQL = `SELECT MAX(sampled_at) FROM prepuller_node_samples`
-	overviewLastTaskSQL   = `SELECT MAX(observed_at) FROM prepuller_tasks`
+	overviewLastSampleSQL = `SELECT MAX(sampled_at) FROM prepuller_node_samples%s`
+	overviewLastTaskSQL   = `SELECT MAX(observed_at) FROM prepuller_tasks%s`
 
 	nodesSQL = `SELECT DISTINCT ON (cluster, node)
 	cluster, node, sampled_at, ready, agent_up, disk_paused,
 	image_fs_used_bytes, image_fs_capacity_bytes, image_fs_capacity_estimated,
 	cached_image_count
-FROM prepuller_node_samples
+FROM prepuller_node_samples%s
 ORDER BY cluster, node, sampled_at DESC`
 
 	imageCountSQL = `SELECT COUNT(*)::bigint FROM prepuller_image_presence`

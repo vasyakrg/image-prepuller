@@ -13,12 +13,14 @@ import (
 // the call and returns canned data. The writer side (Apply/Prune/Close) comes
 // from fakeStore in runner_test.go; fakeReadStore embeds both.
 type fakeQuerier struct {
-	pingErr      error
-	overview     model.StatsOverview
-	imagesQuery  *model.StatsImageQuery
-	tasksQuery   *model.StatsTaskQuery
-	pingCalls    int
-	overviewCall int
+	pingErr       error
+	overview      model.StatsOverview
+	overviewQuery *model.StatsOverviewQuery
+	nodesCluster  string
+	imagesQuery   *model.StatsImageQuery
+	tasksQuery    *model.StatsTaskQuery
+	pingCalls     int
+	overviewCall  int
 }
 
 func (f *fakeQuerier) Ping(context.Context) error {
@@ -26,12 +28,14 @@ func (f *fakeQuerier) Ping(context.Context) error {
 	return f.pingErr
 }
 
-func (f *fakeQuerier) Overview(context.Context, time.Duration) (model.StatsOverview, error) {
+func (f *fakeQuerier) Overview(_ context.Context, q model.StatsOverviewQuery) (model.StatsOverview, error) {
 	f.overviewCall++
+	f.overviewQuery = &q
 	return f.overview, nil
 }
 
-func (f *fakeQuerier) Nodes(context.Context) ([]model.StatsNodeSample, error) {
+func (f *fakeQuerier) Nodes(_ context.Context, cluster string) ([]model.StatsNodeSample, error) {
+	f.nodesCluster = cluster
 	return []model.StatsNodeSample{}, nil
 }
 
@@ -81,7 +85,7 @@ func TestServiceDisabled(t *testing.T) {
 	if info.Clusters == nil {
 		t.Fatal("disabled info clusters = nil, want []")
 	}
-	if _, err := svc.Overview(context.Background(), time.Hour); !errors.Is(err, ErrStatsUnavailable) {
+	if _, err := svc.Overview(context.Background(), model.StatsOverviewQuery{Window: time.Hour}); !errors.Is(err, ErrStatsUnavailable) {
 		t.Fatalf("overview without a store = %v, want ErrStatsUnavailable", err)
 	}
 }
@@ -127,11 +131,20 @@ func TestServiceInfoPingsDatabase(t *testing.T) {
 		t.Fatal("connected info has no connectedAt")
 	}
 
-	if _, err := svc.Overview(context.Background(), 24*time.Hour); err != nil {
+	if _, err := svc.Overview(context.Background(), model.StatsOverviewQuery{Window: 24 * time.Hour, Cluster: "talos-kz"}); err != nil {
 		t.Fatalf("overview: %v", err)
 	}
 	if store.overviewCall != 1 {
 		t.Fatalf("overview calls = %d, want 1", store.overviewCall)
+	}
+	if store.overviewQuery == nil || store.overviewQuery.Window != 24*time.Hour || store.overviewQuery.Cluster != "talos-kz" {
+		t.Fatalf("overview query = %+v, want the window and cluster passed through", store.overviewQuery)
+	}
+	if _, err := svc.Nodes(context.Background(), "talos-hub"); err != nil {
+		t.Fatalf("nodes: %v", err)
+	}
+	if store.nodesCluster != "talos-hub" {
+		t.Fatalf("nodes cluster = %q, want talos-hub", store.nodesCluster)
 	}
 
 	query := model.StatsImageQuery{Window: time.Hour, State: "open", Limit: 10}

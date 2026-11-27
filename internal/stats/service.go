@@ -135,22 +135,24 @@ func (s *Service) Info(ctx context.Context) model.StatsInfo {
 	return info
 }
 
-// Overview returns the aggregate header of the statistics tab.
-func (s *Service) Overview(ctx context.Context, window time.Duration) (model.StatsOverview, error) {
+// Overview returns the aggregate header of the statistics tab, narrowed to the
+// query's cluster when it is set.
+func (s *Service) Overview(ctx context.Context, q model.StatsOverviewQuery) (model.StatsOverview, error) {
 	querier, err := s.requireQuerier()
 	if err != nil {
 		return model.StatsOverview{}, err
 	}
-	return querier.Overview(ctx, window)
+	return querier.Overview(ctx, q)
 }
 
-// Nodes returns the newest sample of every known node.
-func (s *Service) Nodes(ctx context.Context) ([]model.StatsNodeSample, error) {
+// Nodes returns the newest sample of every known node, of one cluster when
+// cluster is not empty.
+func (s *Service) Nodes(ctx context.Context, cluster string) ([]model.StatsNodeSample, error) {
 	querier, err := s.requireQuerier()
 	if err != nil {
 		return nil, err
 	}
-	return querier.Nodes(ctx)
+	return querier.Nodes(ctx, cluster)
 }
 
 // Images returns one page of image presence intervals.
