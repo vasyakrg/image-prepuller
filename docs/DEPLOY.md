@@ -16,6 +16,9 @@ for an in-memory demo without a Kubernetes API.
 - [9. Typical failures](#9-typical-failures)
 - [10. Upgrade and rollback](#10-upgrade-and-rollback)
 - [11. Uninstall](#11-uninstall)
+- [12. k3d end-to-end smoke test](#12-k3d-end-to-end-smoke-test)
+- [13. Released artifacts (v0.2.0)](#13-released-artifacts-v020)
+- [14. First cluster: t8s-nsk (Talos)](#14-first-cluster-t8s-nsk-talos)
 
 ## 1. What gets deployed
 
@@ -349,6 +352,7 @@ curl -fsS -H "Authorization: Bearer <agent-token>" \
 | Agent pod stuck `ContainerCreating`, event `hostPath type check failed: ... is not a socket file` | `agent.criSocket` points at a missing path for this distro (k3s keeps it under `/run/k3s`) | Set `agent.criSocket` to the real socket (`docker exec <node> ls -l /run/containerd/containerd.sock /run/k3s/containerd/containerd.sock`). |
 | Agent `CrashLoopBackOff`, `agent config error` or CRI dial errors | CRI socket path wrong, not mounted, or containerd rejects the connection | Check `agent.criSocket` and agent logs; for a smoke test set `agent.mock=true` (in-memory images). |
 | Hub can reach the agent from a `kubectl exec` probe but nodes still show offline | Old hub pod kept the previous `agent-token` after the Secret changed | `kubectl -n <ns> rollout restart deploy/<hub>` (or redeploy) so the env is re-read. |
+| Agent `CrashLoopBackOff`, `flag provided but not defined: -pull-timeout` | Chart from `main` renders `agent.pull.*` flags that the released `0.2.0` image does not know | Pin `image.tag` to a `sha-<commit>` build of the same commit ([14.2](#142-pin-the-image-tag-to-the-commit-not-to-the-release)) or install the released OCI chart `0.2.0` with image `0.2.0` |
 | Ingress 404 with Traefik | Wrong `ingressClassName` or host | Set `ingress.className=traefik` and the real host; check `kubectl get ingress`. |
 | `helm install` fails: `secret.create=false requires secret.existingSecret` | Guard in `secret.yaml` | Create the Secret or set `secret.create=true`. |
 
@@ -497,3 +501,350 @@ Release checklist:
    and pushes the chart.
 4. Verify: `docker buildx imagetools inspect ghcr.io/vasyakrg/image-prepuller:0.2.0` and
    `helm show chart oci://ghcr.io/vasyakrg/charts/image-prepuller --version 0.2.0`.
+
+
+## 14. First cluster: t8s-nsk (Talos)
+
+The first production target is the `t8s-nsk` Talos cluster. This section is the
+verified runbook for it: the cluster facts, the values overlay
+([deploy/values/t8s-nsk.yaml](../deploy/values/t8s-nsk.yaml)) and every number
+under "Verify" were produced on 2026-11-27 against the live cluster (a throw-away
+release was installed, exercised and removed afterwards).
+
+### 14.1 The cluster at a glance
+
+| Fact | Value |
+| --- | --- |
+| kube context / kubeconfig | `t8s-nsk` / `~/.kube/t8s-nsk.yaml` |
+| Kubernetes | v1.36.0 |
+| OS / runtime | Talos v1.13.10, containerd 2.2.7 (socket `/run/containerd/containerd.sock`) |
+| Nodes | `cp-1` 192.168.23.16 (control-plane, taint `NoSchedule`), `worker-1` 192.168.23.20, `worker-2` 192.168.23.21 |
+| CNI | Cilium 1.19.5 (no default-deny for app namespaces) |
+| Ingress | Traefik (chart 42.4.0), default IngressClass `traefik`, NodePort 30000/30001 behind 185.135.82.252 |
+| TLS | cert-manager 1.21.1 + Selectel webhook; `ClusterIssuer letsencrypt-prod` (DNS-01) |
+| GitOps | Flux v2, `GitRepository bildme/talos-k8s`, path `t8s-nsk-flux/clusters/t8s-nsk` |
+| Secrets | external-secrets 2.10.0, `ClusterSecretStore onepassword-t8s-nsk` |
+| Monitoring | kube-prometheus-stack in namespace `monitoring` (ServiceMonitor-based) |
+| Storage | `piraeus-storage` (not used by this chart: hub and agent are stateless) |
+| Registries | `ghcr.io` directly; `docker.io` **also** reachable directly — containerd additionally has the mirrors `mirror.gcr.io` and `dockerhub.timeweb.cloud` from the Talos machine config |
+
+Nothing in the chart needs a PVC, a local registry or cluster-admin: RBAC is
+read-only for Nodes/Deployments/StatefulSets/DaemonSets, and the agent only
+mounts the CRI socket read-only.
+
+### 14.2 Pin the image tag to the commit, not to the release
+
+The chart passes `agent.pull.*` flags (`-pull-timeout`,
+`-registry-probe-timeout`, `-pull-stall-timeout`) that the released **0.2.0
+image** does not know. Mixing the chart from `main` with `image.tag=0.2.0`
+(the `appVersion` default) makes the agent exit immediately:
+
+```
+flag provided but not defined: -pull-timeout
+```
+
+so the DaemonSet sits in `CrashLoopBackOff` and every node shows `offline`.
+Two consistent combinations exist:
+
+| Combination | What you get |
+| --- | --- |
+| chart from this repo at a commit + `image.tag=sha-<same commit>` | current code, pull hygiene on — **use this for the first rollout** |
+| published OCI chart `0.2.0` + image `0.2.0` | consistent released pair, but no preflight probe / stall watchdog |
+
+The overlay pins `image.tag: sha-9a670791d7c1`. When you deploy a different
+commit, replace it with that commit's `sha-*` tag from
+`ghcr.io/vasyakrg/image-prepuller` (do not fall back to `latest`).
+
+### 14.3 Prepare the namespace and the credentials
+
+The agent pod is not `restricted`-compatible: `hostNetwork`, a `hostPath`
+socket and uid 0 to read it. On t8s-nsk PodSecurity is not enforced as
+`restricted` for plain namespaces, but label the namespace anyway so a future
+default change does not block the DaemonSet:
+
+```bash
+kubectl create namespace prepuller
+kubectl label namespace prepuller \
+  pod-security.kubernetes.io/enforce=privileged \
+  pod-security.kubernetes.io/enforce-version=latest
+```
+
+Two ways to feed the chart its Secret:
+
+**A. Let the chart generate it** (quick, fine for the first rollout): keep
+`secret.create=true` and nothing else. Read the password back after install
+(section 3).
+
+**B. GitOps with 1Password** (cluster convention): store the item
+`prepuller-secret` in the vault read by `onepassword-t8s-nsk`, materialise it
+as `prepuller-credentials` in namespace `prepuller`, and set
+`secret.create=false`, `secret.existingSecret=prepuller-credentials` in the
+overlay. The Secret must carry the keys `auth-user`, `auth-pass`,
+`session-secret`, `cluster-token`, `agent-token`:
+
+```yaml
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: prepuller-credentials
+  namespace: prepuller
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: onepassword-t8s-nsk
+  target:
+    name: prepuller-credentials
+  dataFrom:
+    - extract:
+        key: prepuller-secret
+```
+
+Keep `session-secret` stable: it signs the UI cookies, so a new value logs
+every user out on upgrade.
+
+### 14.4 DNS and TLS
+
+```bash
+# Selectel -> DNS -> bildme.ru: add the record (no wildcard exists for this zone)
+#   prepuller.t8s-nsk.bildme.ru  CNAME  t8s-nsk.bildme.ru
+#   (equivalently: A 185.135.82.252)
+dig +short prepuller.t8s-nsk.bildme.ru
+```
+
+The overlay enables the chart Ingress with
+`cert-manager.io/cluster-issuer: letsencrypt-prod`. cert-manager's
+ingress-shim issues the certificate for `ingress.tls` (`prepuller-tls`)
+through the Selectel DNS-01 webhook, exactly like `s3-t8s-nsk.bildme.ru` in the
+same cluster. Watch it:
+
+```bash
+kubectl -n prepuller get certificate prepuller-tls -w
+kubectl -n prepuller get order,challenge
+```
+
+If you prefer the cluster's native `IngressRoute` convention, set
+`ingress.enabled=false` and apply the two objects below instead:
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: prepuller-tls
+  namespace: prepuller
+spec:
+  commonName: prepuller.t8s-nsk.bildme.ru
+  dnsNames: [prepuller.t8s-nsk.bildme.ru]
+  issuerRef:
+    kind: ClusterIssuer
+    name: letsencrypt-prod
+  secretName: prepuller-tls
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: prepuller
+  namespace: prepuller
+spec:
+  entryPoints: [websecure]
+  routes:
+    - kind: Rule
+      match: Host(`prepuller.t8s-nsk.bildme.ru`)
+      services:
+        - name: prepuller-image-prepuller
+          port: 8080
+  tls:
+    secretName: prepuller-tls
+```
+
+### 14.5 Install
+
+Preview first — the overlay is plain values, no secrets:
+
+```bash
+helm template prepuller deploy/helm/image-prepuller -n prepuller \
+  -f deploy/values/t8s-nsk.yaml > /tmp/prepuller-nsk.yaml
+kubectl apply --dry-run=server -f /tmp/prepuller-nsk.yaml
+```
+
+Then the release itself:
+
+```bash
+helm upgrade --install prepuller deploy/helm/image-prepuller \
+  --namespace prepuller --create-namespace \
+  -f deploy/values/t8s-nsk.yaml
+```
+
+What changes relative to the chart defaults (all documented inline in the
+overlay):
+
+- `image.tag` — a `sha-*` build of the same commit (14.2);
+- `hub.clusterName=t8s-nsk`;
+- `hub.autoWarm=false` — the reconciler is enabled after the first snapshot is
+  verified (14.7);
+- `agent.tolerations` for `node-role.kubernetes.io/control-plane` — without it
+  `cp-1` never gets an agent and the snapshot is permanently partial;
+- `agent.pull.*` left at defaults; `registryProbe` stays **on** (verified: a
+  direct dial to `docker.io` from the agent succeeds on this cluster, even
+  though containerd also has mirrors configured);
+- `ingress.*` — host, Traefik class, cert-manager issuer.
+
+Once v0.3.0 is published, the same overlay works with the OCI chart:
+
+```bash
+helm upgrade --install prepuller oci://ghcr.io/vasyakrg/charts/image-prepuller \
+  --version 0.3.0 --namespace prepuller --create-namespace \
+  -f deploy/values/t8s-nsk.yaml
+```
+
+### 14.6 Verify
+
+```bash
+kubectl -n prepuller rollout status deploy/prepuller-image-prepuller --timeout=120s
+kubectl -n prepuller rollout status ds/prepuller-image-prepuller-agent --timeout=120s
+kubectl -n prepuller get pods -o wide      # hub 1/1 + one agent per node, cp-1 included
+kubectl -n prepuller logs ds/prepuller-image-prepuller-agent --tail=5
+# -> backend=cri:/run/containerd/containerd.sock api=v1 auth=true on every node
+```
+
+Then log in and compare the snapshot against the numbers measured on this
+cluster (they drift with the workloads, treat them as sanity ranges):
+
+```bash
+kubectl -n prepuller port-forward svc/prepuller-image-prepuller 8080:8080 &
+curl -fsS http://127.0.0.1:8080/healthz   # ok
+curl -fsS -c /tmp/pc -X POST http://127.0.0.1:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' -d '{"username":"admin","password":"<auth-pass>"}'
+curl -fsS -b /tmp/pc http://127.0.0.1:8080/api/v1/clusters | jq .
+curl -fsS -b /tmp/pc 'http://127.0.0.1:8080/api/v1/snapshot?cluster=t8s-nsk' \
+  | jq '{syncStatus, partial, summary, nodes: [.nodes[] | {name, agentUp, cachedImageCount, imageFSUsedBytes, imageFSCapacityBytes}]}'
+```
+
+Expected on 2026-11-27 (3 nodes, ~90 distinct images):
+
+| Signal | Value |
+| --- | --- |
+| `clusters[0]` | `online=true`, `readyWorkers=3`, `totalWorkers=3`, `totalWorkloads=92`, `coveragePercent~50.7`, `policyWarnings=26`, `syncStatus=ok` |
+| `summary` | 73 Deployments, 8 StatefulSets, 11 DaemonSets, 90 unique images, 190 of 375 slots present |
+| `nodes[]` | `agentUp=true` everywhere; `cachedImageCount` 21 / 153 / 161 for cp-1 / worker-1 / worker-2; `agentVersion=0.2.0-dev` |
+| `imageFSUsedBytes` | ~1.5 GiB on cp-1, ~11.5 GiB on worker-1, ~10.9 GiB on worker-2 |
+| `imageFSCapacityBytes` | `0` — see 14.7 |
+| `syncStatus=ok`, `partial=false` | all three agents answered |
+
+The node-agent API is reachable on `Node.InternalIP:9443` (host network):
+
+```bash
+kubectl -n prepuller port-forward ds/prepuller-image-prepuller-agent 9443:9443 &
+curl -fsS -H "Authorization: Bearer $(kubectl -n prepuller get secret prepuller-image-prepuller-secret -o jsonpath='{.data.agent-token}' | base64 -d)" \
+  http://127.0.0.1:9443/agent/v1/snapshot | jq '{node, imageCount: (.images | length), imageFSUsedBytes}'
+```
+
+Pull path smoke test (both were verified here, the image is ~2 MB):
+
+```bash
+# Black-holed target: the preflight dial gives up after 5 s -> 502.
+time curl -sS -b /tmp/pc -X POST http://127.0.0.1:8080/api/v1/pull \
+  -H 'Content-Type: application/json' \
+  -d '{"cluster":"t8s-nsk","image":"192.0.2.1:5000/foo:1","node":"worker-1"}'
+# -> 502 {"error":"... http 502: registry unreachable: 192.0.2.1:5000: dial tcp ... i/o timeout"}
+
+# Unresolvable host: containerd/probe fails immediately ("no such host").
+curl -sS -b /tmp/pc -X POST http://127.0.0.1:8080/api/v1/pull \
+  -H 'Content-Type: application/json' \
+  -d '{"cluster":"t8s-nsk","image":"registry.invalid/dead:1","node":"worker-1"}'
+
+# A real pull through containerd (mirror or direct, both work here).
+curl -sS -b /tmp/pc -X POST http://127.0.0.1:8080/api/v1/pull \
+  -H 'Content-Type: application/json' \
+  -d '{"cluster":"t8s-nsk","image":"docker.io/library/busybox:1.36","node":"worker-1"}'
+curl -fsS -b /tmp/pc 'http://127.0.0.1:8080/api/v1/pull-tasks?cluster=t8s-nsk' \
+  | jq '.tasks[] | {image, state, durationMs}'
+```
+
+In the live provider a pull is synchronous through the agent, so the `202`
+answer often already carries the terminal state (`state=succeeded`,
+`durationMs~560` for busybox) — still poll `/api/v1/pull-tasks` in a script
+instead of trusting the response body.
+
+Metrics (`/metrics` on 9090). The chart sets the `prometheus.io/*` pod
+annotations, but the cluster's Prometheus is ServiceMonitor-based, so add a
+monitor (adapt the namespace if you move the release):
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: prepuller
+  namespace: monitoring
+spec:
+  namespaceSelector:
+    matchNames: [prepuller]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: image-prepuller
+      app.kubernetes.io/instance: prepuller
+      app.kubernetes.io/component: hub
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+```
+
+Signals to watch: `prepuller_cluster_up`, `prepuller_node_ready`,
+`prepuller_node_imagefs_used_bytes`, `prepuller_agent_info`,
+`prepuller_pull_total{result="error"}`.
+
+### 14.7 Cluster-specific gotchas
+
+- **Control-plane agent.** `cp-1` is tainted; the DaemonSet needs the toleration
+  from the overlay, otherwise every cp-1 slot is `offline` and
+  `partial=true` forever.
+- **`imageFSCapacityBytes=0` on Talos.** containerd's `ImageFsInfo` reports
+  used bytes only, so the disk guard (`agent.diskPauseRatio`, `ShouldPause`)
+  can never trip: a zero capacity is treated as "not paused" (fail-open). Used
+  bytes are still exported (`prepuller_node_imagefs_used_bytes`) — alert on the
+  **node** disk (`node_filesystem_avail_bytes`) instead of relying on pull
+  pauses. The stall watchdog is unaffected: it watches growth of the same
+  used-bytes value.
+- **Port 9443 on every node.** The agent uses `hostNetwork` and a NetworkPolicy
+  cannot fence a host-network pod; keep it behind the node firewall if the node
+  network is not private. The API requires the `agent-token` Bearer token
+  anyway.
+- **Rolling updates.** `maxUnavailable: 10%` rounds down to 1 on 3 nodes, so an
+  agent upgrade restarts one node's agent at a time and the snapshot is briefly
+  `partial` — expected.
+- **docker.io mirrors.** The Talos config routes `docker.io` through
+  `mirror.gcr.io` / `dockerhub.timeweb.cloud`. If a future Talos change makes
+  `docker.io` unreachable from the node network while the mirrors still work,
+  set `agent.pull.registryProbe=false` (the probe dials the registry directly,
+  containerd does not). As of 2026-11-27 the direct dial succeeds, so the probe
+  stays on.
+- **Auto-warm.** The overlay ships `hub.autoWarm=false`. Enable it only after
+  the snapshot looks right: at ~50% coverage the first reconcile schedules ~185
+  pulls, throttled by the reconciler defaults (2 in flight per node, 4 in total,
+  backoff 30 s -> 15 min). Watch `prepuller_pull_total` and `activePulls`
+  before leaving it on.
+- **One hub replica.** Sessions and the task list live in memory; there is no
+  PVC and no leader election. Keep `hub.replicaCount=1` (and the same
+  `session-secret` if you ever go higher).
+
+### 14.8 Upgrade, rollback, uninstall
+
+```bash
+# same overlay, new sha tag
+helm upgrade prepuller deploy/helm/image-prepuller -n prepuller \
+  -f deploy/values/t8s-nsk.yaml --set image.tag=sha-<new-commit>
+
+helm history prepuller -n prepuller
+helm rollback prepuller <revision> -n prepuller   # then re-pin image.tag explicitly
+
+helm uninstall prepuller -n prepuller
+kubectl delete secret prepuller-image-prepuller-secret -n prepuller   # kept by resource-policy
+kubectl delete namespace prepuller
+```
+
+Deleting the namespace also removes the Ingress, the Certificate and the
+DaemonSet; the containerd image cache on the nodes is **not** touched by an
+uninstall. If Flux owns the release later, remove the HelmRelease instead and let
+Flux prune.
+

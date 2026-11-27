@@ -233,6 +233,28 @@ DaemonSet; spoke, ingress и NetworkPolicy — отдельными блокам
 `REGISTRY`/`IMAGE` и `REGISTRY_USERNAME`/`REGISTRY_PASSWORD` остался в
 [`.gitea/workflows/build-image.yaml`](.gitea/workflows/build-image.yaml) как зеркало.
 
+### Первый кластер: t8s-nsk
+
+Целевой кластер первой очереди — **t8s-nsk** (Talos v1.13.10, Kubernetes v1.36.0,
+Cilium, Traefik, cert-manager). Для него в репозитории лежит готовый overlay
+[`deploy/values/t8s-nsk.yaml`](deploy/values/t8s-nsk.yaml): Talos-путь к сокету
+containerd, toleration для control-plane (`cp-1`), ingress
+`prepuller.t8s-nsk.bildme.ru` с сертификатом от `letsencrypt-prod`,
+`autoWarm=false` на первый раскат.
+
+```bash
+helm upgrade --install prepuller deploy/helm/image-prepuller \
+  --namespace prepuller --create-namespace \
+  -f deploy/values/t8s-nsk.yaml
+```
+
+Пошаговый runbook (DNS, TLS, проверки с ожидаемыми числами, особенности Talos:
+`imageFSCapacityBytes=0`, зеркала docker.io, порт 9443 на нодах) — в
+[docs/DEPLOY.md §14](docs/DEPLOY.md#14-first-cluster-t8s-nsk-talos). Важно:
+`image.tag` в overlay — это `sha-*` сборка того же коммита, что и чарт;
+релизный образ `0.2.0` не знает флагов `agent.pull.*` и падает в
+`CrashLoopBackOff` (см. §14.2).
+
 ## Флаги
 
 | Флаг | По умолчанию | Назначение |

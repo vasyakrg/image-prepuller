@@ -68,7 +68,10 @@ jobs:
           helm version --short
 
       - name: helm lint
-        run: helm lint deploy/helm/image-prepuller
+        run: |
+          helm lint deploy/helm/image-prepuller
+          # The first production overlay must keep linting too.
+          helm lint deploy/helm/image-prepuller -f deploy/values/t8s-nsk.yaml
 
       # Defaults plus every optional component: a broken template fails CI even
       # when it is disabled in the default values.
@@ -84,8 +87,14 @@ jobs:
             --set secret.sessionSecret=ci-session-secret \
             --set secret.clusterToken=ci-cluster-token \
             > /tmp/full.yaml
+          # The t8s-nsk overlay carries the CRI socket path, the control-plane
+          # toleration and the ingress/cert-manager wiring that defaults lack.
+          helm template ci deploy/helm/image-prepuller \
+            -f deploy/values/t8s-nsk.yaml \
+            > /tmp/t8s-nsk.yaml
           echo "rendered default: $(grep -c '^kind:' /tmp/default.yaml) objects"
           echo "rendered full:    $(grep -c '^kind:' /tmp/full.yaml) objects"
+          echo "rendered t8s-nsk: $(grep -c '^kind:' /tmp/t8s-nsk.yaml) objects"
 
       - name: validate rendered YAML
         run: |
@@ -95,7 +104,7 @@ jobs:
             || python3 -m pip install --quiet --break-system-packages pyyaml
           python3 - <<'PY'
           import yaml
-          for path in ("/tmp/default.yaml", "/tmp/full.yaml"):
+          for path in ("/tmp/default.yaml", "/tmp/full.yaml", "/tmp/t8s-nsk.yaml"):
               with open(path) as fh:
                   docs = [d for d in yaml.safe_load_all(fh) if d]
               if not docs:

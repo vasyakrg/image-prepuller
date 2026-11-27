@@ -1,0 +1,70 @@
+# Overlay for the first production cluster, t8s-nsk (Talos v1.13.10, Kubernetes
+# v1.36.0, Cilium, Traefik, cert-manager). Regression-tested against the live
+# cluster on 2026-11-27 — see docs/DEPLOY.md section 14 for the walkthrough,
+# expected numbers and the cluster-specific gotchas.
+#
+# Usage:
+#   helm upgrade --install prepuller deploy/helm/image-prepuller \
+#     --namespace prepuller --create-namespace -f deploy/values/t8s-nsk.yaml
+
+image:
+  repository: ghcr.io/vasyakrg/image-prepuller
+  # Pin a sha-* tag built from the SAME commit as the chart you install; see
+  # docs/DEPLOY.md section 14.2. The released 0.2.0 image predates the
+  # agent.pull.* flags and exits with "flag provided but not defined:
+  # -pull-timeout" when rendered by the chart from main.
+  tag: sha-9a670791d7c1
+  pullPolicy: IfNotPresent
+
+hub:
+  replicaCount: 1
+  mock: false
+  clusterName: t8s-nsk
+  # Keep the reconciler off for the first rollout: at ~50% coverage it would
+  # schedule ~185 pulls at once (throttled to 4 in flight). Turn it on after the
+  # snapshot has been checked; see section 14.7.
+  autoWarm: false
+  cookieSecure: true
+
+agent:
+  enabled: true
+  # Talos keeps containerd on the upstream path.
+  criSocket: /run/containerd/containerd.sock
+  diskPauseRatio: 0.78
+  pull:
+    # docker.io is reachable directly from this cluster (verified: the probe
+    # dial succeeds and a pull completes in ~3 s), so the preflight stays on
+    # even though containerd also has mirrors configured.
+    registryProbe: true
+    registryProbeTimeout: 5s
+    stallWatch: true
+    stallTimeout: 60s
+    timeout: 10m
+  # cp-1 carries the control-plane taint and the hub expects an agent on every
+  # node: without this toleration every slot on cp-1 stays offline and the
+  # snapshot is permanently partial.
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+
+ingress:
+  enabled: true
+  className: traefik
+  annotations:
+    # cert-manager's ingress-shim creates the Certificate for ingress.tls.
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: prepuller.t8s-nsk.bildme.ru
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: prepuller-tls
+      hosts:
+        - prepuller.t8s-nsk.bildme.ru
+
+# The agent runs with hostNetwork=true, so a NetworkPolicy never applies to it;
+# restrict TCP 9443 on the node firewall if the node network is not private.
+networkPolicy:
+  enabled: false

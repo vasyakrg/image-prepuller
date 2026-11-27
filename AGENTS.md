@@ -117,7 +117,8 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 | `.github/workflows/pr-agent.yml` | Ревью pull request'ов моделью (PR-Agent): `review` на открытие PR, `command` на комментарий со слэшем (только владелец), `doctor` вручную. Секреты — `OPENAI_API_BASE`/`OPENAI_KEY`; подробности в `docs/pr-agent.md` |
 | `Dockerfile` | multi-stage образ: golang:1.26.11 builder → distroless nonroot (65532) |
 | `deploy/helm/image-prepuller/` | Helm-чарт: hub, spoke, agent DaemonSet, RBAC, NetworkPolicy, ingress |
-| `docs/DEPLOY.md` | чеклист деплоя: секреты, k3d-стенд, e2e-сценарий |
+| `deploy/values/t8s-nsk.yaml` | overlay первого продового кластера t8s-nsk (Talos): сокет CRI, toleration control-plane, ingress/cert-manager, `autoWarm=false` |
+| `docs/DEPLOY.md` | чеклист деплоя: секреты, k3d-стенд, e2e-сценарий, runbook t8s-nsk (§14) |
 | `docs/architecture.md` | схемы Mermaid: топология, потоки, состояния, модель данных |
 | `docs/PLAN.md` | план Stage 2–3: workstreams, зоны записи, порядок мержа, гейты |
 
@@ -224,6 +225,20 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
   pull не валится. Сэмплирование `ImageFS` — единственный сигнал: не выключайте
   `-pull-stall-watch`, не предложив другой; e2e проверяет отказ по мёртвому реестру
   (`hack/e2e-k3d.sh` §9, < 60 s).
+- **Чарт и образ версионируются вместе.** Чарт из `main` передаёт агенту флаги
+  `agent.pull.*` (`-pull-timeout`, `-registry-probe-timeout`,
+  `-pull-stall-timeout`), которых нет в релизном образе `0.2.0`:
+  `image.tag=0.2.0` + чарт из `main` — это `CrashLoopBackOff` с
+  `flag provided but not defined: -pull-timeout` и все ноды `offline`. Ставьте
+  `image.tag=sha-<тот же коммит>` (как в `deploy/values/t8s-nsk.yaml`) либо
+  релизную пару OCI-чарт `0.2.0` + образ `0.2.0`.
+- **t8s-nsk (Talos): `imageFSCapacityBytes=0`.** `ImageFsInfo` в containerd на
+  Talos отдаёт только used, поэтому disk-guard агента (`ShouldPause`/`UsedRatio`)
+  не срабатывает никогда (нулевая ёмкость = «не пауза», fail-open).
+  `prepuller_node_imagefs_used_bytes` при этом есть — алертить надо на диск ноды,
+  а не на паузу pull'ов; stall watchdog не страдает (он тоже смотрит на used).
+  На t8s-nsk control-plane `cp-1` с taint `NoSchedule` — агенту нужна
+  toleration, иначе слоты cp-1 вечно `offline` и `partial=true`.
 - **`RemoteProvider.PullCounters()` ходит в `GET /internal/v1/counters`** (contract v2);
   при недоступном spoke возвращает `nil` — это по-прежнему значит «метрик нет», а не «ноль».
 - **Транспорт hub→spoke ретраит только идемпотентные state-changing вызовы** (pull, workload-pull, cancel, reconcile): 3 попытки, backoff 150 ms → 2 s, таймаут 5 s на попытку. `Snapshot`, `counters` и `health` ходят одним запросом, чтобы мёртвый spoke не тормозил UI и скрейп. `ErrSpokeUnavailable`/`ErrSpokeUnauthorized` → `502` (`pullErrorStatus`), `ErrTaskNotActive` → `409`.

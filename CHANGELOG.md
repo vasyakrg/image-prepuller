@@ -39,6 +39,27 @@
   в CI перестала гонять компилятор arm64 под QEMU: multi-arch build на GitHub Actions
   занимает минуты вместо ~15.
 
+### Docs
+
+- **Runbook первого продового кластера t8s-nsk (Talos)** — новый §14 в
+  `docs/DEPLOY.md`: факты живого кластера (Kubernetes 1.36.0, Talos v1.13.10,
+  Cilium, Traefik, cert-manager + Selectel DNS-01), overlay
+  `deploy/values/t8s-nsk.yaml`, DNS/TLS, ожидаемые числа снапшота, smoke-проверки
+  pull-пути и особенности окружения. Проверено установкой одноразового релиза в
+  живом кластере (агенты по CRI на всех трёх нодах, 92 workload'а, 190/375 слотов).
+- Раздел «Первый кластер: t8s-nsk» в `README.md` и запись в `AGENTS.md` §4/§8.
+- **Зафиксирована связка «чарт + образ»**: чарт из `main` передаёт флаги
+  `agent.pull.*`, которых нет в релизном образе `0.2.0` — при
+  `image.tag=0.2.0` агент падает с `flag provided but not defined:
+  -pull-timeout`. В overlay и `AGENTS.md` прописано, что `image.tag` обязан быть
+  `sha-*` того же коммита (или релизная пара OCI-чарт `0.2.0` + образ `0.2.0`).
+- На t8s-nsk зафиксирована особенность Talos: `imageFSCapacityBytes=0`, поэтому
+  disk-guard агента не срабатывает (fail-open) — алертить надо на диск ноды;
+  control-plane `cp-1` требует toleration в DaemonSet.
+- CI (`.github/workflows/ci.yaml` и его Gitea-зеркало): `helm lint` и
+  `helm template` прогоняются и с `-f deploy/values/t8s-nsk.yaml`, чтобы overlay не
+  разошёлся с чартом.
+
 ## [0.2.0] — 2026-11-26 — Stage 2/3: живой путь от Kubernetes до containerd
 
 Контракт заморожен тегом `contract-v2`; изменения ниже — реализация этого контракта.
