@@ -431,6 +431,10 @@ func (m *MockProvider) Snapshot(_ context.Context) model.Snapshot {
 	return snap
 }
 
+// mockConditions returns the kubelet condition subset the hub renders. The
+// healthy value differs per type: Ready=True is good, while DiskPressure=False is
+// the good state - the demo data shows both, so the UI colouring is visible in
+// mock mode. worker-03 is the 80% disk node, hence DiskPressure=True there.
 func mockConditions(n *mockNode) []model.NodeCondition {
 	now := time.Now()
 	if !n.ready {
@@ -442,13 +446,35 @@ func mockConditions(n *mockNode) []model.NodeCondition {
 			LastTransition: now.Add(-7 * time.Minute),
 		}}
 	}
-	return []model.NodeCondition{{
+	diskPressure := n.capacityBytes > 0 && float64(n.usedBytes)/float64(n.capacityBytes) >= n.diskPauseRatio
+	disk := model.NodeCondition{
+		Type:           "DiskPressure",
+		Status:         "False",
+		Reason:         "KubeletHasNoDiskPressure",
+		Message:        "kubelet has no disk pressure",
+		LastTransition: now.Add(-26 * time.Hour),
+	}
+	conditions := []model.NodeCondition{{
 		Type:           "Ready",
 		Status:         "True",
 		Reason:         "KubeletReady",
 		Message:        "kubelet is posting ready status",
 		LastTransition: now.Add(-26 * time.Hour),
 	}}
+	if diskPressure {
+		disk.Status = "True"
+		disk.Reason = "KubeletHasDiskPressure"
+		disk.Message = "kubelet has disk pressure (simulated: above the pause threshold)"
+	} else {
+		conditions = append(conditions, model.NodeCondition{
+			Type:           "MemoryPressure",
+			Status:         "False",
+			Reason:         "KubeletHasSufficientMemory",
+			Message:        "kubelet has sufficient memory available",
+			LastTransition: now.Add(-26 * time.Hour),
+		})
+	}
+	return append(conditions, disk)
 }
 
 func (m *MockProvider) TriggerPull(_ context.Context, req model.PullRequest) (model.PullTask, error) {

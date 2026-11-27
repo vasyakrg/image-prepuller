@@ -43,6 +43,13 @@ spec:
             {{- if .Values.hub.autoWarm }}
             - -auto-warm
             {{- end }}
+            {{- if .Values.hub.pullHistory.enabled }}
+            {{- /* The history file lives on a mounted volume: the hub runs with
+                   readOnlyRootFilesystem, so without the mount the store would
+                   fall back to memory only. */}}
+            - -pull-history-file=/var/lib/prepuller/pull-tasks.jsonl
+            - -pull-history-limit={{ .Values.hub.pullHistory.limit }}
+            {{- end }}
             {{- with .Values.hub.workloadSelector }}
             {{- /* Quoted: a selector may contain "!", "=" or spaces. */}}
             - {{ printf "-workload-selector=%s" . | quote }}
@@ -128,6 +135,11 @@ spec:
             failureThreshold: 3
           resources:
             {{- toYaml .Values.hub.resources | nindent 12 }}
+          {{- if .Values.hub.pullHistory.enabled }}
+          volumeMounts:
+            - name: pull-history
+              mountPath: /var/lib/prepuller
+          {{- end }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
       {{- with .Values.hub.nodeSelector }}
@@ -141,4 +153,17 @@ spec:
       {{- with .Values.hub.affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.hub.pullHistory.enabled }}
+      # Best-effort pull-task history: an emptyDir survives container restarts
+      # only; existingClaim switches to a PVC for durable history.
+      volumes:
+        - name: pull-history
+          {{- with .Values.hub.pullHistory.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ . }}
+          {{- else }}
+          emptyDir:
+            sizeLimit: {{ .Values.hub.pullHistory.sizeLimit }}
+          {{- end }}
       {{- end }}{{- end }}

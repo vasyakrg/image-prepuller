@@ -48,6 +48,13 @@ workload'ы и ноды и строит матрицу `image × node`; `node-ag
   Всё остальное не показывается, не считается в покрытии и не прогревается.
 - **Workloads view** — Deployment / StatefulSet / DaemonSet, попавшие в `-workload-selector`:
   их образы (включая init-контейнеры), PullPolicy, покрытие каждого образа по нодам.
+  У образа с нарушением политики проблемный токен описания подсвечивается жёлтым
+  (тег `:latest` в самой ссылке, `policy: Always` рядом с ней) — видно, что именно
+  ломает offline failover, без раскрытия строки и чтения tooltip.
+- **Обзорные метрики** — пять карточек над таблицей: помеченные workload'ы, покрытие
+  кэша (`presentSlots / totalSlots` в виде «образ × нода»), состояние агентов
+  (`3 / 4` — сколько нод отвечают на API node-agent'а), занятое место ImageFS
+  (сумма по нодам + худшая нода по заполнению) и policy warnings (клик — фильтр).
 - **Матрица image × node** — состояние каждого слота: `present`, `pulling`, `missing`,
   `failed`, `paused_disk`, `offline`; размер, время последней проверки, текст ошибки.
 - **Ручной прогрев** — отдельный слот (image + node) или все образы workload'а сразу на все
@@ -55,12 +62,23 @@ workload'ы и ноды и строит матрицу `image × node`; `node-ag
 - **Pull Tasks** — журнал асинхронных pull-задач (`queued` / `running` / `succeeded` /
   `failed` / `canceled`): попытка, триггер и актор, время создания и длительность, ошибка;
   активную задачу можно отменить кнопкой (`POST /api/v1/pulls/{id}/cancel`): в live-режиме
-  отмена закрывает запрос к агенту и прерывает CRI-загрузку на ноде; обновление каждые 5 s.
+  отмена закрывает запрос к агенту и прерывает CRI-загрузку на ноде. Список листается
+  страницами (25/50/100 на страницу, фильтр по состоянию) через
+  `GET /api/v1/pull-tasks?limit=&offset=&state=`: hub держит собственную ограниченную
+  историю задач (`-pull-history-file`, по умолчанию 2000 записей), поэтому она не
+  зависит от того, сколько задач провайдер держит в памяти, и переживает рестарт
+  контейнера (в чарте — `hub.pullHistory`). Бейдж в меню обновляется каждые 2 s и
+  показывает активные задачи плюс завершённые за последние 30 s — короткий pull
+  больше не выглядит как «задач нет».
 - **Nodes view** — ImageFS (used/capacity), порог паузы авто-прогрева (78%) и порог kubelet GC
-  (85%), активные pull'ы, список закэшированных образов.
-- **Node detail** — клик по ноде открывает панель: кэшированные образы с размерами, ImageFS
-  used/capacity и процент, `diskPaused`, версия агента и условия ноды (Ready/NotReady);
-  панель обновляется каждым поллингом, закрывается кнопкой или Esc.
+  (85%), активные pull'ы, список закэшированных образов. Если CRI сообщает только used
+  (containerd на Talos), ёмкость берётся из `ephemeral-storage` ноды и помечается
+  `est.`/`~`; если и её нет, вместо ложных «0 B (0.0%)» показывается «ёмкость неизвестна».
+- **Node detail** — клик по ноде открывает панель: кэшированные образы с размерами и
+  поиском по ним (имя/тег/digest), ImageFS used/capacity и процент, `diskPaused`,
+  версия агента и условия ноды. Цвет условия зависит от его типа: `Ready: True` —
+  зелёный, `DiskPressure: True` — красный (для pressure-условий здоровое значение
+  `False`); панель обновляется каждым поллингом, закрывается кнопкой или Esc.
 - **Policy warnings** — `:latest`/отсутствие иммутабельного тега и `imagePullPolicy: Always`
   (ломают offline failover).
 - **Activity** — журнал pull-событий с триггером (auto / manual), актором (логин оператора
@@ -309,7 +327,12 @@ hub и кластерные серии; `agent.metrics.serviceMonitor` / `agent.
 `agent.networkPolicy.enabled` отдельно. Область действия задаётся
 `hub.workloadSelector` (по умолчанию `prepull=true`) и `hub.nodeLabelSelector`
 (например, `!node-role.kubernetes.io/control-plane`); у ведомого кластера — те же
-ключи под `spoke.*`.
+ключи под `spoke.*`. История pull-задач hub'а живёт в `hub.pullHistory`:
+`enabled` (по умолчанию `true`), `limit` (2000 записей), `sizeLimit` emptyDir (256Mi) и
+`existingClaim` — пусто = emptyDir (история переживает рестарт контейнера, но не
+пересоздание пода), задан = PVC для действительно долгой истории (том должен быть
+записываемым для uid/gid 65532, при `readOnlyRootFilesystem: true` без монтирования
+история недоступна).
 
 Кластер без UI — только агенты:
 
@@ -384,6 +407,8 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
 | `-node-selector` | пусто | Kubernetes label selector нод в области действия (слоты image × node строятся только по ним). Для агентов на воркерах — `!node-role.kubernetes.io/control-plane`; в чарте `hub.nodeLabelSelector` / `spoke.nodeLabelSelector` (env `PREPULLER_NODE_SELECTOR`) |
 | `-hub-url` | пусто | Только spoke: базовый URL hub'а (обычно ingress). Задаёт outbound-режим — spoke сам подключается к hub'у; пусто — direct-режим, и hub должен уметь достучаться до spoke по HTTP (env `PREPULLER_HUB_URL`) |
 | `-hub-sync-interval` | `3s` | Только spoke: как часто outbound-spoke пушит состояние кластера в hub (env `PREPULLER_HUB_SYNC_INTERVAL`) |
+| `-pull-history-file` | пусто | Только hub: JSONL-файл истории pull-задач (env `PREPULLER_PULL_HISTORY_FILE`). Пусто — история только в памяти; недоступный/незаписываемый путь — предупреждение в лог и память (hub всё равно стартует) |
+| `-pull-history-limit` | `2000` | Только hub: сколько задач хранить в истории (env `PREPULLER_PULL_HISTORY_LIMIT`); активные задачи не вытесняются |
 
 Подкоманда `agent` — node-agent:
 
@@ -432,6 +457,8 @@ stalled`. Hub превращает 504 в `provider.ErrAgentPullStalled` → HTT
 | `PREPULLER_HUB_SYNC_INTERVAL` | spoke | нет | Интервал push состояния в outbound-режиме (Go duration, по умолчанию `3s`; невалидное значение — предупреждение в лог и `3s`) |
 | `PREPULLER_AGENT_TOKEN` | agent + hub + spoke | нет | Bearer-токен агентского API: его проверяет агент (`-token`) и им же hub/spoke ходят в `GET /agent/v1/snapshot` и `POST /agent/v1/pulls`; пусто — без авторизации |
 | `PREPULLER_AGENT_METRICS_ADDR` | agent | нет | Адрес Prometheus-метрик агента, по умолчанию `:9444`; пусто — выключить сервер метрик |
+| `PREPULLER_PULL_HISTORY_FILE` | hub | нет | Путь JSONL-файла истории pull-задач (то же, что `-pull-history-file`); пусто — история в памяти |
+| `PREPULLER_PULL_HISTORY_LIMIT` | hub | нет | Ёмкость истории pull-задач (то же, что `-pull-history-limit`), по умолчанию `2000` |
 
 \* нужен либо `PREPULLER_USERS`, либо legacy-пара `PREPULLER_AUTH_USER`/`_PASS`.
 
@@ -468,7 +495,7 @@ Cookie-сессии подписаны HMAC-SHA256 и несут роль; cooki
 | `POST /api/v1/pull` | cookie, `operator` | `{cluster,image,node}` → 202 `{status,image,node,task}` |
 | `POST /api/v1/workloads/pull` | cookie, `operator` | `{cluster,namespace,kind,name}` → 202 `{triggered}` |
 | `POST /api/v1/reconcile` | cookie, `operator` | `{cluster}` → 200, принудительный синк |
-| `GET /api/v1/pull-tasks?cluster=ID` | cookie | `{cluster, tasks[]}` — асинхронные pull-задачи (v2) |
+| `GET /api/v1/pull-tasks?cluster=ID&limit=50&offset=0&state=all` | cookie | Одна страница pull-задач из истории hub'а (v2): `{cluster, tasks[], total, limit, offset, active, source}`. `limit` 1..200 (по умолчанию 50), `state` — `all` / `active` / `queued` / `running` / `succeeded` / `failed` / `canceled`; `active` — число активных задач независимо от фильтра, `source` — `history` (файл/память hub'а) или `snapshot` (провайдер). Невалидный `limit`/`offset`/`state` — 400 |
 | `POST /api/v1/pulls/{id}/cancel?cluster=ID` | cookie, `operator` | Отмена queued/running задачи → 202; 404 — нет задачи (v2) |
 | `GET /api/v1/nodes/{node}/images?cluster=ID` | cookie | Кэш образов и ImageFS одной ноды (v2) |
 | `GET /api/v1/health?cluster=ID` | cookie | `model.Health` провайдера кластера (v2) |

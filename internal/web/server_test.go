@@ -10,11 +10,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/local/image-prepuller/internal/auth"
 	"github.com/local/image-prepuller/internal/metrics"
 	"github.com/local/image-prepuller/internal/model"
 	"github.com/local/image-prepuller/internal/provider"
+	"github.com/local/image-prepuller/internal/tasks"
 )
 
 func TestServerAuthMultiClusterAndMetrics(t *testing.T) {
@@ -283,4 +285,188 @@ func TestSnapshotHandlerEmitsArrays(t *testing.T) {
 		t.Fatalf("spoke snapshot = %d", spokeRec.Code)
 	}
 	checkArrays(t, spokeRec)
+}
+
+// pullTasksTestProvider is a provider whose Snapshot returns a fixed task list.
+// The snapshot fallback and the snapshot->history feed of /api/v1/pull-tasks are
+// tested with it, so MockProvider demo data cannot change the expected totals.
+type pullTasksTestProvider struct {
+	provider.Provider
+	tasks []model.PullTask
+}
+
+func (p pullTasksTestProvider) Snapshot(context.Context) model.Snapshot {
+	snap := model.Snapshot{Tasks: p.tasks}
+	snap.Normalize()
+	return snap
+}
+
+// taskHistoryServer builds a hub with one cluster and the given task history.
+func taskHistoryServer(t *testing.T, cluster string, p provider.Provider, history *tasks.Store) (*Server, *http.Cookie) {
+	t.Helper()
+	mgr, err := auth.NewManager(auth.Config{
+		Username:      "admin",
+		Password:      "pass123",
+		SessionSecret: []byte("unit-test-secret"),
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	reg := provider.NewRegistry()
+	reg.Register(provider.ClusterEntry{ID: cluster, Name: cluster, Role: "local", Provider: p})
+	opts := []Option{}
+	if history != nil {
+		opts = append(opts, WithTaskHistory(history))
+	}
+	srv, err := NewServer(reg, mgr, opts...)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	cookie, _, code := login(t, srv, "admin", "pass123")
+	if code != http.StatusOK || cookie == nil {
+		t.Fatalf("login = %d", code)
+	}
+	return srv, cookie
+}
+
+type pullTasksResponse struct {
+	Cluster string           `json:"cluster"`
+	Tasks   []model.PullTask `json:"tasks"`
+	Total   int              `json:"total"`
+	Limit   int              `json:"limit"`
+	Offset  int              `json:"offset"`
+	Active  int              `json:"active"`
+	Source  string           `json:"source"`
+}
+
+func decodePullTasks(t *testing.T, rec *httptest.ResponseRecorder) pullTasksResponse {
+	t.Helper()
+	var body pullTasksResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode pull-tasks: %v (%s)", err, rec.Body.String())
+	}
+	return body
+}
+
+func TestPullTasksHistoryPaginationAndStateFilter(t *testing.T) {
+	store, err := tasks.Open("", 100)
+	if err != nil {
+		t.Fatalf("tasks.Open: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	base := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	seed := []model.PullTask{
+		{ID: "t-0", Image: "ghcr.io/acme/a:1", Node: "n1", State: model.TaskSucceeded, Trigger: model.TriggerManual, CreatedAt: base},
+		{ID: "t-1", Image: "ghcr.io/acme/a:1", Node: "n1", State: model.TaskQueued, Trigger: model.TriggerManual, CreatedAt: base.Add(time.Minute)},
+		{ID: "t-2", Image: "ghcr.io/acme/a:1", Node: "n1", State: model.TaskRunning, Trigger: model.TriggerManual, CreatedAt: base.Add(2 * time.Minute)},
+		{ID: "t-3", Image: "ghcr.io/acme/a:1", Node: "n1", State: model.TaskFailed, Trigger: model.TriggerManual, CreatedAt: base.Add(3 * time.Minute)},
+		{ID: "t-4", Image: "ghcr.io/acme/a:1", Node: "n1", State: model.TaskCanceled, Trigger: model.TriggerManual, CreatedAt: base.Add(4 * time.Minute)},
+	}
+	store.Observe("talos-kz", seed)
+
+	srv, cookie := taskHistoryServer(t, "talos-kz", pullTasksTestProvider{}, store)
+
+	rec := doAuthed(srv, http.MethodGet, "/api/v1/pull-tasks?cluster=talos-kz&limit=2&offset=1", "", cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pull-tasks = %d: %s", rec.Code, rec.Body.String())
+	}
+	body := decodePullTasks(t, rec)
+	if body.Source != "history" || body.Cluster != "talos-kz" {
+		t.Fatalf("response = %+v, want source=history cluster=talos-kz", body)
+	}
+	if body.Total != 5 || body.Active != 2 || body.Limit != 2 || body.Offset != 1 {
+		t.Fatalf("total/active/limit/offset = %d/%d/%d/%d, want 5/2/2/1", body.Total, body.Active, body.Limit, body.Offset)
+	}
+	if len(body.Tasks) != 2 || body.Tasks[0].ID != "t-3" || body.Tasks[1].ID != "t-2" {
+		t.Fatalf("page = %+v, want newest-first t-3,t-2", body.Tasks)
+	}
+
+	// Default limit is 50, an out-of-range limit is clamped to 1..200 and a
+	// negative offset means the first page.
+	body = decodePullTasks(t, doAuthed(srv, http.MethodGet, "/api/v1/pull-tasks?cluster=talos-kz", "", cookie))
+	if body.Limit != 50 || body.Total != 5 {
+		t.Fatalf("default limit = %d (total %d), want 50 and 5", body.Limit, body.Total)
+	}
+	if body = decodePullTasks(t, doAuthed(srv, http.MethodGet, "/api/v1/pull-tasks?cluster=talos-kz&limit=999", "", cookie)); body.Limit != 200 {
+		t.Fatalf("clamped limit = %d, want 200", body.Limit)
+	}
+	if body = decodePullTasks(t, doAuthed(srv, http.MethodGet, "/api/v1/pull-tasks?cluster=talos-kz&limit=0", "", cookie)); body.Limit != 1 || len(body.Tasks) != 1 {
+		t.Fatalf("zero limit = %+v, want limit 1 with one task", body)
+	}
+	if body = decodePullTasks(t, doAuthed(srv, http.MethodGet, "/api/v1/pull-tasks?cluster=talos-kz&offset=-5", "", cookie)); body.Offset != 0 || len(body.Tasks) != 5 {
+		t.Fatalf("negative offset = %+v, want the first page", body)
+	}
+
+	// State filter: active maps to queued+running, everything else is an exact
+	// TaskState match, and the active counter ignores the filter.
+	body = decodePullTasks(t, doAuthed(srv, http.MethodGet, "/api/v1/pull-tasks?cluster=talos-kz&state=active", "", cookie))
+	if body.Total != 2 || body.Active != 2 || len(body.Tasks) != 2 || body.Tasks[0].ID != "t-2" {
+		t.Fatalf("state=active = %+v, want 2 active tasks newest first", body)
+	}
+	body = decodePullTasks(t, doAuthed(srv, http.MethodGet, "/api/v1/pull-tasks?cluster=talos-kz&state=failed", "", cookie))
+	if body.Total != 1 || body.Active != 2 || len(body.Tasks) != 1 || body.Tasks[0].ID != "t-3" {
+		t.Fatalf("state=failed = %+v, want only t-3 with active still 2", body)
+	}
+
+	// Bad input is a 400, unknown cluster stays a 404.
+	for _, path := range []string{
+		"/api/v1/pull-tasks?cluster=talos-kz&limit=abc",
+		"/api/v1/pull-tasks?cluster=talos-kz&offset=abc",
+		"/api/v1/pull-tasks?cluster=talos-kz&state=bogus",
+	} {
+		if rec := doAuthed(srv, http.MethodGet, path, "", cookie); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s = %d, want 400: %s", path, rec.Code, rec.Body.String())
+		}
+	}
+	if rec := doAuthed(srv, http.MethodGet, "/api/v1/pull-tasks?cluster=nope", "", cookie); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown cluster = %d, want 404", rec.Code)
+	}
+}
+
+func TestPullTasksFallsBackToSnapshotWithoutHistory(t *testing.T) {
+	base := time.Date(2026, 5, 21, 10, 0, 0, 0, time.UTC)
+	p := pullTasksTestProvider{tasks: []model.PullTask{
+		{ID: "snap-2", State: model.TaskRunning, CreatedAt: base.Add(2 * time.Minute)},
+		{ID: "snap-1", State: model.TaskSucceeded, CreatedAt: base.Add(time.Minute)},
+		{ID: "snap-0", State: model.TaskFailed, CreatedAt: base},
+	}}
+	srv, cookie := taskHistoryServer(t, "talos-kz", p, nil)
+
+	body := decodePullTasks(t, doAuthed(srv, http.MethodGet, "/api/v1/pull-tasks?cluster=talos-kz&limit=2&offset=1", "", cookie))
+	if body.Source != "snapshot" {
+		t.Fatalf("source = %q, want snapshot", body.Source)
+	}
+	if body.Total != 3 || body.Active != 1 || body.Limit != 2 || body.Offset != 1 {
+		t.Fatalf("total/active/limit/offset = %d/%d/%d/%d, want 3/1/2/1", body.Total, body.Active, body.Limit, body.Offset)
+	}
+	if len(body.Tasks) != 2 || body.Tasks[0].ID != "snap-1" || body.Tasks[1].ID != "snap-0" {
+		t.Fatalf("page = %+v, want snap-1,snap-0", body.Tasks)
+	}
+	body = decodePullTasks(t, doAuthed(srv, http.MethodGet, "/api/v1/pull-tasks?cluster=talos-kz&state=active", "", cookie))
+	if body.Source != "snapshot" || body.Total != 1 || len(body.Tasks) != 1 || body.Tasks[0].ID != "snap-2" {
+		t.Fatalf("state=active fallback = %+v", body)
+	}
+}
+
+func TestSnapshotFeedsTaskHistory(t *testing.T) {
+	store, err := tasks.Open("", 100)
+	if err != nil {
+		t.Fatalf("tasks.Open: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	base := time.Date(2026, 5, 22, 10, 0, 0, 0, time.UTC)
+	p := pullTasksTestProvider{tasks: []model.PullTask{
+		{ID: "feed-1", State: model.TaskSucceeded, CreatedAt: base},
+	}}
+	srv, cookie := taskHistoryServer(t, "talos-kz", p, store)
+
+	if rec := doAuthed(srv, http.MethodGet, "/api/v1/snapshot?cluster=talos-kz", "", cookie); rec.Code != http.StatusOK {
+		t.Fatalf("snapshot = %d: %s", rec.Code, rec.Body.String())
+	}
+	got, total, _ := store.Query("talos-kz", "", 0, 10)
+	if total != 1 || len(got) != 1 || got[0].ID != "feed-1" {
+		t.Fatalf("history after snapshot = %+v (total %d), want feed-1", got, total)
+	}
 }

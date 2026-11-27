@@ -442,3 +442,46 @@ input:focus-visible {
   text-overflow: ellipsis;
   word-break: normal;
 }
+
+/* Policy warnings: the offending token of the image description is amber, the
+   same colour as the warning pill, so "what is wrong" is readable at a glance. */
+.warn-token {
+  color: #fbbf24;
+  font-weight: 600;
+  text-decoration: underline dotted rgba(251, 191, 36, 0.55);
+  text-underline-offset: 2px;
+  cursor: help;
+}
+.img-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 2px; }
+
+/* Pull tasks badge: hot while tasks are active, muted otherwise. */
+.tab-count-hot {
+  background: rgba(59, 130, 246, 0.35);
+  color: #dbeafe;
+}
+
+/* Unknown ImageFS capacity (e.g. Talos: CRI reports used only). A hatched bar
+   says "no percentage", which is not the same as an empty disk. */
+.disk-bar-unknown {
+  background: repeating-linear-gradient(
+    135deg,
+    rgba(148, 163, 184, 0.14) 0 6px,
+    rgba(148, 163, 184, 0.04) 6px 12px
+  );
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.disk-bar-unknown-label {
+  font-size: 10.5px;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+
+/* Node detail: image search over the node cache. */
+.node-image-filter {
+  width: 100%;
+  margin: 2px 0 8px;
+  font-size: 12.5px;
+}
+.node-image-empty { font-size: 12px; margin-bottom: 8px; }

@@ -166,10 +166,14 @@ type NodeInfo struct {
 	KubeletGCThreshold   float64         `json:"kubeletGcThreshold"` // e.g. 0.85
 	ImageFSUsedBytes     int64           `json:"imageFsUsedBytes"`
 	ImageFSCapacityBytes int64           `json:"imageFsCapacityBytes"`
-	CachedImageCount     int             `json:"cachedImageCount"`
-	ActivePulls          int             `json:"activePulls"`
-	CachedImages         []CachedImage   `json:"cachedImages,omitempty"`
-	LastSeen             time.Time       `json:"lastSeen"`
+	// ImageFSCapacityEstimated marks ImageFSCapacityBytes as a proxy: when the
+	// CRI ImageFS reports used bytes only (Talos), the capacity comes from the
+	// node's ephemeral-storage instead of the runtime.
+	ImageFSCapacityEstimated bool          `json:"imageFsCapacityEstimated,omitempty"`
+	CachedImageCount         int           `json:"cachedImageCount"`
+	ActivePulls              int           `json:"activePulls"`
+	CachedImages             []CachedImage `json:"cachedImages,omitempty"`
+	LastSeen                 time.Time     `json:"lastSeen"`
 }
 
 type PullEvent struct {

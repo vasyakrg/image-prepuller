@@ -474,6 +474,7 @@ erDiagram
         bool diskPaused
         int64 imageFsUsedBytes
         int64 imageFsCapacityBytes
+        bool imageFsCapacityEstimated
     }
     PULLEVENT {
         string id
@@ -488,6 +489,15 @@ erDiagram
 
 Ключевая метрика — **coverage**: `presentSlots / totalSlots × 100`, где слот — пара
 «образ workload'а × worker-нода». Она же уезжает в `prepuller_image_present`.
+`imageFsCapacityEstimated` означает, что ёмкость ImageFS пришла не из CRI, а из
+`ephemeral-storage` ноды (containerd на Talos отдаёт только `used`), и в UI помечена
+как оценка.
+
+История pull-задач живёт **на hub**, а не в провайдере: `internal/tasks.Store`
+держит ограниченный список `PullTask` по всем кластерам (опционально JSONL-файл) и
+наполняется из каждого снапшота; `GET /api/v1/pull-tasks` отдаёт её страницами
+(`limit`/`offset`/`state`). Поэтому история не зависит от того, сколько задач
+конкретный провайдер держит в памяти.
 
 ## 7. Состояния слота и политика диска
 

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/local/image-prepuller/internal/provider"
 	"github.com/local/image-prepuller/internal/reconcile"
 	"github.com/local/image-prepuller/internal/spokeclient"
+	"github.com/local/image-prepuller/internal/tasks"
 	"github.com/local/image-prepuller/internal/web"
 )
 
@@ -50,6 +52,8 @@ func runController(args []string) {
 	nodeSelector := fs.String("node-selector", os.Getenv("PREPULLER_NODE_SELECTOR"), "Kubernetes label selector of the nodes in scope (default: every node), e.g. !node-role.kubernetes.io/control-plane when agents run on workers only")
 	hubURL := fs.String("hub-url", os.Getenv("PREPULLER_HUB_URL"), "Spoke only: hub base URL (usually the hub ingress). Set it to run the spoke in outbound mode, where the spoke dials the hub instead of being reachable from it")
 	hubSync := fs.Duration("hub-sync-interval", hubSyncIntervalFromEnv(), "Spoke only: how often the outbound spoke pushes cluster state to the hub")
+	pullHistoryFile := fs.String("pull-history-file", os.Getenv("PREPULLER_PULL_HISTORY_FILE"), "Hub only: JSONL file keeping a bounded pull-task history across restarts (empty = memory only). Point it at a writable volume, e.g. /var/lib/prepuller/pull-tasks.jsonl")
+	pullHistoryLimit := fs.Int("pull-history-limit", pullHistoryLimitFromEnv(), "Hub only: maximum number of pull tasks kept in the history (default 2000, PREPULLER_PULL_HISTORY_LIMIT)")
 	_ = fs.Parse(args)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -196,6 +200,36 @@ func runController(args []string) {
 		serverOpts = append(serverOpts, web.WithSpokeHub(pushHub))
 	}
 
+	// Bounded hub-side pull-task history: a longer, paginated task list than any
+	// provider snapshot, optionally persisted across restarts. An unwritable
+	// path must not prevent startup (read-only root filesystem, missing volume),
+	// so it degrades to a memory-only store with a warning.
+	historyLimit := *pullHistoryLimit
+	if historyLimit <= 0 {
+		historyLimit = tasks.DefaultCapacity
+	}
+	historyFile := strings.TrimSpace(*pullHistoryFile)
+	taskHistory, err := tasks.Open(historyFile, historyLimit)
+	persisted := err == nil && historyFile != ""
+	if err != nil {
+		log.Printf("pull-task history file disabled (%v), keeping the history in memory only", err)
+		taskHistory, err = tasks.Open("", historyLimit)
+		if err != nil {
+			log.Fatalf("pull-task history: %v", err)
+		}
+	}
+	defer func() {
+		if closeErr := taskHistory.Close(); closeErr != nil {
+			log.Printf("close pull-task history: %v", closeErr)
+		}
+	}()
+	if persisted {
+		log.Printf("pull-task history: %s (limit %d tasks)", historyFile, historyLimit)
+	} else {
+		log.Printf("pull-task history: memory only, limit %d tasks (set -pull-history-file to persist it)", historyLimit)
+	}
+	serverOpts = append(serverOpts, web.WithTaskHistory(taskHistory))
+
 	webSrv, err := web.NewServer(reg, authMgr, serverOpts...)
 	if err != nil {
 		log.Fatalf("init web server: %v", err)
@@ -272,6 +306,22 @@ func hubSyncIntervalFromEnv() time.Duration {
 		return fallback
 	}
 	return d
+}
+
+// pullHistoryLimitFromEnv resolves the bounded pull-task history capacity:
+// PREPULLER_PULL_HISTORY_LIMIT wins over the built-in default.
+func pullHistoryLimitFromEnv() int {
+	const fallback = 2000
+	raw := strings.TrimSpace(os.Getenv("PREPULLER_PULL_HISTORY_LIMIT"))
+	if raw == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		log.Printf("PREPULLER_PULL_HISTORY_LIMIT=%q is not a positive integer, using %d", raw, fallback)
+		return fallback
+	}
+	return n
 }
 
 // managedCluster is one entry of PREPULLER_MANAGED_CLUSTERS.

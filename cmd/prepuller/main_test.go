@@ -44,3 +44,20 @@ func TestHubSyncIntervalFromEnv(t *testing.T) {
 		}
 	}
 }
+
+func TestPullHistoryLimitFromEnv(t *testing.T) {
+	t.Setenv("PREPULLER_PULL_HISTORY_LIMIT", "")
+	if got := pullHistoryLimitFromEnv(); got != 2000 {
+		t.Fatalf("default history limit = %d, want 2000", got)
+	}
+	t.Setenv("PREPULLER_PULL_HISTORY_LIMIT", "500")
+	if got := pullHistoryLimitFromEnv(); got != 500 {
+		t.Fatalf("configured history limit = %d, want 500", got)
+	}
+	for _, bad := range []string{"many", "0", "-10"} {
+		t.Setenv("PREPULLER_PULL_HISTORY_LIMIT", bad)
+		if got := pullHistoryLimitFromEnv(); got != 2000 {
+			t.Fatalf("invalid value %q resolved to %d, want the 2000 fallback", bad, got)
+		}
+	}
+}

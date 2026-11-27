@@ -99,6 +99,23 @@ hub:
   clusterName: talos-prod-eu
   # -auto-warm starts the reconciler for local clusters (Stage 2/3).
   autoWarm: true
+  # Bounded pull-task history served by GET /api/v1/pull-tasks (paginated) and
+  # kept by the hub across provider restarts. Best effort by design: with the
+  # default emptyDir the file survives a container restart but not pod
+  # rescheduling; set existingClaim to a PVC when the history must be durable.
+  # enabled=false keeps the old behaviour (history is the provider snapshot
+  # only, no extra volume and no -pull-history-* flags).
+  pullHistory:
+    enabled: true
+    # Maximum number of tasks kept in the history (an active pull is never
+    # evicted). The JSONL file is compacted around this bound (~1 MiB).
+    limit: 2000
+    # Size of the emptyDir used when existingClaim is empty.
+    sizeLimit: 256Mi
+    # Pre-created PVC name for durable history. The hub mounts it read-write at
+    # /var/lib/prepuller, so the claim must be writable by uid/gid 65532 (the
+    # distroless nonroot image). Leave empty to use an emptyDir (best effort).
+    existingClaim: ""
   # Optional login rate-limit overrides (PREPULLER_LOGIN_ATTEMPTS_PER_MINUTE /
   # PREPULLER_LOGIN_BLOCK). Empty = internal/auth defaults.
   loginRateLimit:

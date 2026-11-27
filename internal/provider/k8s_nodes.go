@@ -78,6 +78,15 @@ func (p *K8sProvider) nodeFromK8s(ctx context.Context, node *corev1.Node) k8sNod
 	info.AgentVersion = inventory.AgentVersion
 	info.ImageFSUsedBytes = inventory.ImageFSUsedBytes
 	info.ImageFSCapacityBytes = inventory.ImageFSCapacityBytes
+	if info.ImageFSCapacityBytes == 0 {
+		// Talos containerd ImageFsInfo reports used bytes only, so the CRI
+		// capacity is unknown there: fall back to the kubelet ephemeral-storage
+		// capacity and flag it as a proxy. An agent-reported capacity always wins.
+		if capacity, ok := node.Status.Capacity[corev1.ResourceEphemeralStorage]; ok && capacity.Value() > 0 {
+			info.ImageFSCapacityBytes = capacity.Value()
+			info.ImageFSCapacityEstimated = true
+		}
+	}
 	info.ActivePulls = inventory.ActivePulls
 	info.CachedImages = append([]model.CachedImage(nil), inventory.Images...)
 	info.CachedImageCount = len(info.CachedImages)

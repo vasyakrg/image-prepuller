@@ -105,6 +105,7 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
   | `internal/provider/{spoke_hub,spoke_wire,counters}.go` | только stdlib |
   | `internal/spokeclient` | stdlib + `internal/model`, `internal/provider` |
   | `internal/reconcile` | stdlib + `internal/model`, `internal/provider` |
+  | `internal/tasks` | stdlib + `internal/model` |
   | `internal/testutil` | stdlib + внутренние пакеты |
 
   `go.mod`/`go.sum` — зона интегратора: feature-ветки их не меняют, новая зависимость
@@ -140,6 +141,7 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 | `internal/provider/k8s_*.go` | `K8sProvider` на client-go: list Deployments/STS/DS и Node в области действия (`WithLabelSelector`/`WithNodeSelector`), слоты image×node, policy-warnings, TTL-кэш снапшота; транспорт к node-agent (snapshot + асинхронный pull с отменой, HTTP/JSON v1, Bearer, таймауты) и `NewK8sProviderFromEnv` |
 | `internal/provider/k8s_registry.go` | резолв кредов реестра из `imagePullSecrets` workload'ов: `.dockerconfigjson`/`.dockercfg`, матчинг хоста по правилам distribution, кэш Secret (5 мин / 1 мин на ошибку), индекс image → secret'ы из снапшота |
 | `internal/reconcile/` | политика авто-прогрева: очередь, приоритеты (failed > missing, prod > staging > infra), лимиты, backoff |
+| `internal/tasks/` | hub-история pull-задач: upsert по cluster+id, фильтр по состоянию, пагинация, ограничение ёмкости (активные не вытесняются), персистентность JSONL (атомная компакция, битые строки пропускаются) |
 | `internal/testutil/` | фейковый spoke/hub, golden-снапшот v2, контрактные тесты |
 | `cmd/prepuller/agent.go` | `runAgent()`: флаги агента, запуск HTTP/JSON сервера, graceful shutdown |
 | `.github/workflows/ci.yaml` | **Единственный** CI на GitHub: гейты `test` (gofmt, vet, test, build linux/amd64+arm64, гейт зависимостей ADR-001, `govulncheck`) и `helm` (lint/template), затем `image` (buildx amd64+arm64, публикация в GHCR на `GITHUB_TOKEN`, теги `sha-*`/latest/версия, `needs: [test, helm]`) и `chart` (OCI-чарт, только с релизного тега `v*` и `needs: [test, helm, image]`) |
@@ -258,6 +260,12 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
   `=`) и интервала из env.
 - `internal/metrics/prometheus_test.go` — новые серии, ровно один `Snapshot()` на кластер,
   offline-кластер.
+- `internal/tasks/store_test.go` — upsert и вытеснение (активная задача не удаляется),
+  фильтр/пагинация, перезагрузка файла (побеждает последняя версия), битые строки,
+  компакция, memory-only режим, конкурентные Observe/Query, отсутствие каталога.
+- `internal/web/server_test.go` — дополнительно к API: пагинация и state-фильтр
+  `/api/v1/pull-tasks` из истории, fallback на снапшот без истории, 400 на плохие
+  `limit`/`state`, `handleSnapshot` пополняет историю.
 - `internal/testutil/contract_test.go` — контракт hub↔spoke на фейковом spoke:
   снапшот v2, `TriggerPull`→`PullTask`, идемпотентность, отмена, counters, health,
   заглушки hub-API (`pull-tasks`, `nodes/{node}/images`, `pulls/{id}/cancel`, `health`),
@@ -423,10 +431,14 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
   `deploy/values/hub-cluster.yaml` и `deploy/values/managed-cluster.yaml`.
   Старые overrides молча не применятся — это повод один раз пройтись по ним.
 - **Talos: `imageFSCapacityBytes=0`.** `ImageFsInfo` в containerd на Talos отдаёт
-  только used, поэтому disk-guard агента (`ShouldPause`/`UsedRatio`) не
-  срабатывает никогда (нулевая ёмкость = «не пауза», fail-open).
-  `prepuller_node_imagefs_used_bytes` при этом есть — алертить надо на диск ноды,
-  а не на паузу pull'ов; stall watchdog не страдает (он тоже смотрит на used).
+  только used. Провайдер компенсирует это для отображения: если агент вернул
+  ёмкость 0, `k8s_nodes.go` берёт `ephemeral-storage` из `Node.status.capacity` и
+  выставляет `ImageFSCapacityEstimated=true` (в UI — `~` и бейдж `est.`); значение
+  агента всегда важнее, а без `AgentUp` фолбэк не включается. Disk-guard **агента**
+  (`ShouldPause`/`UsedRatio`) от этого не меняется и на Talos по-прежнему
+  fail-open (нулевая ёмкость = «не пауза»), так что пауза авто-прогрева там не
+  срабатывает. `prepuller_node_imagefs_used_bytes` есть — алертить надо на диск
+  ноды, а не на паузу pull'ов; stall watchdog не страдает (он тоже смотрит на used).
   Control-plane ноды в overlay вне области действия (`hub.nodeLabelSelector:
   "!node-role.kubernetes.io/control-plane"`, агенты — только на воркерах), поэтому
   их taint и отсутствие агента не дают `offline`-слотов. Нужен control-plane —
@@ -437,8 +449,18 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 - **`RemoteProvider.Snapshot` глотает ошибки**: при недоступном spoke возвращается пустой
   снапшот с `SyncStatus: offline`, `Partial: true` и `time.Now()`. Признак недоступности —
   `TotalWorkers == 0` или `SyncStatus == offline`; не считайте такой кластер «здоровым».
+- **История pull-задач — hub'ская, не провайдерская.** `internal/tasks.Store`
+  (`-pull-history-file`, `-pull-history-limit`, чарт `hub.pullHistory`) хранит
+  последние N задач по всем кластерам в памяти + JSONL, кормится каждым
+  `/api/v1/snapshot` и `/api/v1/pull-tasks` (upsert по cluster+id, поэтому
+  переходы состояния не дублируются) и отдаёт страницы через
+  `/api/v1/pull-tasks?limit=&offset=&state=`. Провайдер по-прежнему держит свои
+  ~200 задач — это не замена истории, а источник для неё: если hub перезапустили и
+  файла нет, более старые задачи исчезнут. Запись best-effort: ошибки файла только
+  логируются, hub стартует с `memory only`. `readOnlyRootFilesystem: true` требует
+  монтирования каталога — чарт монтирует emptyDir/PVC в `/var/lib/prepuller`.
 - **Pull-задачи в mock ограничены 200 последними, activity — 100.** Пагинации нет;
-  не снимайте лимиты, не добавив её.
+  не снимайте лимиты, не добавив её (hub-история выше снимает это ограничение для UI).
 - **`apiVersion` в spoke-запросах**: пусто и `v1` принимаются один релиз, всё остальное —
   `400 unsupported apiVersion`. Меняя `model.APIVersion`, обновите `validAPIVersion`
   в `server_spoke.go` и `RemoteProvider`.
@@ -458,9 +480,12 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 - **git обязателен.** Работа идёт через ветки и worktree (`docs/PLAN.md` §3, §6.1);
   baseline Stage 1 — коммит `18aaaa5`, ADR-001 — `216e0d2`, контракт Stage 2/3 —
   тег `contract-v2` (от него режутся все feature-ветки).
-- **Мок-состояния связаны с именами**: `talos-worker-03` = 80% диска (пауза),
-  `talos-worker-04` = NotReady, `ml/scorer` на `worker-02` = `failed` (401). Меняя демо-данные,
-  правьте и README/docs, иначе скриншоты и документация расходятся.
+- **Мок-состояния связаны с именами**: `talos-worker-03` = 80% диска (пауза,
+  `DiskPressure=True`), `talos-worker-04` = NotReady, `ml/scorer` на `worker-02` =
+  `failed` (401). Меняя демо-данные, правьте и README/docs, иначе скриншоты и
+  документация расходятся. Условия нод в mock намеренно разные по полярности
+  (`Ready=True` — хорошо, `DiskPressure=True` — плохо): UI красит их по типу условия,
+  а не по значению.
 
 ## 9. Definition of Done
 

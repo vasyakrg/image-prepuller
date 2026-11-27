@@ -68,15 +68,20 @@
           <div id="kpi-workloads" class="kpi-value">—</div>
           <div id="kpi-workloads-sub" class="kpi-sub muted">—</div>
         </div>
-        <div class="kpi-card">
-          <div class="kpi-label">Cluster Coverage</div>
+        <div class="kpi-card" title="Доля слотов «образ × нода», где образ уже лежит в кэше ноды. Считается по всем образам workload'ов в области действия.">
+          <div class="kpi-label">Image Cache Coverage</div>
           <div id="kpi-coverage" class="kpi-value">—</div>
           <div id="kpi-coverage-sub" class="kpi-sub muted">—</div>
         </div>
-        <div class="kpi-card">
-          <div class="kpi-label">Worker Nodes</div>
-          <div id="kpi-workers" class="kpi-value">—</div>
-          <div id="kpi-workers-sub" class="kpi-sub muted">—</div>
+        <div class="kpi-card" title="Сколько worker-нод отвечают на API node-agent'а. Нода Ready без агента не может прогреваться.">
+          <div class="kpi-label">Node Agents</div>
+          <div id="kpi-agents" class="kpi-value">—</div>
+          <div id="kpi-agents-sub" class="kpi-sub muted">—</div>
+        </div>
+        <div class="kpi-card" title="Занятое место под образы (ImageFS) по всем нодам и худшая нода по заполнению.">
+          <div class="kpi-label">Image Disk</div>
+          <div id="kpi-disk" class="kpi-value">—</div>
+          <div id="kpi-disk-sub" class="kpi-sub muted">—</div>
         </div>
         <div class="kpi-card kpi-clickable" id="kpi-warnings-card" title="Нажмите для фильтрации нарушений">
           <div class="kpi-label">Policy Warnings</div>
@@ -119,9 +124,26 @@
       <section id="tab-tasks" class="tab-panel hidden">
         <div class="toolbar">
           <span id="tasks-summary" class="muted">—</span>
+          <select id="tasks-state" class="select" title="Фильтр по состоянию задачи">
+            <option value="all">Состояние: Все</option>
+            <option value="active">Только активные</option>
+            <option value="succeeded">Succeeded</option>
+            <option value="failed">Failed</option>
+            <option value="canceled">Canceled</option>
+          </select>
           <span class="toolbar-spacer"></span>
-          <span class="muted" style="font-size:12px">Живое обновление: поллинг 5 s</span>
+          <span id="tasks-source" class="muted" style="font-size:12px"></span>
+          <label class="muted" style="font-size:12px" for="tasks-page-size">На странице</label>
+          <select id="tasks-page-size" class="select">
+            <option value="25">25</option>
+            <option value="50" selected>50</option>
+            <option value="100">100</option>
+          </select>
+          <span id="tasks-page-info" class="muted" style="font-size:12px">—</span>
+          <button id="tasks-prev" class="btn btn-secondary btn-xs" disabled>← Назад</button>
+          <button id="tasks-next" class="btn btn-secondary btn-xs" disabled>Вперёд →</button>
         </div>
+        <div id="tasks-err" class="error-banner hidden"></div>
         <div class="card table-wrap">
           <table class="data-table">
             <thead>

@@ -98,6 +98,7 @@ flowchart LR
 | `internal/agent` | `google.golang.org/grpc`, `k8s.io/cri-api`, stdlib |
 | `internal/provider/k8s*.go` | `k8s.io/client-go`, `k8s.io/api`, `k8s.io/apimachinery`, stdlib |
 | `internal/web`, `internal/model`, `internal/auth`, `internal/metrics` | только stdlib |
+| `internal/tasks` | stdlib + `internal/model` (история pull-задач, JSONL) |
 | `internal/provider/{provider,registry,mock,remote}.go` | только stdlib |
 | `internal/provider/{spoke_hub,spoke_wire,counters}.go` | только stdlib |
 | `internal/spokeclient` | stdlib + `internal/model`, `internal/provider` (сеть — `net/http`) |

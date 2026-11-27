@@ -11,6 +11,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/version"
@@ -37,6 +38,16 @@ func testNode(name string, ready bool, extra ...corev1.NodeCondition) *corev1.No
 		Message:            "kubelet is posting ready status",
 		LastTransitionTime: metav1.NewTime(time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC)),
 	}}, extra...)
+	return node
+}
+
+// testNodeWithEphemeralStorage is testNode plus the kubelet ephemeral-storage
+// capacity the provider falls back to when CRI ImageFS reports no capacity.
+func testNodeWithEphemeralStorage(name, capacity string) *corev1.Node {
+	node := testNode(name, true)
+	node.Status.Capacity = corev1.ResourceList{
+		corev1.ResourceEphemeralStorage: resource.MustParse(capacity),
+	}
 	return node
 }
 
@@ -386,6 +397,75 @@ func TestK8sProviderNodesAndConditions(t *testing.T) {
 	}
 	if snap.SyncStatus != model.SyncDegraded || !snap.Partial {
 		t.Fatalf("syncStatus/partial = %q/%v, want degraded/true", snap.SyncStatus, snap.Partial)
+	}
+}
+
+func TestK8sProviderImageFSCapacityFallback(t *testing.T) {
+	const gib = int64(1024 * 1024 * 1024)
+	cs := kubefake.NewSimpleClientset(
+		testNodeWithEphemeralStorage("worker-01", "100Gi"),
+		// Agent unreachable: the kubelet view alone must not invent a capacity.
+		testNodeWithEphemeralStorage("worker-02", "100Gi"),
+	)
+	inventory := map[string]NodeInventory{
+		"worker-01": {
+			ImageFSUsedBytes: 90 * gib,
+			// Talos: ImageFsInfo reports used bytes only, no capacity.
+			ImageFSCapacityBytes: 0,
+		},
+	}
+	p := newTestProvider(cs, inventory)
+
+	snap := p.Snapshot(context.Background())
+	if len(snap.Nodes) != 2 || snap.Nodes[0].Name != "worker-01" {
+		t.Fatalf("nodes not listed/sorted: %+v", snap.Nodes)
+	}
+	estimated := snap.Nodes[0]
+	if estimated.ImageFSCapacityBytes != 100*gib {
+		t.Fatalf("capacity = %d, want 100 GiB from ephemeral-storage", estimated.ImageFSCapacityBytes)
+	}
+	if !estimated.ImageFSCapacityEstimated {
+		t.Fatalf("capacity from ephemeral-storage must be flagged as estimated")
+	}
+	if !estimated.DiskPaused {
+		t.Fatalf("worker-01 ImageFS at 90%% of the estimated capacity must be disk-paused")
+	}
+
+	agentDown := snap.Nodes[1]
+	if agentDown.AgentUp {
+		t.Fatalf("worker-02 must have agent down: %+v", agentDown)
+	}
+	if agentDown.ImageFSCapacityBytes != 0 || agentDown.ImageFSCapacityEstimated {
+		t.Fatalf("capacity must stay unset without agent inventory: %+v", agentDown)
+	}
+}
+
+func TestK8sProviderImageFSCapacityAgentReportedWins(t *testing.T) {
+	const gib = int64(1024 * 1024 * 1024)
+	cs := kubefake.NewSimpleClientset(
+		testNodeWithEphemeralStorage("worker-01", "100Gi"),
+	)
+	inventory := map[string]NodeInventory{
+		"worker-01": {
+			ImageFSUsedBytes:     10 * gib,
+			ImageFSCapacityBytes: 200 * gib,
+		},
+	}
+	p := newTestProvider(cs, inventory)
+
+	snap := p.Snapshot(context.Background())
+	if len(snap.Nodes) != 1 {
+		t.Fatalf("nodes = %d, want 1", len(snap.Nodes))
+	}
+	node := snap.Nodes[0]
+	if node.ImageFSCapacityBytes != 200*gib {
+		t.Fatalf("capacity = %d, want the agent-reported 200 GiB", node.ImageFSCapacityBytes)
+	}
+	if node.ImageFSCapacityEstimated {
+		t.Fatalf("agent-reported capacity must not be flagged as estimated")
+	}
+	if node.DiskPaused {
+		t.Fatalf("worker-01 ImageFS at 5%% must not be disk-paused")
 	}
 }
 

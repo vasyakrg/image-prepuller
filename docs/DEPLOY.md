@@ -905,7 +905,7 @@ curl -fsS -b /tmp/pc 'http://127.0.0.1:8080/api/v1/snapshot?cluster=<cluster-nam
 | ```clusters[0]``` | ```online=true```, ```readyWorkers=3```, ```totalWorkers=3```, ```totalWorkloads``` ~90, ```coveragePercent``` ~50, ```syncStatus=ok``` |
 | ```summary``` | Deployments ~70, StatefulSets ~10, DaemonSets ~10, ~90 уникальных образов, ~190 из ~375 слотов present |
 | ```nodes[]``` | ```agentUp=true``` на всех нодах в области действия; ```cachedImageCount``` различается по нодам |
-| ```imageFSUsedBytes``` | масштаба GiB и зависит от ноды; ```imageFSCapacityBytes``` может быть ```0``` — см. 14.7 |
+| ```imageFSUsedBytes``` | масштаба GiB и зависит от ноды; ```imageFSCapacityBytes``` может быть ```0``` — тогда он берётся из `ephemeral-storage` ноды с `imageFsCapacityEstimated=true` (см. 14.7) |
 | ```syncStatus=ok```, ```partial=false``` | ответили все агенты |
 
 API node-agent доступно на ```Node.InternalIP:9443``` (host network):
@@ -954,13 +954,15 @@ curl -fsS -b /tmp/pc 'http://127.0.0.1:8080/api/v1/pull-tasks?cluster=<cluster-n
   Ноду без агента внутри области действия UI показывает как `agentUp=false` +
   `offline`-слоты — это сигнал сломанного DaemonSet, его не скрывайте.
 - **```imageFSCapacityBytes=0``` на Talos.** ```ImageFsInfo``` в containerd отдаёт
-  только used bytes, поэтому disk-guard (```agent.diskPauseRatio```,
-  ```ShouldPause```) никогда не срабатывает: нулевая ёмкость считается
-  «не пауза» (fail-open). Used bytes всё равно экспортируются
-  (```prepuller_node_imagefs_used_bytes```) — алертите на диск **ноды**
-  (```node_filesystem_avail_bytes```), а не полагайтесь на паузы pull'ов.
-  Stall watchdog это не затрагивает: он смотрит рост того же значения used
-  bytes.
+  только used bytes. Hub компенсирует это только для отображения: если агент
+  прислал ёмкость ```0```, провайдер берёт `ephemeral-storage` из
+  ```Node.status.capacity``` и помечает значение ```imageFsCapacityEstimated=true``` —
+  в UI это `~` и бейдж `est.`, а не «исправленная» ёмкость CRI. Диск-гард самого
+  агента (на ноде) по-прежнему fail-open: нулевая ёмкость для него = «не пауза»,
+  поэтому пауза авто-прогрева по ImageFS на Talos не срабатывает. Used bytes
+  экспортируются (```prepuller_node_imagefs_used_bytes```), но алертить надо на диск
+  **ноды** (```node_filesystem_avail_bytes```). Stall watchdog это не затрагивает: он
+  смотрит рост того же used bytes.
 - **Порты 9443 и 9444 на каждой ноде.** Агент использует ```hostNetwork```, а
   NetworkPolicy не может огородить host-network под; если сеть нод не приватная,
   держите порты за фаерволом ноды. ```9443``` требует Bearer-токен
@@ -1119,3 +1121,30 @@ LoadBalancer/Ingress и зарегистрируйте его в `hub.remoteClus
 
 В UI ведомый появится вторым кластером со своей матрицей `image × node`; если он
 недоступен, снапшот помечается `offline`/`partial`, а не роняет мастер-кластер.
+
+### 14.11 История pull-задач (без PVC и внешней БД)
+
+Провайдеры держат в памяти последние ~200 задач — этого мало для разбора инцидента
+через час, а у remote/outbound-кластеров история живёт в снапшоте spoke'а. Поэтому hub
+ведёт **собственную ограниченную историю** и отдаёт её страницами через
+`GET /api/v1/pull-tasks?limit=&offset=&state=`.
+
+- **Где хранится.** Файл JSONL (`-pull-history-file`, в чарте
+  `/var/lib/prepuller/pull-tasks.jsonl`), одна строка = `{"cluster":"...","task":{...}}`.
+  Ёмкость — `hub.pullHistory.limit` (по умолчанию 2000 задач); новые версии задачи
+  (queued → running → succeeded) дописываются, при переполнении файл компактится,
+  активные задачи не вытесняются.
+- **Тома нет — это норма.** По умолчанию `hub.pullHistory.existingClaim` пуст, монтируется
+  emptyDir (`sizeLimit: 256Mi`): история переживает рестарт контейнера, но не
+  пересоздание пода. Для долгой истории задайте `existingClaim` с PVC — том должен быть
+  записываемым для `uid/gid 65532` (FSGroup чарта уже выставлен), а
+  `readOnlyRootFilesystem: true` остаётся.
+- **Файл недоступен — hub не падает.** Если путь не создаётся или не пишется (например,
+  forgot монтирование), в лог уходит
+  `pull-task history file disabled (...), keeping the history in memory only`, и endpoint
+  продолжает отвечать из памяти. Выключить историю целиком — `hub.pullHistory.enabled=false`
+  (тогда источник данных — только `snapshot.tasks` провайдера, как раньше).
+- **Проверка.** `curl -b /tmp/pc 'localhost:8080/api/v1/pull-tasks?cluster=<name>&limit=25&offset=0&state=failed' | jq '{total, active, source}'`;
+  `source` = `history`, если история включена, и `snapshot`, если нет. Бейдж в меню
+  обновляется каждые 2 s и считает активные задачи плюс завершённые за последние 30 s —
+  поэтому короткий pull виден, даже если снапшот (5 s) его не поймал.
