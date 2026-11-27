@@ -2,7 +2,7 @@
 
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/), версии — [SemVer](https://semver.org/lang/ru/).
 
-## [Unreleased]
+## [1.1.0] — 2026-11-27
 
 Минорный релиз: вкладка `Stats` в hub UI поверх PostgreSQL и скрипт релиза.
 
