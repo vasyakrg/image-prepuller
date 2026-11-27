@@ -184,7 +184,12 @@ log "4.1 область действия: только workload'ы с label prep
 kubectl create deployment e2e-in-scope --image="$IMAGE_REPO:$IMAGE_TAG" --replicas=1 >/dev/null 2>&1 || true
 kubectl label deployment e2e-in-scope prepull=true --overwrite >/dev/null
 kubectl create deployment e2e-out-of-scope --image=ghcr.io/acme/ignored:1 --replicas=1 >/dev/null 2>&1 || true
-ok "workload'ы e2e-in-scope (prepull=true) и e2e-out-of-scope созданы"
+# Ещё один workload в области действия, но с образом, которого нет в кэше нод:
+# на нём проверяется авто-прогрев (шаг 8). Кэшированный образ `e2e-in-scope`
+# даёт present-слоты и pull не требует — из-за этого reconciler'у нечего было ставить.
+kubectl create deployment e2e-warm-target --image="$IMAGE_REPO:$IMAGE_TAG-uncached" --replicas=1 >/dev/null 2>&1 || true
+kubectl label deployment e2e-warm-target prepull=true --overwrite >/dev/null
+ok "workload'ы e2e-in-scope (prepull=true), e2e-out-of-scope и e2e-warm-target созданы"
 
 log "5. port-forward и авторизация"
 [ -n "$PORT" ] || PORT=$(pick_free_port 18080)
@@ -213,13 +218,18 @@ ok "кластер $CLUSTER_ID в реестре hub"
 
 log "6. live-снапшот: агенты, слоты, кэш"
 wait_snapshot 180 '.syncStatus == "ok" and .partial == false' "syncStatus=ok, partial=false"
-assert_snapshot '[.nodes[] | select(.agentUp == true)] | length == 3' "все 3 агента отвечают (agentUp=true)"
-assert_snapshot '[.nodes[].agentVersion] | map(select(. != "")) | length == 3' "агенты отдают версию"
-assert_snapshot '.summary.totalWorkers == 3' "totalWorkers=3"
+# k3d из `--agents 2` — это 2 воркера и control-plane. Чарт по умолчанию держит в
+# области действия только воркеры (`hub.nodeLabelSelector=!node-role.kubernetes.io/control-plane`),
+# поэтому агентов в снапшоте ровно 2: DaemonSet на control-plane и не планируется.
+assert_snapshot '[.nodes[] | select(.agentUp == true)] | length == 2' "оба воркера-агента отвечают (agentUp=true)"
+assert_snapshot '[.nodes[].agentVersion] | map(select(. != "")) | length == 2' "агенты отдают версию"
+assert_snapshot '.summary.totalWorkers == 2' "totalWorkers=2 (воркеры в области действия)"
+assert_snapshot '[.nodes[] | select(.name | contains("server-0"))] | length == 0' "control-plane вне области действия"
 assert_snapshot '[.nodes[] | .cachedImageCount] | add > 0' "агенты видят образы в CRI-кэше (cachedImageCount>0)"
 assert_snapshot '.summary.totalSlots > 0 and .summary.presentSlots <= .summary.totalSlots' "слоты посчитаны (present/total)"
 assert_snapshot '([.workloads[].name] | index("e2e-in-scope")) != null' "workload с prepull=true попал в снапшот"
 assert_snapshot '([.workloads[].name] | index("e2e-out-of-scope")) == null' "workload без prepull=true не показывается"
+assert_snapshot '([.workloads[].name] | index("e2e-warm-target")) != null' "workload с непубликованным образом попал в снапшот"
 
 log "7. policy violations: :latest + Always"
 kubectl create deployment e2e-latest --image=ghcr.io/acme/api-gateway:latest --replicas=2 >/dev/null 2>&1 || true
@@ -247,16 +257,36 @@ node=$(snapshot | jq -r '.nodes[] | select(.agentUp == true) | .name' | head -1)
 # а не от CRI: иначе pull снова живёт до DefaultAgentPullTimeout (10 минут).
 # Сам чёрный ход (TCP-соединение висит) проверяется юнит-тестами с подменённым
 # диалаером — в e2e такой адрес воспроизвести нельзя.
-resp=$(curl -sS -m 120 -o "$TMP/deadpull.json" -w '%{http_code} %{time_total}' \
+resp=$(curl -sS -m 30 -o "$TMP/deadpull.json" -w '%{http_code}' \
   -b "$COOKIE_JAR" -X POST "$BASE/api/v1/pull" -H 'Content-Type: application/json' \
   -d "{\"cluster\":\"$CLUSTER_ID\",\"image\":\"registry.invalid/dead:1\",\"node\":\"$node\"}") \
   || fail "POST /api/v1/pull для мёртвого реестра не отработал"
-code=${resp%% *}; elapsed=${resp##* }
-[ "$code" = "502" ] || fail "pull в мёртвый реестр вернул $code, ожидался 502: $(cat "$TMP/deadpull.json")"
-grep -q 'registry unreachable' "$TMP/deadpull.json" \
-  || fail "502 пришёл не от preflight-пробы агента: $(cat "$TMP/deadpull.json")"
-awk -v t="$elapsed" 'BEGIN{exit !(t < 60)}' || fail "pull в мёртвый реестр висел ${elapsed}s — больше минуты"
-ok "мёртвый реестр отвергнут за ${elapsed}s пробой агента: $(jq -r '.error' "$TMP/deadpull.json" | cut -c1-90)"
+# Pull асинхронный (контракт v2): POST отвечает 202 и отдаёт running-задачу, а отказ
+# агента приходит сменой состояния задачи. Поэтому ждём терминального состояния и
+# меряем время именно до него: сценарий проверяет, что проба реестра не держит
+# задачу до DefaultAgentPullTimeout (10 минут).
+[ "$resp" = "202" ] || fail "pull в мёртвый реестр вернул $resp, ожидался 202: $(cat "$TMP/deadpull.json")"
+task_id=$(jq -r '.task.id // empty' "$TMP/deadpull.json")
+[ -n "$task_id" ] || fail "в ответе на pull нет id задачи: $(cat "$TMP/deadpull.json")"
+started=$SECONDS
+state=''; row=''
+while [ $SECONDS -lt $((started + 70)) ]; do
+  row=$(curl -fsS -b "$COOKIE_JAR" "$BASE/api/v1/pull-tasks?cluster=$CLUSTER_ID&limit=200" \
+    | jq -c --arg id "$task_id" '.tasks[] | select(.id == $id)')
+  if [ -n "$row" ]; then
+    state=$(printf '%s' "$row" | jq -r '.state')
+    case "$state" in succeeded | failed | canceled) break ;; esac
+  fi
+  sleep 2
+done
+elapsed=$((SECONDS - started))
+printf '%s' "$row" >"$TMP/deadpull-task.json"
+[ "$state" = "failed" ] \
+  || fail "задача в мёртвый реестр не упала за ${elapsed}s (состояние '${state:-нет в истории}'): $(cat "$TMP/deadpull-task.json")"
+grep -qi 'registry unreachable' "$TMP/deadpull-task.json" \
+  || fail "ошибка пришла не от preflight-пробы агента: $(jq -r '.error' "$TMP/deadpull-task.json" | cut -c1-140)"
+[ "$elapsed" -lt 60 ] || fail "pull в мёртвый реестр падал ${elapsed}s — больше минуты"
+ok "мёртвый реестр отвергнут за ${elapsed}s пробой агента: $(jq -r '.error' "$TMP/deadpull-task.json" | cut -c1-90)"
 
 log "10. деградация: убираем агента с одной ноды"
 kubectl -n "$NAMESPACE" patch ds "$RELEASE-image-prepuller-agent" --type=json -p \
@@ -274,7 +304,7 @@ kubectl -n "$NAMESPACE" patch ds "$RELEASE-image-prepuller-agent" --type=json \
   -p '[{"op":"remove","path":"/spec/template/spec/affinity"}]' >/dev/null
 kubectl -n "$NAMESPACE" rollout status "ds/$RELEASE-image-prepuller-agent" --timeout=300s >/dev/null
 wait_snapshot 300 '.syncStatus == "ok" and .partial == false' "после возврата агента syncStatus=ok, partial=false"
-assert_snapshot '[.nodes[] | select(.agentUp == true)] | length == 3' "все агенты снова отвечают"
+assert_snapshot '[.nodes[] | select(.agentUp == true)] | length == 2' "все агенты снова отвечают"
 
 log "12. метрики"
 curl -fsS "$METRICS" -o "$TMP/metrics.txt" || fail "метрики недоступны на $METRICS"
