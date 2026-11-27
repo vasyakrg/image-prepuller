@@ -45,9 +45,9 @@ node-agent на каждой ноде. Для in-memory демо без Kubernet
 | spoke | 8081 | 9091 | — |
 | agent | 9443 | — | — |
 
-Как этот контур выглядит вживую — два кластера, в каждом hub/spoke, node-agent и
-приложения, помеченные для прогрева или исключённые из него, — на интерактивной
-схеме [docs/diagrams/image-prepuller-topology.html](diagrams/image-prepuller-topology.html).
+Как этот контур выглядит на уровне кластера — образ в кэше каждой ноды, матрица
+`image × node` и поведение при отказе ноды — на интерактивной схеме
+[docs/diagrams/image-prepuller-overview.html](diagrams/image-prepuller-overview.html).
 
 Образ multi-stage (`golang:1.26.11-alpine` builder, `distroless/static` runtime),
 `CGO_ENABLED=0`, работает под uid/gid 65532 с root filesystem только для чтения.

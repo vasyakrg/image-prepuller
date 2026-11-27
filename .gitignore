@@ -20,3 +20,6 @@
 # Local env files with credentials
 .env
 .env.*
+
+# Generated archify visual-check evidence (docs/diagrams)
+/docs/diagrams/*.visual-check.*

@@ -11,6 +11,28 @@
 > в Stage 2–3 (см. [Roadmap](#roadmap)); внешние зависимости и их границы — в
 > [ADR-001](docs/adr/0001-dependencies.md).
 
+## Зачем это нужно
+
+[![Схема: образ уже лежит на каждом воркере, пример отказа ноды](docs/diagrams/image-prepuller-overview.png)](docs/diagrams/image-prepuller-overview.html)
+
+`hub` читает workload'ы и ноды из Kubernetes API и строит матрицу `image × node`;
+`node-agent` (DaemonSet на каждой ноде) дотягивает недостающие слои через CRI. Кэш
+containerd у каждой ноды свой, поэтому после прогрева образ лежит **на всех воркерах
+кластера**, а не «где-то в кластере»: поды стартуют из локального кэша, а реестр не
+становится узким местом при массовой выкатке.
+
+Схема сразу показывает и обратную сторону. `talos-worker-04` в `NotReady`, её
+`node-agent` не отвечает — все слоты `image × node` на этой ноде уходят в `OFFLINE`,
+покрытие по нодам падает до 3 из 4, hub отдаёт `partial` и ошибку
+`prepuller_node_agent_errors_total`. Остальные ноды это не задевает: прогрев и старт
+подов на них продолжают работать, а когда нода вернётся, `reconcile` дотянет
+недостающие слоты.
+
+Схема интерактивная — зум, поиск, подсветка связей, тёмная тема, экспорт в PNG/SVG:
+[docs/diagrams/image-prepuller-overview.html](docs/diagrams/image-prepuller-overview.html)
+(исходник — [`image-prepuller-overview.json`](docs/diagrams/image-prepuller-overview.json),
+собран skill'ом `archify`; PNG в этом разделе — скриншот той же схемы для README).
+
 ## Что умеет
 
 - **Workloads view** — Deployment / StatefulSet / DaemonSet, их образы (включая init-контейнеры),
@@ -103,10 +125,9 @@ flowchart TB
 containerd не нужны. В live-режиме hub поднимает `K8sProvider` (client-go) и берёт инвентарь
 образов ноды у node-agent'а по HTTP/JSON API v1; pull уходит в CRI через агент.
 
-Интерактивная схема того же контура на примере двух кластеров и приложений,
-помеченных для прогрева (и тех, что прогревать нельзя), —
-[docs/diagrams/image-prepuller-topology.html](docs/diagrams/image-prepuller-topology.html):
-зум, поиск, подсветка связей, тёмная тема, экспорт в PNG/SVG.
+Многокластерный контур (hub + несколько spoke, у каждого свой пул воркеров) показан
+Mermaid-схемой выше; интерактивная схема прогрева и отказа ноды — в разделе
+[«Зачем это нужно»](#зачем-это-нужно).
 
 ### Поток ручного прогрева
 
@@ -457,6 +478,7 @@ internal/web/static/    index.html, app.js, styles.css — без сборки �
 internal/metrics/       ручная генерация Prometheus text exposition
 internal/testutil/      фейковый spoke/hub, golden-снапшот v2, контрактные тесты hub↔spoke
 docs/                   architecture.md, PLAN.md, ADR-001, DEPLOY.md
+docs/diagrams/          интерактивная схема продукта (archify JSON + HTML + PNG для README)
 deploy/helm/            Helm-чарт: hub, spoke, agent DaemonSet, RBAC, NetworkPolicy, ingress
 Dockerfile              образ: distroless, nonroot, linux/amd64+arm64
 .github/workflows/      CI (гейты), PR-Agent и публикация образа + чарта в GHCR

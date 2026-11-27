@@ -1,0 +1,204 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Image Prepuller: образ на каждом воркере — поды стартуют из кэша",
+    "quality_profile": "showcase",
+    "output": "docs/diagrams/image-prepuller-overview.html",
+    "viewBox": [
+      1360,
+      640
+    ],
+    "legend": {
+      "mode": "hidden"
+    }
+  },
+  "components": [
+    {
+      "id": "registry",
+      "type": "external",
+      "label": "Container registry",
+      "sublabel": "ghcr.io · registry.internal",
+      "pos": [
+        740,
+        20
+      ],
+      "size": [
+        200,
+        80
+      ]
+    },
+    {
+      "id": "hub",
+      "type": "backend",
+      "label": "hub",
+      "sublabel": "Web UI · матрица image × node",
+      "pos": [
+        24,
+        80
+      ],
+      "size": [
+        180,
+        90
+      ]
+    },
+    {
+      "id": "agent",
+      "type": "backend",
+      "label": "node-agent",
+      "sublabel": "DaemonSet · на каждой ноде · CRI :9443",
+      "pos": [
+        384,
+        170
+      ],
+      "size": [
+        912,
+        70
+      ]
+    },
+    {
+      "id": "worker01",
+      "type": "backend",
+      "label": "talos-worker-01",
+      "sublabel": "present · api-gateway 1.14.2",
+      "pos": [
+        384,
+        450
+      ],
+      "size": [
+        210,
+        120
+      ]
+    },
+    {
+      "id": "worker02",
+      "type": "backend",
+      "label": "talos-worker-02",
+      "sublabel": "present · api-gateway 1.14.2",
+      "pos": [
+        618,
+        450
+      ],
+      "size": [
+        210,
+        120
+      ]
+    },
+    {
+      "id": "worker03",
+      "type": "backend",
+      "label": "talos-worker-03",
+      "sublabel": "present · api-gateway 1.14.2",
+      "pos": [
+        852,
+        450
+      ],
+      "size": [
+        210,
+        120
+      ]
+    },
+    {
+      "id": "worker04",
+      "type": "security",
+      "label": "talos-worker-04",
+      "sublabel": "offline · нода NotReady",
+      "pos": [
+        1086,
+        450
+      ],
+      "size": [
+        210,
+        120
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Кластер talos-prod-eu · 4 worker-ноды",
+      "wraps": [
+        "agent",
+        "worker01",
+        "worker02",
+        "worker03",
+        "worker04"
+      ],
+      "pad": 28
+    }
+  ],
+  "connections": [
+    {
+      "from": "registry",
+      "to": "agent",
+      "label": "pull слоёв",
+      "variant": "emphasis",
+      "labelAt": [
+        840,
+        120
+      ]
+    },
+    {
+      "from": "hub",
+      "to": "agent",
+      "label": "snapshot · trigger pull",
+      "variant": "emphasis"
+    },
+    {
+      "from": "agent",
+      "to": "worker01",
+      "label": "pull · inventory",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "agent",
+      "to": "worker02",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "agent",
+      "to": "worker03",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "agent",
+      "to": "worker04",
+      "label": "сбой: pull на ноде не идёт",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Суть: образ лежит на каждой ноде",
+      "items": [
+        "hub читает Deployment, StatefulSet, DaemonSet и Node из Kubernetes API и строит слоты image × node",
+        "node-agent на каждой ноде тянет недостающие слои через CRI: кэш containerd свой у каждой ноды",
+        "матрица image × node показывает покрытие: PRESENT, MISSING, PULLING, FAILED, PAUSED_DISK, OFFLINE"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Что это даёт команде",
+      "items": [
+        "под стартует из локального кэша — без ожидания pull при выкатке и массовом рестарте",
+        "registry перестаёт быть узким местом: слои не тянутся одновременно с сотен подов",
+        "нода с прогретым образом отдаёт поды в офлайне — если тег иммутабельный и imagePullPolicy IfNotPresent"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Пример отказа: talos-worker-04",
+      "items": [
+        "нода NotReady → агент недоступен → все её слоты image × node уходят в OFFLINE",
+        "покрытие падает до 3 из 4 нод, снапшот partial, ошибка видна на hub: prepuller_node_agent_errors_total",
+        "pull на упавшей ноде не идёт; остальные ноды не тронуты, после возврата ноды reconcile дотягивает слоты"
+      ]
+    }
+  ]
+}

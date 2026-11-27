@@ -120,7 +120,7 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 | `deploy/values/talos-example.yaml` | шаблон overlay для Talos-кластера: сокет CRI, toleration control-plane, ingress/cert-manager, `autoWarm=false`; реальные overlays кластеров — в приватном GitOps-репо |
 | `docs/DEPLOY.md` | чеклист деплоя: секреты, k3d-стенд, e2e-сценарий, общий runbook Talos-кластера (§14) |
 | `docs/architecture.md` | схемы Mermaid: топология, потоки, состояния, модель данных |
-| `docs/diagrams/` | интерактивная схема контура (archify): `image-prepuller-topology.html` + исходный `image-prepuller-topology.json`; генерируется из JSON, не правится руками |
+| `docs/diagrams/` | интерактивная схема продукта (archify): `image-prepuller-overview.html` + исходный `image-prepuller-overview.json` + PNG-скриншот для README; генерируется из JSON, не правится руками |
 | `docs/alerts.md` | операторская памятка: что скрейпить, правила алертов, триангуляция «агент/токен/связь», пороги |
 | `docs/PLAN.md` | план Stage 2–3: workstreams, зоны записи, порядок мержа, гейты |
 
@@ -321,11 +321,18 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 - Архитектурные решения — `docs/adr/`: `0001-dependencies.md` (Accepted: grpc+cri-api
   в агенте, client-go в K8s-провайдере, GOPROXY-зеркало вместо vendor).
   Новая зависимость без ADR не принимается.
-- Схемы — только Mermaid в markdown (рендерится в Gitea/GitHub/Obsidian); PNG-вставки и
-  внешние редакторы не нужны. Меняя код, проверяйте, что диаграммы не врут.
+- Схемы — только Mermaid в markdown (рендерится в Gitea/GitHub/Obsidian); PNG-вставки
+  допустимы только для главной схемы в README (см. исключение ниже) и должны
+  пересобираться из JSON, а не рисоваться вручную. Меняя код, проверяйте, что диаграммы
+  не врут.
 - Исключение — `docs/diagrams/`: интерактивные HTML-схемы, собранные из JSON
   skill'ом `archify` (`node bin/archify.mjs deliver architecture <json> <html>`).
   Правится только JSON, HTML пересобирается; JSON и HTML коммитятся парой.
+  Главная схема README — та же HTML-схема, снятая скриншотом
+  (`archify visual-check`, кадр `*.visual-check.2048x1320.light.png`, обрезка панели
+  и карточек) в `docs/diagrams/image-prepuller-overview.png`. Меняя диаграмму,
+  пересоберите и PNG: `node bin/archify.mjs validate|deliver architecture
+  docs/diagrams/image-prepuller-overview.json` → `visual-check` → обрезать кадр.
 
 ## 11. Параллельная работа в нескольких worktree
 
