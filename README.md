@@ -13,17 +13,18 @@
 
 ## Зачем это нужно
 
-[![Схема: два кластера, тестовый деплоймент, образ прогрет на всех воркерах, одна нода сломана](docs/diagrams/image-prepuller-overview.png)](docs/diagrams/image-prepuller-overview.html)
+[![Схема: два кластера, hub в прод-кластере, тестовый деплоймент, образ прогрет на всех воркерах, одна нода сломана](docs/diagrams/image-prepuller-overview.png)](docs/diagrams/image-prepuller-overview.html)
 
-Один `hub` ведёт несколько кластеров: в каждом стоит свой `spoke` (K8sProvider поверх
-Kubernetes API) и свой `node-agent` (DaemonSet на каждой ноде). `spoke` читает
+Один `hub` живёт в прод-кластере (master) и ведёт несколько кластеров: в каждом стоит
+свой `spoke` (K8sProvider поверх Kubernetes API) и свой `node-agent` (DaemonSet на
+каждой ноде). `spoke` читает
 workload'ы и ноды и строит матрицу `image × node`; `node-agent` дотягивает недостающие
 слои через CRI. Кэш containerd у каждой ноды свой, поэтому после прогрева образ лежит
 **на всех воркерах кластера**, а не «где-то в кластере»: поды стартуют из локального
 кэша, а реестр не становится узким местом при массовой выкатке.
 
-На схеме — два кластера, `talos-prod-kz` и `talos-stage-ru`, с одним и тем же нашим
-софтом и тестовым `Deployment api-gateway` (`image 1.14.2`, 2 реплики). Образ прогрет
+На схеме — два кластера, `talos-prod-kz` (в нём же `hub`) и `talos-stage-ru`, с одним
+и тем же нашим софтом и тестовым `Deployment api-gateway` (`image 1.14.2`, 2 реплики). Образ прогрет
 на всех воркерах: в stage — на трёх из трёх, в prod — на трёх из четырёх, каждая нода
 показывает слот `present`.
 

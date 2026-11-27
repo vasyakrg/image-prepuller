@@ -2,12 +2,12 @@
   "schema_version": 1,
   "diagram_type": "architecture",
   "meta": {
-    "title": "Image Prepuller: два кластера, тестовый деплоймент и образ, прогретый на всех воркерах",
+    "title": "Image Prepuller: два кластера, hub в одном из них, образ тестового деплоймента прогрет на всех воркерах",
     "quality_profile": "showcase",
     "output": "docs/diagrams/image-prepuller-overview.html",
     "viewBox": [
       1340,
-      620
+      580
     ],
     "legend": {
       "mode": "hidden"
@@ -20,11 +20,11 @@
       "label": "hub",
       "sublabel": "Web UI · Prometheus",
       "pos": [
-        656,
-        100
+        380,
+        70
       ],
       "size": [
-        140,
+        180,
         80
       ]
     },
@@ -34,25 +34,11 @@
       "label": "Container registry",
       "sublabel": "ghcr.io · слои",
       "pos": [
-        656,
-        280
+        652,
+        300
       ],
       "size": [
-        140,
-        80
-      ]
-    },
-    {
-      "id": "deployA",
-      "type": "backend",
-      "label": "Deployment api-gateway",
-      "sublabel": "image 1.14.2 · 2 реплики",
-      "pos": [
-        40,
-        100
-      ],
-      "size": [
-        230,
+        130,
         80
       ]
     },
@@ -62,11 +48,25 @@
       "label": "spoke",
       "sublabel": "K8sProvider · :8080",
       "pos": [
-        382,
-        100
+        44,
+        70
       ],
       "size": [
-        230,
+        200,
+        80
+      ]
+    },
+    {
+      "id": "deployA",
+      "type": "backend",
+      "label": "Deployment api-gateway",
+      "sublabel": "image 1.14.2 · 2 реплики",
+      "pos": [
+        380,
+        190
+      ],
+      "size": [
+        240,
         80
       ]
     },
@@ -76,11 +76,11 @@
       "label": "node-agent",
       "sublabel": "DaemonSet · на каждой ноде · CRI :9443",
       "pos": [
-        40,
-        280
+        44,
+        300
       ],
       "size": [
-        572,
+        564,
         80
       ]
     },
@@ -90,12 +90,12 @@
       "label": "talos-worker-01",
       "sublabel": "present · 1.14.2",
       "pos": [
-        40,
-        450
+        44,
+        430
       ],
       "size": [
-        130,
-        110
+        126,
+        105
       ]
     },
     {
@@ -104,12 +104,12 @@
       "label": "talos-worker-02",
       "sublabel": "present · 1.14.2",
       "pos": [
-        187,
-        450
+        190,
+        430
       ],
       "size": [
-        130,
-        110
+        126,
+        105
       ]
     },
     {
@@ -118,12 +118,12 @@
       "label": "talos-worker-03",
       "sublabel": "present · 1.14.2",
       "pos": [
-        334,
-        450
+        336,
+        430
       ],
       "size": [
-        130,
-        110
+        126,
+        105
       ]
     },
     {
@@ -133,11 +133,11 @@
       "sublabel": "offline · NotReady",
       "pos": [
         482,
-        450
+        430
       ],
       "size": [
-        130,
-        110
+        126,
+        105
       ]
     },
     {
@@ -146,8 +146,8 @@
       "label": "spoke",
       "sublabel": "K8sProvider · :8080",
       "pos": [
-        840,
-        100
+        826,
+        70
       ],
       "size": [
         200,
@@ -160,11 +160,11 @@
       "label": "Deployment api-gateway",
       "sublabel": "image 1.14.2 · 2 реплики",
       "pos": [
-        1070,
-        100
+        1100,
+        190
       ],
       "size": [
-        230,
+        200,
         80
       ]
     },
@@ -174,11 +174,11 @@
       "label": "node-agent",
       "sublabel": "DaemonSet · на каждой ноде · CRI :9443",
       "pos": [
-        840,
-        280
+        826,
+        300
       ],
       "size": [
-        460,
+        474,
         80
       ]
     },
@@ -188,12 +188,12 @@
       "label": "talos-stage-01",
       "sublabel": "present · 1.14.2",
       "pos": [
-        840,
-        450
+        826,
+        430
       ],
       "size": [
-        130,
-        110
+        140,
+        105
       ]
     },
     {
@@ -202,12 +202,12 @@
       "label": "talos-stage-02",
       "sublabel": "present · 1.14.2",
       "pos": [
-        1005,
-        450
+        993,
+        430
       ],
       "size": [
-        130,
-        110
+        140,
+        105
       ]
     },
     {
@@ -216,20 +216,21 @@
       "label": "talos-stage-03",
       "sublabel": "present · 1.14.2",
       "pos": [
-        1170,
-        450
+        1160,
+        430
       ],
       "size": [
-        130,
-        110
+        140,
+        105
       ]
     }
   ],
   "boundaries": [
     {
       "kind": "region",
-      "label": "Кластер talos-prod-kz · 4 worker-ноды",
+      "label": "Кластер talos-prod-kz · hub и 4 worker-ноды",
       "wraps": [
+        "hub",
         "spokeA",
         "deployA",
         "agentA",
@@ -258,9 +259,10 @@
     {
       "from": "hub",
       "to": "spokeA",
+      "label": "contract v2 · Bearer",
+      "variant": "emphasis",
       "fromSide": "left",
-      "toSide": "right",
-      "variant": "emphasis"
+      "toSide": "right"
     },
     {
       "from": "hub",
@@ -298,14 +300,14 @@
       "from": "spokeA",
       "to": "deployA",
       "label": "list Deployments",
-      "fromSide": "left",
-      "toSide": "right"
+      "fromSide": "bottom",
+      "toSide": "top"
     },
     {
       "from": "spokeB",
       "to": "deployB",
-      "fromSide": "right",
-      "toSide": "left"
+      "fromSide": "bottom",
+      "toSide": "top"
     },
     {
       "from": "agentA",
@@ -356,10 +358,10 @@
   "cards": [
     {
       "dot": "cyan",
-      "title": "Два кластера, один hub",
+      "title": "Два кластера, hub в одном из них",
       "items": [
-        "hub держит для каждого кластера свою матрицу image × node и ходит в spoke по contract v2 (Bearer)",
-        "в кластере свой spoke с K8sProvider и свой node-agent DaemonSet: prod и stage не делят ни кэш, ни токен",
+        "hub запущен в прод-кластере (master) и ходит в оба spoke по contract v2 (Bearer): вторая панель управления не нужна",
+        "в каждом кластере свой spoke с K8sProvider и свой node-agent DaemonSet: prod и stage не делят ни кэш, ни токен",
         "тестовый Deployment api-gateway (image 1.14.2, 2 реплики) — то, под что греется кэш"
       ]
     },
