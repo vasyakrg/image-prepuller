@@ -151,6 +151,47 @@ func TestPullImage(t *testing.T) {
 	if _, ok, err := f.ImageStatus(context.Background(), "registry.internal/new:1.0.0"); err != nil || !ok {
 		t.Fatalf("pulled image not in CRI cache (ok=%v, err=%v)", ok, err)
 	}
+	if auths := f.pullAuthsSeen(); len(auths) != 1 || auths[0] != nil {
+		t.Fatalf("anonymous pull forwarded credentials: %+v", auths)
+	}
+
+	// The hub resolves the workload's imagePullSecrets and sends the credential
+	// with the pull; the agent must forward it to CRI untouched.
+	rec = doRequest(t, srv.Handler(), http.MethodPost, pullsPath,
+		`{"image":"registry.internal/private:1","auth":{"username":"robot","password":"s3cret"}}`, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("authed pull status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	auths := f.pullAuthsSeen()
+	if len(auths) != 2 || auths[1] == nil || auths[1].Username != "robot" || auths[1].Password != "s3cret" {
+		t.Fatalf("CRI credentials = %+v", auths)
+	}
+}
+
+// TestPullRegistryAuthFailure covers the reason field the hub maps onto
+// provider.ErrAgentRegistryAuth: a registry 401/403 must not look like a dead
+// node agent.
+func TestPullRegistryAuthFailure(t *testing.T) {
+	srv, f := newTestServer(t, "")
+	f.pullErr = errors.New(`failed to pull and unpack image "hub.example/tools/app:1": failed to resolve reference: failed to authorize: failed to fetch anonymous token: unexpected status from GET request to https://hub.example/jwt/auth?scope=repository%3Atools%2Fapp%3Apull: 403 Forbidden`)
+
+	rec := doRequest(t, srv.Handler(), http.MethodPost, pullsPath, `{"image":"hub.example/tools/app:1"}`, "")
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error  string `json:"error"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Reason != reasonRegistryAuth {
+		t.Fatalf("reason = %q, want %q", body.Reason, reasonRegistryAuth)
+	}
+	if !strings.Contains(body.Error, "403 Forbidden") {
+		t.Fatalf("error = %q, want the CRI message", body.Error)
+	}
 }
 
 func TestPullPausedWhenImageFSFull(t *testing.T) {

@@ -129,6 +129,10 @@ func (p *K8sProvider) buildSnapshot(ctx context.Context, now time.Time) model.Sn
 
 	snap.Summary = summary
 	snap.Workloads = workloads
+	// Remember which Secret belongs to which image while the workload list is
+	// already here: TriggerPull resolves the pull credential from this index
+	// instead of listing the cluster (k8s_registry.go).
+	p.setPullSecretIndex(workloads)
 	snap.Nodes = nodeInfos
 	snap.Activity = []model.PullEvent{}
 

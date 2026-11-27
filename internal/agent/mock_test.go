@@ -51,7 +51,7 @@ func TestMockBackendImageStatus(t *testing.T) {
 func TestMockBackendPullIsIdempotent(t *testing.T) {
 	m := NewMockBackend()
 	before, _ := m.ImageFS(context.Background())
-	ref1, err := m.PullImage(context.Background(), "registry.internal/new:1.0.0")
+	ref1, err := m.PullImage(context.Background(), "registry.internal/new:1.0.0", nil)
 	if err != nil || ref1 == "" {
 		t.Fatalf("PullImage = %q, %v", ref1, err)
 	}
@@ -64,7 +64,7 @@ func TestMockBackendPullIsIdempotent(t *testing.T) {
 		t.Fatalf("image fs usage did not grow: before=%d after=%d", before.UsedBytes, after.UsedBytes)
 	}
 
-	ref2, err := m.PullImage(context.Background(), "registry.internal/new:1.0.0")
+	ref2, err := m.PullImage(context.Background(), "registry.internal/new:1.0.0", nil)
 	if err != nil || ref2 != ref1 {
 		t.Fatalf("second pull = %q, %v; want %q", ref2, err, ref1)
 	}
@@ -78,7 +78,7 @@ func TestMockBackendPullHonorsContext(t *testing.T) {
 	m := NewMockBackend()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := m.PullImage(ctx, "nginx:latest"); err == nil {
+	if _, err := m.PullImage(ctx, "nginx:latest", nil); err == nil {
 		t.Fatal("PullImage with canceled context = nil error")
 	}
 }

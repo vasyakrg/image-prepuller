@@ -17,6 +17,11 @@ API v1), транспорт провайдер→агент — `internal/provid
 `contract-v2`; agent wire v1 — HTTP/JSON (`/healthz`, `/agent/v1/snapshot`,
 `/agent/v1/images/{ref}`, `/agent/v1/pulls`).
 
+Креды приватного реестра контроллер резолвит сам: агент тянет через CRI, а CRI не
+применяет `imagePullSecrets` пода, поэтому провайдер читает их из workload'а и
+передаёт агенту в запросе pull (`internal/provider/k8s_registry.go`,
+`internal/agent/registry_auth.go`); иначе приватный реестр отвечает анонимный `403`.
+
 Область действия ограничена метками: `-workload-selector`/`PREPULLER_WORKLOAD_SELECTOR`
 (в чарте по умолчанию `prepull=true`) и `-node-selector`/`PREPULLER_NODE_SELECTOR`
 (overlay исключает control-plane). Всё, что не попало в селектор, не листится, не
@@ -131,8 +136,9 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 | `internal/web/server_spoke_hub.go` | hub-эндпоинты управляемых кластеров `/internal/v1/spokes/{cluster}/{state,commands,commands/{id}/result}` (Bearer-токен кластера, `auth.RequireSpokeToken`) |
 | `internal/web/static/` | UI: `index.html`, `app.js`, `styles.css` |
 | `internal/metrics/prometheus.go` | сборка `/metrics` по всем кластерам |
-| `internal/agent/` | node-agent: CRI-клиент (grpc+cri-api), инвентарь образов, disk-guard, preflight-проба реестра и stall-watchdog pull (`registry.go`), HTTP/JSON API v1 |
+| `internal/agent/` | node-agent: CRI-клиент (grpc+cri-api), инвентарь образов, disk-guard, preflight-проба реестра и stall-watchdog pull (`registry.go`), классификация registry-auth ошибок pull (`registry_auth.go`), HTTP/JSON API v1 |
 | `internal/provider/k8s_*.go` | `K8sProvider` на client-go: list Deployments/STS/DS и Node в области действия (`WithLabelSelector`/`WithNodeSelector`), слоты image×node, policy-warnings, TTL-кэш снапшота; транспорт к node-agent (snapshot + асинхронный pull с отменой, HTTP/JSON v1, Bearer, таймауты) и `NewK8sProviderFromEnv` |
+| `internal/provider/k8s_registry.go` | резолв кредов реестра из `imagePullSecrets` workload'ов: `.dockerconfigjson`/`.dockercfg`, матчинг хоста по правилам distribution, кэш Secret (5 мин / 1 мин на ошибку), индекс image → secret'ы из снапшота |
 | `internal/reconcile/` | политика авто-прогрева: очередь, приоритеты (failed > missing, prod > staging > infra), лимиты, backoff |
 | `internal/testutil/` | фейковый spoke/hub, golden-снапшот v2, контрактные тесты |
 | `cmd/prepuller/agent.go` | `runAgent()`: флаги агента, запуск HTTP/JSON сервера, graceful shutdown |
@@ -188,7 +194,13 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
     (`/healthz`, `/agent/v1/snapshot`, `/agent/v1/images/{ref}`, `/agent/v1/pulls`)
     фиксированы в `internal/agent/server.go`; меняя их, обновите клиент в
     `internal/provider/k8s_agent.go` и тесты обеих сторон. Pull при `diskPaused` —
-    `409`, ошибка CRI — `502`, неизвестный образ — `404`.
+    `409`, ошибка CRI — `502`, неизвестный образ — `404`. Тело pull-запроса несёт
+    необязательный `auth` (`RegistryAuth`: username/password/auth/identityToken/
+    registryToken) — креды из `imagePullSecrets` workload'а; пусто = анонимный pull,
+    как у пода без секрета. Отклонённые реестром креды агент отдаёт как `502` с
+    `{"error":...,"reason":"registry_auth"}`, и провайдер превращает их в
+    `provider.ErrAgentRegistryAuth` (не «node agent unavailable»). Добавили поле в
+    запрос/ответ — обновите обе стороны и `internal/provider/k8s_registry_test.go`.
 12. **Outbound-канал (spoke → hub) — транспорт, а не второй API.** Команда — это ровно тот
     HTTP-вызов, который hub сделал бы напрямую (`SpokeCommand{method,path,body}`),
     и исполняет её собственный handler spoke'а, поэтому контракт `/internal/v1/*` один
@@ -223,10 +235,15 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
   кластерных метрик. `internal/web/rbac_test.go` — wiring RBAC: viewer 403 на
   state-changing ручки, operator 202, `/api/v1/audit` и 429 при превышении лимита логина.
 - `internal/agent/*_test.go` — CRI-адаптер на фейках, инвентарь и disk-guard, HTTP-сервер
-  агента (auth, коды 200/400/401/404/409/502), mock-бэкенд без containerd.
+  агента (auth, коды 200/400/401/404/409/502), mock-бэкенд без containerd;
+  `registry_auth_test.go` — классификация 401/403 от реестра (по словам, а не по
+  цифрам в ошибке) и `RegistryAuth.Empty`.
 - `internal/provider/remote_test.go` — транспорт hub→spoke на `httptest`: ретраи с backoff, таймауты, типизированные ошибки (502/401/409), health и counters.
 - `internal/provider/k8s_test.go` — K8sProvider на fake clientset: workload'ы, слоты,
   policy-warnings, TTL-кэш, health, деградация при ошибке list.
+- `internal/provider/k8s_registry_test.go` — резолв кредов из `imagePullSecrets`:
+  dockerconfigjson и legacy dockercfg, матчинг хоста (включая Docker Hub), кэш Secret,
+  подсказки при ненайденных/нечитаемых секретах, сквозной pull с `auth` и без.
 - `internal/reconcile/*_test.go` — правила отбора, приоритеты, лимиты, backoff, `Start`.
 - `internal/provider/spoke_hub_test.go` — mailbox outbound-канала: авторизация кластера,
   приём state и staleness, redelivery без ack, отмена ожидающего вызова, маппинг
@@ -298,6 +315,20 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
   завершение» не перезаписывает `canceled` на `failed` и не пишет лишний счётчик.
   `k8s_nodes.go` опрашивает ноды последовательно, поэтому при массовом недоступе агентов
   снапшот тормозит до `WithAgentTimeout` (5 s) на ноду.
+- **Приватный реестр: креды едут в запросе pull, а не в CRI-конфиге ноды.** Агент
+  тянет через CRI, поэтому `imagePullSecrets` пода к нему не применяются и pull
+  анонимен — приватный реестр отвечает `403`, образ оказывается `present` только на
+  той ноде, где его уже тянул kubelet, а на остальных `missing` с пачкой failed-задач
+  `failed to fetch anonymous token … 403 Forbidden`. Провайдер строит индекс
+  image → `imagePullSecrets` в `buildSnapshot` (без лишних list'ов) и резолвит
+  Secret в namespace workload'а: `.dockerconfigjson` и legacy `.dockercfg`, матчинг
+  хоста по правилам distribution (Docker Hub — в любом написании, включая
+  `https://index.docker.io/v1/`), кэш 5 мин (ошибки — 1 мин). Креды уезжают в
+  `POST /agent/v1/pulls` и в CRI `AuthConfig`. Нужны RBAC `get` на secrets
+  (`rbac.readSecrets`, по умолчанию `true`, только get — без list/watch) и новый
+  образ у hub/spoke **и** у агента: старый агент неизвестное поле `auth` игнорирует и
+  тянет анонимно. Секреты в логах и в ответах API не появляются: наружу уходит только
+  текст ошибки и подсказка, какие Secret'ы не нашлись/не прочитались.
 - **Pull-гигиена агента: probe реестра + stall watchdog.** Pull синхронный, и CRI не даёт
   прогресса, поэтому зависший реестр раньше держал слот до `DefaultAgentPullTimeout`
   (10 min) и выглядел в UI как «медленная загрузка». Теперь агент сначала делает TCP-пробу

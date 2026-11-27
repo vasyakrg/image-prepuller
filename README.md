@@ -71,6 +71,11 @@ workload'ы и ноды и строит матрицу `image × node`; `node-ag
 - **Node-agent** — `prepuller agent`: HTTP/JSON API v1 рядом с containerd
   (`/agent/v1/snapshot`, `/agent/v1/images/{ref}`, `/agent/v1/pulls`), disk-guard по
   ImageFS и опциональный Bearer-токен.
+- **Приватные реестры** — pull через CRI получает те же креды, что и kubelet:
+  контроллер читает `imagePullSecrets` workload'а (`kubernetes.io/dockerconfigjson` и
+  legacy `.dockercfg`, RBAC `get` на secrets — `rbac.readSecrets`) и передаёт их
+  агенту в запросе pull. Без кредов задача падает с `registry authentication failed` и
+  подсказкой, чего именно не хватило, вместо голого `403` от реестра.
 - **Multi-cluster** — hub агрегирует локальный и управляемые spoke-кластеры через
   единый интерфейс, в двух топологиях. **Прямая (direct)**: hub сам ходит в spoke по
   HTTP (регистрация `hub.remoteClusters` / `PREPULLER_REMOTE_CLUSTERS`); state-changing
@@ -508,7 +513,7 @@ Node-agent (HTTP/JSON, API v1; `/healthz` открыт, остальное — B
 | `GET /healthz` | `{apiVersion,status,node,agentVersion}`, без авторизации |
 | `GET /agent/v1/snapshot` | Инвентарь ноды: образы, ImageFS, runtime, условия, `diskPaused` |
 | `GET /agent/v1/images/{ref}` | Один образ по имени/ID; 404 — не найден |
-| `POST /agent/v1/pulls` | `{image}` → pull через CRI; 409 — `diskPaused`, 502 — ошибка CRI |
+| `POST /agent/v1/pulls` | `{image, auth?}` → pull через CRI с кредами из `imagePullSecrets`; 409 — `diskPaused`, 502 — ошибка CRI (для отклонённых кредов в теле `reason:"registry_auth"`) |
 
 ## Метрики
 
@@ -575,7 +580,7 @@ Node-agent отдаёт свои метрики **на отдельном пор
 | `prepuller_agent_requests_total` | counter | `node`, `endpoint`, `code` |
 | `prepuller_agent_cri_up` | gauge | `node` (последний снапшот смог поговорить с CRI) |
 | `prepuller_agent_pull_in_flight` | gauge | `node` |
-| `prepuller_agent_pull_total` | counter | `node`, `result` (`success`/`cri_error`/`stalled`/`registry_unreachable`/`disk_paused`) |
+| `prepuller_agent_pull_total` | counter | `node`, `result` (`success`/`cri_error`/`stalled`/`registry_unreachable`/`registry_auth`/`disk_paused`) |
 | `prepuller_agent_imagefs_used_bytes`, `..._capacity_bytes`, `prepuller_agent_images_cached_total` | gauge | `node` (значения последнего успешного снапшота) |
 
 Готовые правила алертов, пороги и матрица «кто виноват: агент, токен или связь» —

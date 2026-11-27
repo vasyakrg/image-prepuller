@@ -79,11 +79,20 @@ func (c *Client) ImageStatus(ctx context.Context, image string) (ImageInfo, bool
 }
 
 // PullImage pulls image through CRI and returns the runtime reference it
-// resolved to.
-func (c *Client) PullImage(ctx context.Context, image string) (string, error) {
-	resp, err := c.Images.PullImage(ctx, &runtimeapi.PullImageRequest{
-		Image: &runtimeapi.ImageSpec{Image: image},
-	})
+// resolved to. auth is the credential the hub resolved from the workload's
+// imagePullSecrets; a nil or empty credential keeps the pull anonymous.
+func (c *Client) PullImage(ctx context.Context, image string, auth *RegistryAuth) (string, error) {
+	req := &runtimeapi.PullImageRequest{Image: &runtimeapi.ImageSpec{Image: image}}
+	if !auth.Empty() {
+		req.Auth = &runtimeapi.AuthConfig{
+			Username:      auth.Username,
+			Password:      auth.Password,
+			Auth:          auth.Auth,
+			IdentityToken: auth.IdentityToken,
+			RegistryToken: auth.RegistryToken,
+		}
+	}
+	resp, err := c.Images.PullImage(ctx, req)
 	if err != nil {
 		return "", err
 	}

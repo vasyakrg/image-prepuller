@@ -564,6 +564,17 @@ flowchart TD
    `provider.ErrAgentPullStalled` (HTTP 504), задача сразу `failed`, слот
    освобождается; `DefaultAgentPullTimeout` (10 min) остаётся страховкой для
    действительно долгих загрузок. Подробности — AGENTS.md §8.
+7. **Креды приватного реестра едут в запросе, а не в конфиге ноды.** CRI не
+   применяет `imagePullSecrets` пода, поэтому анонимный pull в реестр с логином
+   получает `403`. Провайдер — единственная компонента с clientset — строит
+   индекс image → `imagePullSecrets` из снапшота, резолвит Secret в namespace
+   workload'а (`.dockerconfigjson`/`.dockercfg`, кэш 5 мин) и передаёт
+   креды в `POST /agent/v1/pulls`; агент кладёт их в CRI `AuthConfig`. Ответ
+   реестра 401/403 агент помечает `reason:"registry_auth"`, хаб превращает его в
+   `provider.ErrAgentRegistryAuth` и добавляет подсказку, каких Secret'ов не хватило.
+   Агент в apiserver не ходит: право `get` на secrets нужно только hub/spoke
+   (`rbac.readSecrets`).
+
 ## 9. Метрики
 
 ```mermaid

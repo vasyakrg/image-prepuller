@@ -35,7 +35,9 @@ var lastContactEndpoints = []string{endpointHealthz, endpointSnapshot, endpointI
 var requestEndpoints = []string{endpointHealthz, endpointSnapshot, endpointImages, endpointPulls, endpointOther}
 
 // pullResults is the fixed set of prepuller_agent_pull_total result series.
-var pullResults = []string{"success", "cri_error", "stalled", "registry_unreachable", "disk_paused"}
+// registry_auth is a registry rejection (missing or wrong credential), which is
+// neither a dead registry nor an agent failure.
+var pullResults = []string{"success", "cri_error", "stalled", "registry_unreachable", "registry_auth", "disk_paused"}
 
 // requestKey identifies one prepuller_agent_requests_total counter.
 type requestKey struct {

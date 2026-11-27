@@ -180,6 +180,7 @@ func TestPullErrorStatus(t *testing.T) {
 		{fmt.Errorf("pull: %w", provider.ErrAgentUnauthorized), http.StatusBadGateway},
 		{fmt.Errorf("pull: %w", provider.ErrAgentUnavailable), http.StatusBadGateway},
 		{fmt.Errorf("pull: %w", provider.ErrAgentPullStalled), http.StatusGatewayTimeout},
+		{fmt.Errorf("pull: %w", provider.ErrAgentRegistryAuth), http.StatusBadGateway},
 		{fmt.Errorf("pull: %w", provider.ErrSpokeUnauthorized), http.StatusBadGateway},
 		{fmt.Errorf("pull: %w", provider.ErrSpokeUnavailable), http.StatusBadGateway},
 		{provider.ErrNotImplemented, http.StatusNotImplemented},

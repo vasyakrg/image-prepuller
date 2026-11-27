@@ -22,6 +22,7 @@ type fakeImageService struct {
 	statusErr  error
 	pullResp   *runtimeapi.PullImageResponse
 	pullErr    error
+	pullReq    *runtimeapi.PullImageRequest
 	fsResp     *runtimeapi.ImageFsInfoResponse
 	fsErr      error
 }
@@ -34,7 +35,8 @@ func (f *fakeImageService) ImageStatus(context.Context, *runtimeapi.ImageStatusR
 	return f.statusResp, f.statusErr
 }
 
-func (f *fakeImageService) PullImage(context.Context, *runtimeapi.PullImageRequest, ...grpc.CallOption) (*runtimeapi.PullImageResponse, error) {
+func (f *fakeImageService) PullImage(_ context.Context, req *runtimeapi.PullImageRequest, _ ...grpc.CallOption) (*runtimeapi.PullImageResponse, error) {
+	f.pullReq = req
 	return f.pullResp, f.pullErr
 }
 
@@ -131,13 +133,42 @@ func TestClientImageStatus(t *testing.T) {
 }
 
 func TestClientPullImage(t *testing.T) {
-	c := &Client{Images: &fakeImageService{pullResp: &runtimeapi.PullImageResponse{ImageRef: "sha256:abc"}}}
-	ref, err := c.PullImage(context.Background(), "nginx:latest")
+	images := &fakeImageService{pullResp: &runtimeapi.PullImageResponse{ImageRef: "sha256:abc"}}
+	c := &Client{Images: images}
+	ref, err := c.PullImage(context.Background(), "nginx:latest", nil)
 	if err != nil || ref != "sha256:abc" {
 		t.Fatalf("PullImage = %q, %v", ref, err)
 	}
+	if images.pullReq.GetAuth() != nil {
+		t.Fatalf("anonymous pull sent auth: %+v", images.pullReq.GetAuth())
+	}
+
+	// A credential resolved by the hub must reach CRI, otherwise a private
+	// registry keeps answering 403 to a pull the workload has a secret for.
+	images = &fakeImageService{pullResp: &runtimeapi.PullImageResponse{ImageRef: "sha256:def"}}
+	c.Images = images
+	auth := &RegistryAuth{Username: "robot", Password: "s3cret", IdentityToken: "id-token", RegistryToken: "reg-token"}
+	if _, err := c.PullImage(context.Background(), "registry.internal/private:1", auth); err != nil {
+		t.Fatalf("PullImage(auth): %v", err)
+	}
+	sent := images.pullReq.GetAuth()
+	if sent.GetUsername() != "robot" || sent.GetPassword() != "s3cret" ||
+		sent.GetIdentityToken() != "id-token" || sent.GetRegistryToken() != "reg-token" {
+		t.Fatalf("CRI AuthConfig = %+v", sent)
+	}
+
+	// An empty credential is an anonymous pull, not an empty AuthConfig: some
+	// runtimes read an empty structure as "log in with nothing".
+	images.pullReq = nil
+	if _, err := c.PullImage(context.Background(), "nginx:latest", &RegistryAuth{}); err != nil {
+		t.Fatalf("PullImage(empty auth): %v", err)
+	}
+	if images.pullReq.GetAuth() != nil {
+		t.Fatalf("empty credential sent auth: %+v", images.pullReq.GetAuth())
+	}
+
 	c.Images = &fakeImageService{pullErr: errors.New("401 unauthorized")}
-	if _, err := c.PullImage(context.Background(), "nginx:latest"); err == nil {
+	if _, err := c.PullImage(context.Background(), "nginx:latest", nil); err == nil {
 		t.Fatal("PullImage error = nil")
 	}
 }

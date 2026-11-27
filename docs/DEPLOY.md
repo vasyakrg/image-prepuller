@@ -135,9 +135,21 @@ kubectl -n prepuller create secret generic prepuller-credentials \
   --from-literal=cluster-token="$(openssl rand -base64 32)"
 ```
 
-Креды реестра для pull образа — отдельная история: либо создайте Secret
-`kubernetes.io/dockerconfigjson` и задайте `imagePullSecrets`, либо привяжите
-его к ServiceAccount (`serviceAccount.annotations` / `kubectl patch sa`).
+Креды реестра для **pull образа самого чарта** (hub/spoke/agent) — отдельная история:
+создайте Secret `kubernetes.io/dockerconfigjson` и задайте `imagePullSecrets`, либо
+привяжите его к ServiceAccount (`serviceAccount.annotations` / `kubectl patch sa`).
+
+Креды реестра для **прогреваемых образов** приходят из самих workload'ов: контроллер
+читает `imagePullSecrets` пода (оба типа — `kubernetes.io/dockerconfigjson` и legacy
+`kubernetes.io/dockercfg`), находит запись для хоста образа и передаёт её агенту в
+запросе pull, а агент — в CRI `AuthConfig`. Иначе CRI тянет анонимно (он не знает про
+секреты пода), и приватный реестр отвечает `403`. Для этого контроллеру нужно право
+`get` на secrets: `rbac.readSecrets` (по умолчанию `true`). Если кластерная
+политика запрещает читать secrets, поставьте `false`: pull'ы останутся анонимными, а
+задачи по приватным образам будут падать с `registry authentication failed` и
+подсказкой, каких кредов не хватило. Право нужно и hub'у, и spoke (в прямом режиме pull
+исполняет spoke). Старый агент поле `auth` игнорирует: обновляйте агент вместе с
+контроллером.
 
 Пара токенов outbound-канала задаётся на двух сторонах и должна совпадать: на
 ведомом кластере это `secret.clusterToken` (`PREPULLER_CLUSTER_TOKEN`), на hub'е —
@@ -441,6 +453,30 @@ runtime достаёт образ, а прямой dial из агента — н
 проваленным pull-задачам и отдаёт в UI `502`/`504`, поэтому слот освобождается,
 а не висит.
 
+### Креды приватного реестра
+
+Агент ходит в CRI напрямую, поэтому `imagePullSecrets` пода к нему не применяются —
+без отдельной передачи кредов pull анонимен. Порядок разрешения:
+
+1. контроллер строит индекс image → `imagePullSecrets` по workload'ам в области
+   действия (тот же снапшот, что в UI) и резолвит Secret в namespace workload'а;
+2. из `.dockerconfigjson` берётся запись, чей хост совпадает с реестром образа
+   (Docker Hub матчится в любом написании, включая `https://index.docker.io/v1/`);
+3. креды уезжают в `POST /agent/v1/pulls` (`{"image","auth"}`) и оттуда в CRI
+   `AuthConfig`; ответ +`reason:"registry_auth"` на 502 означает «реестр не пустил».
+
+Секреты кэшируются на 5 минут (ошибки — на минуту), поэтому ротация
+`.dockerconfigjson` подхватывается без перезапуска, а apiserver не опрашивается на
+каждый pull. Проверка вручную:
+
+```bash
+kubectl -n <ns> get secret <pull-secret> -o jsonpath='{.data.\\.dockerconfigjson}' | base64 -d | jq .auths
+```
+
+Типичная ошибка после включения: `403 forbidden` на `get secrets` при живом
+RBAC — значит `rbac.readSecrets=false`; в задаче будет
+`cannot read imagePullSecrets: <ns>/<name>: ... forbidden`.
+
 API агента защищено ключом Secret `agent-token` (`PREPULLER_AGENT_TOKEN`);
 пусто отключает авторизацию. Клиенту K8sProvider в hub этот же токен нужно
 передать при сборке провайдера. Проверка агента напрямую:
@@ -461,6 +497,10 @@ curl -fsS -H "Authorization: Bearer <agent-token>" \
 | 403 `forbidden` на nodes/deployments | нет ClusterRole/RBAC или `rbac.create=false` | Оставьте `rbac.create=true` или привяжите ServiceAccount hub к эквивалентным read-only правилам. |
 | Ноды в UI показываются как `offline`/`degraded` | DaemonSet агента не запущен, сокет не смонтирован, неверный путь к сокету или несовпадение токена агента | Проверьте `kubectl -n <ns> get ds` и логи агента. На k3s/k3d задайте `agent.criSocket=/run/k3s/containerd/containerd.sock`. Убедитесь, что hub и агент используют один `agent-token` (сравните `printenv PREPULLER_AGENT_TOKEN` в обоих подах); после ротации Secret сделайте `kubectl -n <ns> rollout restart deploy/<hub>` и для DaemonSet, чтобы поды подхватили новое значение. |
 | `ImagePullBackOff` | Неверные `image.repository`/`tag` или нет кредов реестра | Проверьте тег в реестре; добавьте `imagePullSecrets` или привяжите pull-секрет к ServiceAccount. |
+| Pull-задача `failed` с `failed to fetch anonymous token ... 403 Forbidden` | Агент тянет через CRI без кредов: либо у workload'а нет `imagePullSecrets`, либо контроллер их не видит | Проверьте `imagePullSecrets` в spec пода/шаблона, `rbac.readSecrets=true` и что образ в реестре именно тот. Ошибка задачи дополнительно содержит подсказку: `no imagePullSecrets…`, `no credential for <host>…` или `cannot read imagePullSecrets…`. |
+| Pull-задача `registry authentication failed`, в теле ответа агента `reason:"registry_auth"` | Реестр отклонил креды (нет, протухли, не тот хост) | Сверьте запись для хоста в `.dockerconfigjson`; для Docker Hub ключ `https://index.docker.io/v1/`. Ротация Secret подхватывается за ≤5 мин. |
+| 403 `forbidden` на `secrets` в логах контроллера | `rbac.readSecrets=false` или правленый ClusterRole | Включите `rbac.readSecrets=true` (это `get` на secrets, без list/watch) либо оставьте pull'ы анонимными. |
+| UI и агент новой версии, но pull'ы всё ещё анонимные | Агент DaemonSet не обновлён | `kubectl -n <ns> rollout status ds/<agent>`; старый агент игнорирует поле `auth`. |
 | `CreateContainerConfigError` | Нет упомянутого Secret/ключа | `kubectl -n prepuller describe pod ...`; проверьте `secret.existingSecret` и его ключи. |
 | ошибки `read-only file system` | Образ пишет вне `/tmp`; rootfs только для чтения | Ожидаемо для hub/spoke (состояние держат в памяти). Агенту смонтируйте writable `emptyDir` там, где нужен scratch. |
 | Поды перезапускаются / пользователей разлогинило после upgrade | `session-secret` перегенерирован | Используйте `secret.existingSecret` (или сохраняйте сгенерированный Secret — у него `resource-policy: keep`). |

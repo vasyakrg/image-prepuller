@@ -30,6 +30,12 @@ serviceAccount:
 # API permissions at all.
 rbac:
   create: true
+  # "get" on Secrets cluster-wide, used to resolve the imagePullSecrets of the
+  # workloads being pre-pulled and pass the credential to the node agent (a CRI
+  # pull is anonymous otherwise, so a private registry answers 403). The
+  # controller never lists or writes Secrets. Set false when cluster policy
+  # forbids reading Secrets: pulls then stay anonymous.
+  readSecrets: true
 
 # Annotations added to every pod template (hub, spoke, agent).
 podAnnotations: {}

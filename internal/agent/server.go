@@ -54,8 +54,12 @@ type Health struct {
 	AgentVersion string `json:"agentVersion"`
 }
 
+// pullRequest is the body of POST /agent/v1/pulls. Auth is optional and carries
+// the credential the hub resolved from the workload's imagePullSecrets; absent
+// or empty means an anonymous pull (see RegistryAuth).
 type pullRequest struct {
-	Image string `json:"image"`
+	Image string        `json:"image"`
+	Auth  *RegistryAuth `json:"auth,omitempty"`
 }
 
 // Server serves the agent wire contract over HTTP/JSON on Config.ListenAddr.
@@ -228,16 +232,24 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.metrics.PullStarted()
-	imageRef, err := s.pullImage(r.Context(), image)
+	imageRef, err := s.pullImage(r.Context(), image, req.Auth)
 	if err != nil {
 		status := http.StatusBadGateway
 		result := "cri_error"
-		if errors.Is(err, errPullStalled) || errors.Is(err, context.DeadlineExceeded) {
+		reason := ""
+		switch {
+		case errors.Is(err, errPullStalled) || errors.Is(err, context.DeadlineExceeded):
 			status = http.StatusGatewayTimeout
 			result = "stalled"
+		case IsRegistryAuthError(err):
+			// The runtime was told anonymously (or with a bad credential) and the
+			// registry said 401/403. The hub turns the reason into a typed error so
+			// the operator sees "check imagePullSecrets", not "agent unavailable".
+			result = "registry_auth"
+			reason = reasonRegistryAuth
 		}
 		s.metrics.PullFinished(result)
-		writeError(w, status, err.Error())
+		writeErrorReason(w, status, err.Error(), reason)
 		return
 	}
 	s.metrics.PullFinished("success")
@@ -267,13 +279,13 @@ type pullOutcome struct {
 // stall watchdog is disabled, cancels it when the image filesystem stops
 // growing. The CRI pull API has no progress callback, so filesystem growth is
 // the only progress signal the agent can observe.
-func (s *Server) pullImage(ctx context.Context, image string) (string, error) {
+func (s *Server) pullImage(ctx context.Context, image string, auth *RegistryAuth) (string, error) {
 	pullCtx, cancel := context.WithTimeout(ctx, s.cfg.PullTimeout)
 	defer cancel()
 
 	done := make(chan pullOutcome, 1)
 	go func() {
-		ref, err := s.cri.PullImage(pullCtx, image)
+		ref, err := s.cri.PullImage(pullCtx, image, auth)
 		done <- pullOutcome{ref: ref, err: err}
 	}()
 
@@ -432,4 +444,16 @@ func writeJSON(w http.ResponseWriter, statusCode int, body any) {
 
 func writeError(w http.ResponseWriter, statusCode int, message string) {
 	writeJSON(w, statusCode, map[string]string{"error": message})
+}
+
+// writeErrorReason adds the machine-readable reason the hub maps onto a typed
+// provider error (registry_auth today). The hub reads "error" for the message
+// and "reason" for the classification, so a hub that predates the reason field
+// still shows a correct message.
+func writeErrorReason(w http.ResponseWriter, statusCode int, message, reason string) {
+	body := map[string]string{"error": message}
+	if reason != "" {
+		body["reason"] = reason
+	}
+	writeJSON(w, statusCode, body)
 }

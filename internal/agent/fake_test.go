@@ -27,6 +27,7 @@ type fakeCRI struct {
 	statusErr  error
 	pullErr    error
 	pulls      []string
+	pullAuths  []*RegistryAuth
 
 	// pullHook, when set, replaces the mock pull so a test can simulate a hung
 	// or stalled CRI call. fsHook does the same for ImageFS sampling.
@@ -50,9 +51,10 @@ func (f *fakeCRI) ImageStatus(ctx context.Context, image string) (ImageInfo, boo
 	return f.MockBackend.ImageStatus(ctx, image)
 }
 
-func (f *fakeCRI) PullImage(ctx context.Context, image string) (string, error) {
+func (f *fakeCRI) PullImage(ctx context.Context, image string, auth *RegistryAuth) (string, error) {
 	f.mu.Lock()
 	f.pulls = append(f.pulls, image)
+	f.pullAuths = append(f.pullAuths, auth)
 	f.mu.Unlock()
 	if f.pullHook != nil {
 		return f.pullHook(ctx, image)
@@ -60,7 +62,7 @@ func (f *fakeCRI) PullImage(ctx context.Context, image string) (string, error) {
 	if f.pullErr != nil {
 		return "", f.pullErr
 	}
-	return f.MockBackend.PullImage(ctx, image)
+	return f.MockBackend.PullImage(ctx, image, auth)
 }
 
 func (f *fakeCRI) ImageFS(ctx context.Context) (ImageFSStats, error) {
@@ -91,6 +93,14 @@ func (f *fakeCRI) pullCalls() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.pulls...)
+}
+
+// pullAuthsSeen returns the credentials the server forwarded to CRI, one entry
+// per pull call (nil for an anonymous pull).
+func (f *fakeCRI) pullAuthsSeen() []*RegistryAuth {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*RegistryAuth(nil), f.pullAuths...)
 }
 
 func testConfig() Config {

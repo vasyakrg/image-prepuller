@@ -34,12 +34,13 @@ import (
 // tiny response structs are mirrored here; bump agentAPIVersion only with a
 // contract PR on both sides.
 const (
-	agentAPIVersion       = "v1"
-	agentSnapshotPath     = "/agent/v1/snapshot"
-	agentPullsPath        = "/agent/v1/pulls"
-	maxAgentResponseBytes = 8 << 20
-	agentTaskHistoryLimit = 200
-	nodeAddressCacheTTL   = time.Minute
+	agentAPIVersion         = "v1"
+	agentSnapshotPath       = "/agent/v1/snapshot"
+	agentPullsPath          = "/agent/v1/pulls"
+	agentReasonRegistryAuth = "registry_auth"
+	maxAgentResponseBytes   = 8 << 20
+	agentTaskHistoryLimit   = 200
+	nodeAddressCacheTTL     = time.Minute
 )
 
 const (
@@ -81,6 +82,11 @@ var (
 	// registry (or the layer download) is not, so the slot is released and the
 	// task fails fast instead of hanging until DefaultAgentPullTimeout.
 	ErrAgentPullStalled = errors.New("node agent pull stalled or timed out")
+	// ErrAgentRegistryAuth reports an agent pull the image registry rejected for
+	// lack of (or with wrong) credentials: the agent answers 502 with
+	// reason=registry_auth. The node agent is healthy; the credential is not, so
+	// the failure must not be reported as "node agent unavailable".
+	ErrAgentRegistryAuth = errors.New("registry authentication failed")
 )
 
 // Agent wire v1 response types (subset the hub needs).
@@ -107,8 +113,11 @@ type agentImage struct {
 	SizeBytes int64    `json:"sizeBytes"`
 }
 
+// agentPullRequest is the body of POST /agent/v1/pulls. Auth is the credential
+// resolved from the workload's imagePullSecrets; nil means an anonymous pull.
 type agentPullRequest struct {
-	Image string `json:"image"`
+	Image string             `json:"image"`
+	Auth  *agentRegistryAuth `json:"auth,omitempty"`
 }
 
 type agentPullResult struct {
@@ -120,6 +129,9 @@ type agentPullResult struct {
 
 type agentErrorBody struct {
 	Error string `json:"error"`
+	// Reason classifies the failure on the agent side ("registry_auth" today).
+	// Older agents omit it, so the message stays the only signal then.
+	Reason string `json:"reason"`
 }
 
 // cachedNodeAddress is a resolved agent base URL for one node.
@@ -560,23 +572,36 @@ func (p *K8sProvider) TriggerPull(ctx context.Context, req model.PullRequest) (m
 		return *existing, nil
 	}
 
+	// Resolve the workload's imagePullSecrets before the pull starts. A node
+	// agent pulls through CRI and is anonymous otherwise, so a private registry
+	// would answer 403 even though the workload has a pull secret
+	// (k8s_registry.go). Resolution reads the index of the last snapshot and a
+	// cached Secret, never the cluster listing.
+	auth, authHint := p.registryAuthFor(ctx, image)
+
 	pullCtx, cancel := context.WithTimeout(context.Background(), p.agent.pullTimeout)
 	if !p.agent.registerCancel(task.ID, cancel) {
 		// The task was canceled between beginTask and here: do not start a pull.
 		cancel()
 		return p.agent.taskCopy(task.ID), nil
 	}
-	go p.runAgentPull(pullCtx, task.ID, image, node)
+	go p.runAgentPull(pullCtx, task.ID, image, node, auth, authHint)
 	return *task, nil
 }
 
 // runAgentPull performs one asynchronous agent pull and records its result. Any
 // error from the transport ends the task; a canceled task is already terminal, so
 // finishTask reports false and the goroutine leaves counters untouched.
-func (p *K8sProvider) runAgentPull(ctx context.Context, taskID, image, node string) {
-	raw, err := p.agent.request(ctx, node, http.MethodPost, agentPullsPath, agentPullRequest{Image: image}, p.agent.pullTimeout)
+func (p *K8sProvider) runAgentPull(ctx context.Context, taskID, image, node string, auth *agentRegistryAuth, authHint string) {
+	raw, err := p.agent.request(ctx, node, http.MethodPost, agentPullsPath, agentPullRequest{Image: image, Auth: auth}, p.agent.pullTimeout)
 	if err != nil {
-		p.finishAgentPull(taskID, image, node, model.TaskFailed, err.Error())
+		message := err.Error()
+		// Only a credential rejection gets the hint: for a disk-full or a dead
+		// agent, "no imagePullSecrets" would send the operator down the wrong path.
+		if errors.Is(err, ErrAgentRegistryAuth) && authHint != "" {
+			message += " (" + authHint + ")"
+		}
+		p.finishAgentPull(taskID, image, node, model.TaskFailed, message)
 		return
 	}
 
@@ -753,6 +778,9 @@ func (a *agentTransport) request(ctx context.Context, node, method, path string,
 	}
 
 	message := agentErrorMessage(raw)
+	if agentErrorReason(raw) == agentReasonRegistryAuth {
+		return nil, fmt.Errorf("%w: node %q: %s", ErrAgentRegistryAuth, node, message)
+	}
 	switch resp.StatusCode {
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return nil, fmt.Errorf("%w: node %q: http %d: %s", ErrAgentUnauthorized, node, resp.StatusCode, message)
@@ -763,6 +791,16 @@ func (a *agentTransport) request(ctx context.Context, node, method, path string,
 	default:
 		return nil, fmt.Errorf("%w: node %q: http %d: %s", ErrAgentUnavailable, node, resp.StatusCode, message)
 	}
+}
+
+// agentErrorReason returns the machine-readable reason of an agent error body
+// (empty for older agents that only send "error").
+func agentErrorReason(raw []byte) string {
+	var body agentErrorBody
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(body.Reason)
 }
 
 func agentErrorMessage(raw []byte) string {

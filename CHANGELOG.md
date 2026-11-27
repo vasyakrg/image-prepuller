@@ -4,6 +4,22 @@
 
 ### Added
 
+- **Приватный реестр: pull получает креды workload'а (`imagePullSecrets`).** Агент
+  тянет образ через CRI, а CRI не знает про `imagePullSecrets` пода, поэтому pull был
+  анонимным: реестр с логином отвечал `403`, образ оказывался `present` только на той
+  ноде, где его уже тянул kubelet, а на остальных — `missing` с десятками проваленных
+  задач `failed to fetch anonymous token ... 403 Forbidden`. Теперь `K8sProvider`
+  резолвит креды из `imagePullSecrets` workload'ов, ссылающихся на образ
+  (`kubernetes.io/dockerconfigjson` и legacy `.dockercfg`, дедупликация по
+  namespace/name, кэш 5 мин, матчинг хоста по правилам distribution, Docker Hub в любом
+  написании), и передаёт их агенту в `POST /agent/v1/pulls` (`auth`), а агент — в CRI
+  `AuthConfig`. Если креды не нашлись, задача падает с `registry authentication failed`
+  и подсказкой (`no imagePullSecrets…` / `no credential for <host>…` /
+  `cannot read imagePullSecrets…`), метрика агента получает `result="registry_auth"`, а
+  хаб — типизированную `ErrAgentRegistryAuth` вместо «node agent unavailable». Нужны
+  RBAC `get` на secrets (`rbac.readSecrets`, по умолчанию `true`) и **новый образ
+  одновременно у hub/spoke и у агента**: старый агент поле `auth` игнорирует и
+  продолжает тянуть анонимно.
 - **Область действия задаётся метками, а не UI-фильтром.** `-workload-selector`
   (`PREPULLER_WORKLOAD_SELECTOR`) уходит в `ListOptions` для Deployment/STS/DS, а
   `-node-selector` (`PREPULLER_NODE_SELECTOR`) — для Nodes: всё, что не попало в

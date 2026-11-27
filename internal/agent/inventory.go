@@ -81,12 +81,41 @@ type Snapshot struct {
 	Images           []ImageInfo  `json:"images"`
 }
 
+// RegistryAuth is the registry credential the hub resolved for an image from the
+// workload's imagePullSecrets and sent along with the pull request.
+//
+// A node agent is not the kubelet: CRI PullImage runs anonymously unless the
+// caller passes an AuthConfig, and Kubernetes applies imagePullSecrets only to
+// pods it creates itself. So without this hand-off a private registry answers
+// 403 to every pull on every node where the image is not cached yet — even
+// though the workload that references it does have a pull secret.
+//
+// The fields mirror the subset of the CRI AuthConfig that a registry login
+// needs. A nil Auth means "pull anonymously", exactly like a pod without
+// imagePullSecrets.
+type RegistryAuth struct {
+	Username      string `json:"username,omitempty"`
+	Password      string `json:"password,omitempty"`
+	Auth          string `json:"auth,omitempty"`
+	IdentityToken string `json:"identityToken,omitempty"`
+	RegistryToken string `json:"registryToken,omitempty"`
+}
+
+// Empty reports whether the credential carries nothing a runtime could use.
+func (a *RegistryAuth) Empty() bool {
+	if a == nil {
+		return true
+	}
+	return a.Username == "" && a.Password == "" && a.Auth == "" &&
+		a.IdentityToken == "" && a.RegistryToken == ""
+}
+
 // ImageService is the CRI image surface used by the agent. Keep it small: the
 // only implementations are the real CRI client and the in-memory fake.
 type ImageService interface {
 	ListImages(ctx context.Context) ([]ImageInfo, error)
 	ImageStatus(ctx context.Context, image string) (ImageInfo, bool, error)
-	PullImage(ctx context.Context, image string) (string, error)
+	PullImage(ctx context.Context, image string, auth *RegistryAuth) (string, error)
 	ImageFS(ctx context.Context) (ImageFSStats, error)
 }
 

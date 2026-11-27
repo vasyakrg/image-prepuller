@@ -47,8 +47,10 @@ type fakeAgent struct {
 
 	pullStatus int
 	pullError  string
+	pullReason string
 	pullCalls  int
 	pullImages []string
+	pullAuths  []*agentRegistryAuth
 	pullStart  chan struct{} // signalled once when the first pull starts
 	pullWait   chan struct{} // handler blocks until this channel is closed
 	pullHook   func(image string)
@@ -127,8 +129,10 @@ func (f *fakeAgent) servePull(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.pullCalls++
 	f.pullImages = append(f.pullImages, req.Image)
+	f.pullAuths = append(f.pullAuths, req.Auth)
 	status := f.pullStatus
 	errMessage := f.pullError
+	reason := f.pullReason
 	wait := f.pullWait
 	hook := f.pullHook
 	started := f.pullStart
@@ -148,7 +152,11 @@ func (f *fakeAgent) servePull(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if status != 0 && status != http.StatusOK {
-		writeAgentTestJSON(w, status, map[string]string{"error": errMessage})
+		body := map[string]string{"error": errMessage}
+		if reason != "" {
+			body["reason"] = reason
+		}
+		writeAgentTestJSON(w, status, body)
 		return
 	}
 	if hook != nil {
@@ -174,6 +182,14 @@ func (f *fakeAgent) pulledImages() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.pullImages...)
+}
+
+// pulledAuths returns the credentials the hub sent with each pull (nil means an
+// anonymous pull).
+func (f *fakeAgent) pulledAuths() []*agentRegistryAuth {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*agentRegistryAuth(nil), f.pullAuths...)
 }
 
 func statusOrOK(status int) int {

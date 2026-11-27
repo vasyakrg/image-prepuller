@@ -95,7 +95,7 @@ func (m *MockBackend) ImageStatus(_ context.Context, image string) (ImageInfo, b
 }
 
 // PullImage adds image to the fake cache and grows image filesystem usage.
-func (m *MockBackend) PullImage(ctx context.Context, image string) (string, error) {
+func (m *MockBackend) PullImage(ctx context.Context, image string, _ *RegistryAuth) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}

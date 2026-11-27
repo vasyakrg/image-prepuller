@@ -244,6 +244,7 @@ func TestMetricsPullCounters(t *testing.T) {
 	m.PullFinished("cri_error")
 	m.PullFinished("stalled")
 	m.PullFinished("registry_unreachable")
+	m.PullFinished("registry_auth")
 	m.PullFinished("disk_paused")
 	body = metricsBody(t, m.Handler())
 	wantSample(t, body, `prepuller_agent_pull_in_flight{node="node-e"}`, "0")
@@ -412,13 +413,25 @@ func TestServerPullMetrics(t *testing.T) {
 
 	t.Run("cri error", func(t *testing.T) {
 		srv, f := newTestServer(t, "")
-		f.pullErr = errors.New("401 Unauthorized")
+		f.pullErr = errors.New("invalid image reference")
 		rec := doRequest(t, srv.Handler(), http.MethodPost, pullsPath, `{"image":"registry.internal/private:1"}`, "")
 		if rec.Code != http.StatusBadGateway {
 			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
 		}
 		body := metricsBody(t, srv.MetricsHandler())
 		wantSample(t, body, pullSeries("cri_error"), "1")
+		wantSample(t, body, fmt.Sprintf("prepuller_agent_pull_in_flight{%s}", node), "0")
+	})
+
+	t.Run("registry auth", func(t *testing.T) {
+		srv, f := newTestServer(t, "")
+		f.pullErr = errors.New("failed to fetch anonymous token: 403 Forbidden")
+		rec := doRequest(t, srv.Handler(), http.MethodPost, pullsPath, `{"image":"hub.example/tools/app:1"}`, "")
+		if rec.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+		}
+		body := metricsBody(t, srv.MetricsHandler())
+		wantSample(t, body, pullSeries("registry_auth"), "1")
 		wantSample(t, body, fmt.Sprintf("prepuller_agent_pull_in_flight{%s}", node), "0")
 	})
 

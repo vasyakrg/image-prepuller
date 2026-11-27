@@ -64,6 +64,13 @@ type K8sProvider struct {
 	mu         sync.Mutex // guards the snapshot cache and lastSyncAt
 	cache      snapshotCache
 	lastSyncAt time.Time
+
+	// registryAuth caches parsed imagePullSecrets and the image -> pull-secret
+	// index of the last snapshot; see k8s_registry.go. Never held while p.mu is
+	// taken, so a pull cannot deadlock a scrape.
+	authMu      sync.Mutex
+	authCache   map[string]registryAuthCacheEntry
+	secretIndex map[string][]secretRef
 }
 
 type snapshotCache struct {
@@ -172,6 +179,7 @@ func NewK8sProviderWithClientset(clusterID string, clientset kubernetes.Interfac
 		snapshotTTL:    DefaultSnapshotTTL,
 		healthTimeout:  DefaultHealthTimeout,
 		now:            time.Now,
+		authCache:      make(map[string]registryAuthCacheEntry),
 	}
 	p.agent = newAgentTransport(clientset)
 	for _, opt := range opts {
