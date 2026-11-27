@@ -11,6 +11,11 @@ Scope: workloads {{ with .Values.hub.workloadSelector }}selecting "{{ . }}"{{ el
 Only workloads that carry that label are listed, shown and warmed; label them or
 set hub.workloadSelector="" to manage every workload in the cluster.
 {{- end }}
+{{- if .Values.hub.nodeLabelSelector }}
+Only nodes that match that selector are shown and pulled to. The default keeps
+control-plane nodes out of scope because the agent DaemonSet runs on workers;
+set hub.nodeLabelSelector="" (and add agent.tolerations) to include them.
+{{- end }}
 {{- end }}
 {{- if not .Values.image.tag }}
 

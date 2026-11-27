@@ -638,11 +638,24 @@ func (p *K8sProvider) finishAgentPull(taskID, image, node string, state model.Ta
 	p.invalidateSnapshot()
 }
 
-// TriggerWorkloadPull starts a pull for every image of one workload on every
-// ready node with a live agent and returns how many were started (the pulls run
-// asynchronously). Individual failures are surfaced through Snapshot.Tasks.
+// TriggerWorkloadPull starts a pull for every image of one workload on every node
+// in the snapshot and returns how many tasks were started (or were already
+// active). The pulls run asynchronously. Nodes without a live agent are not
+// skipped: their task is still created and fails asynchronously with
+// ErrAgentUnavailable, so an operator-initiated warm-up always leaves visible
+// Pull Tasks instead of silently doing nothing. The cached snapshot is reused
+// even past its TTL: building a fresh one polls every node agent sequentially,
+// which does not fit the 5 s outbound spoke command budget. A fresh snapshot is
+// built only when nothing has been cached yet.
 func (p *K8sProvider) TriggerWorkloadPull(ctx context.Context, req model.WorkloadPullRequest) (int, error) {
-	snapshot := p.Snapshot(ctx)
+	if p.agent == nil {
+		return 0, fmt.Errorf("k8s provider: TriggerWorkloadPull: %w", ErrNotImplemented)
+	}
+
+	snapshot, cached := p.cachedSnapshot()
+	if !cached {
+		snapshot = p.Snapshot(ctx)
+	}
 
 	var images []string
 	found := false
@@ -665,13 +678,13 @@ func (p *K8sProvider) TriggerWorkloadPull(ctx context.Context, req model.Workloa
 	if !found {
 		return 0, fmt.Errorf("workload %s/%s/%s not found", req.Namespace, req.Kind, req.Name)
 	}
+	if len(images) == 0 {
+		return 0, fmt.Errorf("workload %s/%s/%s has no images", req.Namespace, req.Kind, req.Name)
+	}
 
 	triggered := 0
 	for _, image := range images {
 		for _, node := range snapshot.Nodes {
-			if !node.Ready || !node.AgentUp {
-				continue
-			}
 			_, err := p.TriggerPull(ctx, model.PullRequest{
 				Image:   image,
 				Node:    node.Name,

@@ -73,7 +73,10 @@ hub:
   workloadSelector: "prepull=true"
   # Agents run on workers only (see agent.* below): control-plane nodes are out
   # of scope, so they are not shown and their missing agents do not turn into
-  # offline slots / permanent partial snapshots. Set "" to include them.
+  # offline slots / permanent partial snapshots. This is the chart default; the
+  # line stays explicit because the hub itself *is* tolerating the
+  # control-plane taint below - a single-node/small Talos install that wants
+  # control-plane coverage must clear it here.
   nodeLabelSelector: "!node-role.kubernetes.io/control-plane"
   # Small Talos installs have no untainted worker nodes, so the hub needs the
   # same toleration as the agent or its pod stays Pending.

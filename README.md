@@ -43,9 +43,11 @@ workload'ы и ноды и строит матрицу `image × node`; `node-ag
 
 - **Область действия** — контроллер работает только с тем, что помечено: флаг
   `-workload-selector` ограничивает список workload'ов (в чарте по умолчанию
-  `prepull=true`), `-node-selector` — список нод (например,
-  `!node-role.kubernetes.io/control-plane`, когда агенты стоят только на воркерах).
-  Всё остальное не показывается, не считается в покрытии и не прогревается.
+  `prepull=true`), `-node-selector` — список нод (значение чарта по умолчанию —
+  `!node-role.kubernetes.io/control-plane`: агенты стоят на воркерах, иначе
+  control-plane ноды всю жизнь висели бы offline-слотами). Всё остальное не
+  показывается, не считается в покрытии и не прогревается. Нужен control-plane —
+  верните `agent.tolerations` и очистите селектор.
 - **Workloads view** — Deployment / StatefulSet / DaemonSet, попавшие в `-workload-selector`:
   их образы (включая init-контейнеры), PullPolicy, покрытие каждого образа по нодам.
   У образа с нарушением политики проблемный токен описания подсвечивается жёлтым
@@ -326,13 +328,18 @@ hub и кластерные серии; `agent.metrics.serviceMonitor` / `agent.
 — `prepuller_agent_*` с порта метрик агента (`agent.metrics.enabled`), плюс
 `agent.networkPolicy.enabled` отдельно. Область действия задаётся
 `hub.workloadSelector` (по умолчанию `prepull=true`) и `hub.nodeLabelSelector`
-(например, `!node-role.kubernetes.io/control-plane`); у ведомого кластера — те же
-ключи под `spoke.*`. История pull-задач hub'а живёт в `hub.pullHistory`:
+(по умолчанию `!node-role.kubernetes.io/control-plane`, потому что DaemonSet агента
+ставится только на воркеры); у ведомого кластера — те же ключи под `spoke.*` с теми
+же значениями по умолчанию. `spoke.mock` по умолчанию `false`: раскатка никогда не
+поднимает демо-данные; `true` — только для витрины/UI-разработки. История pull-задач
+hub'а живёт в `hub.pullHistory`:
 `enabled` (по умолчанию `true`), `limit` (2000 записей), `sizeLimit` emptyDir (256Mi) и
 `existingClaim` — пусто = emptyDir (история переживает рестарт контейнера, но не
 пересоздание пода), задан = PVC для действительно долгой истории (том должен быть
 записываемым для uid/gid 65532, при `readOnlyRootFilesystem: true` без монтирования
-история недоступна).
+история недоступна). Опциональная статистика в PostgreSQL — `hub.stats`
+(`enabled`, `existingSecret`/`secretKey` или `dsn`, `interval`, `snapshotTimeout`,
+`retention`, `pruneInterval`); подробности — раздел «Статистика в PostgreSQL».
 
 Кластер без UI — только агенты:
 
@@ -404,11 +411,16 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
 | `-cluster-name` | `talos-prod-eu` | Имя локального кластера |
 | `-auto-warm` | `false` | Запустить reconciler авто-прогрева для каждого локального кластера |
 | `-workload-selector` | пусто | Kubernetes label selector workload'ов: всё, что не попало, не листится, не показывается и не прогревается. В чарте — `hub.workloadSelector` / `spoke.workloadSelector` (по умолчанию `prepull=true`; env `PREPULLER_WORKLOAD_SELECTOR`) |
-| `-node-selector` | пусто | Kubernetes label selector нод в области действия (слоты image × node строятся только по ним). Для агентов на воркерах — `!node-role.kubernetes.io/control-plane`; в чарте `hub.nodeLabelSelector` / `spoke.nodeLabelSelector` (env `PREPULLER_NODE_SELECTOR`) |
+| `-node-selector` | пусто | Kubernetes label selector нод в области действия (слоты image × node строятся только по ним). Значение чарта по умолчанию — `!node-role.kubernetes.io/control-plane` (агенты на воркерах); в чарте `hub.nodeLabelSelector` / `spoke.nodeLabelSelector` (env `PREPULLER_NODE_SELECTOR`) |
 | `-hub-url` | пусто | Только spoke: базовый URL hub'а (обычно ingress). Задаёт outbound-режим — spoke сам подключается к hub'у; пусто — direct-режим, и hub должен уметь достучаться до spoke по HTTP (env `PREPULLER_HUB_URL`) |
 | `-hub-sync-interval` | `3s` | Только spoke: как часто outbound-spoke пушит состояние кластера в hub (env `PREPULLER_HUB_SYNC_INTERVAL`) |
 | `-pull-history-file` | пусто | Только hub: JSONL-файл истории pull-задач (env `PREPULLER_PULL_HISTORY_FILE`). Пусто — история только в памяти; недоступный/незаписываемый путь — предупреждение в лог и память (hub всё равно стартует) |
 | `-pull-history-limit` | `2000` | Только hub: сколько задач хранить в истории (env `PREPULLER_PULL_HISTORY_LIMIT`); активные задачи не вытесняются |
+| `-stats-dsn` | пусто | Только hub: DSN внешней PostgreSQL для статистики (история образов, работа сборщика мусора, перепулы, лог pull-задач). Пусто — статистика выключена, лишних горутин и соединений нет (env `PREPULLER_STATS_DSN`, чарт `hub.stats`) |
+| `-stats-interval` | `30s` | Только hub: как часто снимается срез по каждому кластеру (env `PREPULLER_STATS_INTERVAL`) |
+| `-stats-timeout` | `15s` | Только hub: таймаут снапшота одного кластера в срезе статистики (env `PREPULLER_STATS_TIMEOUT`) |
+| `-stats-retention` | `2160h` | Только hub: сколько хранить строки статистики, старее — прунятся (env `PREPULLER_STATS_RETENTION`) |
+| `-stats-prune-interval` | `24h` | Только hub: как часто запускать прунинг (env `PREPULLER_STATS_PRUNE_INTERVAL`) |
 
 Подкоманда `agent` — node-agent:
 
@@ -459,6 +471,11 @@ stalled`. Hub превращает 504 в `provider.ErrAgentPullStalled` → HTT
 | `PREPULLER_AGENT_METRICS_ADDR` | agent | нет | Адрес Prometheus-метрик агента, по умолчанию `:9444`; пусто — выключить сервер метрик |
 | `PREPULLER_PULL_HISTORY_FILE` | hub | нет | Путь JSONL-файла истории pull-задач (то же, что `-pull-history-file`); пусто — история в памяти |
 | `PREPULLER_PULL_HISTORY_LIMIT` | hub | нет | Ёмкость истории pull-задач (то же, что `-pull-history-limit`), по умолчанию `2000` |
+| `PREPULLER_STATS_DSN` | hub | нет | DSN внешней PostgreSQL (то же, что `-stats-dsn`); пусто — статистика выключена. DSN содержит пароль и никогда не логируется |
+| `PREPULLER_STATS_INTERVAL` | hub | нет | Период среза статистики (Go duration, по умолчанию `30s`) |
+| `PREPULLER_STATS_TIMEOUT` | hub | нет | Таймаут снапшота одного кластера в срезе (по умолчанию `15s`) |
+| `PREPULLER_STATS_RETENTION` | hub | нет | Срок хранения строк статистики (по умолчанию `2160h` = 90 дней) |
+| `PREPULLER_STATS_PRUNE_INTERVAL` | hub | нет | Период прунинга статистики (по умолчанию `24h`) |
 
 \* нужен либо `PREPULLER_USERS`, либо legacy-пара `PREPULLER_AUTH_USER`/`_PASS`.
 
@@ -493,7 +510,7 @@ Cookie-сессии подписаны HMAC-SHA256 и несут роль; cooki
 | `GET /api/v1/clusters` | cookie | `{defaultCluster, apiVersion, clusters[]}` |
 | `GET /api/v1/snapshot?cluster=ID` | cookie | Полный снимок кластера (`model.Snapshot`, contract v2) |
 | `POST /api/v1/pull` | cookie, `operator` | `{cluster,image,node}` → 202 `{status,image,node,task}` |
-| `POST /api/v1/workloads/pull` | cookie, `operator` | `{cluster,namespace,kind,name}` → 202 `{triggered}` |
+| `POST /api/v1/workloads/pull` | cookie, `operator` | `{cluster,namespace,kind,name}` → 202 `{triggered}`: по задаче на каждую пару «образ workload'а × нода в области действия». Ноды без живого агента не пропускаются — их задачи создаются и падают с ошибкой доступности агента, поэтому Pull All никогда не бывает тихим no-op |
 | `POST /api/v1/reconcile` | cookie, `operator` | `{cluster}` → 200, принудительный синк |
 | `GET /api/v1/pull-tasks?cluster=ID&limit=50&offset=0&state=all` | cookie | Одна страница pull-задач из истории hub'а (v2): `{cluster, tasks[], total, limit, offset, active, source}`. `limit` 1..200 (по умолчанию 50), `state` — `all` / `active` / `queued` / `running` / `succeeded` / `failed` / `canceled`; `active` — число активных задач независимо от фильтра, `source` — `history` (файл/память hub'а) или `snapshot` (провайдер). Невалидный `limit`/`offset`/`state` — 400 |
 | `POST /api/v1/pulls/{id}/cancel?cluster=ID` | cookie, `operator` | Отмена queued/running задачи → 202; 404 — нет задачи (v2) |
@@ -615,6 +632,86 @@ Node-agent отдаёт свои метрики **на отдельном пор
 раздельно для hub/кластерных серий (`hub.prometheusRule.enabled`, `hub.serviceMonitor.enabled`)
 и для метрик агента (`agent.metrics.prometheusRule.enabled`, `agent.metrics.serviceMonitor.enabled`).
 
+## Статистика в PostgreSQL (опционально)
+
+Hub умеет писать историю работы с образами во внешнюю PostgreSQL — это отвечает на
+вопросы, которые метрики не сохраняют: как часто сборщик мусора containerd/Kubernetes
+вычищает образы, сколько живёт образ на ноде, как часто агенту приходится тянуть его
+заново и какой лаг между удалением образа и перепулом. Выключено по умолчанию
+(`hub.stats.enabled=false`, пустой `-stats-dsn`): без DSN в процессе нет ни горутины,
+ни соединения с БД.
+
+**Как работает.** Раз в `-stats-interval` (30 s) hub снимает снапшот каждого кластера
+и сравнивает его с предыдущим срезом **на своей стороне**: появление/исчезновение
+образа на ноде, пачка исчезновений за один срез (это и есть работа сборщика мусора),
+переходы состояний pull-задач. Строки пишутся в PostgreSQL пакетно; если БД недоступна
+или запись не прошла, hub пишет предупреждение в лог и **не коммитит** срез — следующий
+тик повторит тот же diff. UI, метрики и pull'ы от БД не зависят: статистика — best
+effort, hub не блокируется и не падает.
+
+**Включение.**
+
+```bash
+# значения (DSN содержит пароль: в проде — из Secret)
+helm upgrade --install prepuller deploy/helm/image-prepuller \
+  --set hub.stats.enabled=true \
+  --set hub.stats.existingSecret=prepuller-pg   # ключ: hub.stats.secretKey (stats-dsn)
+```
+
+`kubectl create secret generic prepuller-pg --from-literal=stats-dsn='postgres://user:pass@db:5432/prepuller?sslmode=require'`.
+Схема создаётся сама (`CREATE TABLE IF NOT EXISTS`) при первом подключении; нужны права
+на `CREATE` в схеме и `INSERT/SELECT/DELETE` на таблицы. Старые строки прунятся раз в
+`hub.stats.pruneInterval` по `hub.stats.retention` (90 дней по умолчанию).
+
+**Таблицы.**
+
+| Таблица | Что хранит |
+| --- | --- |
+| `prepuller_image_presence` | один интервал присутствия образа на ноде: `cluster`, `node`, `image`, `size_bytes`, `first_seen_at`, `last_seen_at`, `removed_at` (NULL — образ ещё лежит). Из неё считается и время жизни, и частота удалений |
+| `prepuller_gc_events` | один срез, в котором с ноды исчезли образы (`occurred_at`): `removed_count`, `removed_bytes`, `window_seconds` — «сборщик прошёлся и вычистил N образов за окно» |
+| `prepuller_repulls` | перепул: `removed_at` (когда образ исчез), `finished_at` (когда задача успешно завершилась), `lag_seconds`, `task_id` — лаг «удалён → снова на ноде» |
+| `prepuller_tasks` | лог всех pull-задач: образ, нода, состояние, триггер (`manual`/`auto`/`reconcile`), актор, `created_at`/`started_at`/`finished_at`, `duration_ms`, текст ошибки, `state_changed_at` (когда hub впервые увидел текущее состояние) |
+| `prepuller_node_samples` | срез по ноде: `image_fs_used_bytes`, `image_fs_capacity_bytes`, число образов в кэше, `agent_up`, `disk_paused`, `ready` — чтобы коррелировать чистки с заполнением диска |
+
+**Готовые запросы** (все таблицы уже содержат `cluster`):
+
+```sql
+-- как часто сборщик вычищает образы и сколько за раз (по нодам, за 7 дней)
+SELECT node, count(*) AS gc_runs, sum(removed_count) AS removed_images,
+       round(avg(removed_count), 1) AS avg_per_run,
+       round(avg(window_seconds)) AS avg_window_s
+FROM prepuller_gc_events
+WHERE occurred_at > now() - interval '7 days'
+GROUP BY node ORDER BY gc_runs DESC;
+
+-- сколько живёт образ на ноде (медиана и хвост, закрытые интервалы)
+SELECT image, count(*) AS appearances,
+       percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM removed_at - first_seen_at)) AS median_lifetime_s,
+       percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch FROM removed_at - first_seen_at)) AS p95_lifetime_s
+FROM prepuller_image_presence
+WHERE removed_at IS NOT NULL AND removed_at > now() - interval '30 days'
+GROUP BY image ORDER BY appearances DESC LIMIT 20;
+
+-- как часто образ перетягивают и какой лаг после удаления
+SELECT image, count(*) AS repulls,
+       percentile_cont(0.5) WITHIN GROUP (ORDER BY lag_seconds) AS median_lag_s,
+       max(lag_seconds) AS max_lag_s
+FROM prepuller_repulls
+WHERE finished_at > now() - interval '30 days'
+GROUP BY image ORDER BY repulls DESC LIMIT 20;
+
+-- pull-задачи: успешность и худшие ошибки за сутки
+SELECT trigger, state, count(*) AS tasks,
+       round(avg(duration_ms)) AS avg_ms
+FROM prepuller_tasks
+WHERE created_at > now() - interval '1 day'
+GROUP BY trigger, state ORDER BY tasks DESC;
+```
+
+Дизайн и границы (почему зависимость, почему best effort, почему тесты без БД) —
+[docs/adr/0002-postgres-statistics.md](docs/adr/0002-postgres-statistics.md). Runbook
+деплоя — [docs/DEPLOY.md](docs/DEPLOY.md) §14.12.
+
 ## Структура репозитория
 
 ```
@@ -626,6 +723,8 @@ internal/provider/      Provider v2, MockProvider, RemoteProvider, K8sProvider (
                         spoke_hub.go — hub-сторона outbound-канала: кэш состояния + mailbox команд
 internal/spokeclient/   spoke-сторона outbound-канала: push состояния, long-poll команд, дедуп, backoff
 internal/reconcile/     политика авто-прогрева: очередь, приоритеты, лимиты, backoff
+internal/stats/         опциональная статистика в PostgreSQL: срезы по кластерам, diff образов
+                        на нодах, события сборщика мусора, перепулы и лог pull-задач (ADR-002)
 internal/web/           hub-роутер (server.go) + spoke-роутер (server_spoke.go) + hub-ручки
                         outbound-канала (server_spoke_hub.go), embed статики
 internal/web/static/    index.html, app.js, styles.css — без сборки и npm

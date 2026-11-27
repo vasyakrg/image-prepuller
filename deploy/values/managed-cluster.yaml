@@ -43,7 +43,8 @@ spoke:
   # warmed in this cluster. "" = every workload.
   workloadSelector: "prepull=true"
   # Agents run on workers only (see agent.* below): control-plane nodes are out
-  # of scope and never show up as offline slots. Set "" to include them.
+  # of scope and never show up as offline slots. This is the chart default too;
+  # set "" (plus agent.tolerations) only if control-plane coverage is wanted.
   nodeLabelSelector: "!node-role.kubernetes.io/control-plane"
   # Exactly one replica in outbound mode: the hub command queue assumes a single
   # spoke replica.

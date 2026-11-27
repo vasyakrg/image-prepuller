@@ -24,8 +24,10 @@ API v1), транспорт провайдер→агент — `internal/provid
 
 Область действия ограничена метками: `-workload-selector`/`PREPULLER_WORKLOAD_SELECTOR`
 (в чарте по умолчанию `prepull=true`) и `-node-selector`/`PREPULLER_NODE_SELECTOR`
-(overlay исключает control-plane). Всё, что не попало в селектор, не листится, не
-показывается, не считается в покрытии и не прогревается.
+(чарт по умолчанию `!node-role.kubernetes.io/control-plane`, потому что DaemonSet
+агента ставится только на воркеры). Всё, что не попало в селектор, не листится, не
+показывается, не считается в покрытии и не прогревается. Флаги бинаря по умолчанию
+пустые (все ноды/workload'ы) — дефолт области действия задаёт именно чарт.
 
 Управляемый кластер подключается к hub'у двумя способами: **прямой** (hub → spoke по
 HTTP, `hub.remoteClusters`/`PREPULLER_REMOTE_CLUSTERS`) и **outbound** (spoke сам ходит
@@ -93,7 +95,8 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
   Директива поднята с 1.24 в 2026-11 вместе с патчами x/net и grpc, патч-уровень
   зафиксирован отдельно: `govulncheck` сверяет стандартную библиотеку тулчейна с базой
   уязвимостей, а 1.26.0 содержал 37 известных проблем (см. ADR-001, «Обновление»).
-- **Зависимости — только по ADR-001** ([docs/adr/0001-dependencies.md](docs/adr/0001-dependencies.md)).
+- **Зависимости — только по ADR** ([ADR-001](docs/adr/0001-dependencies.md) — CRI/client-go,
+  [ADR-002](docs/adr/0002-postgres-statistics.md) — драйвер PostgreSQL для статистики).
   Разрешённые импорты по пакетам:
 
   | Пакет | Можно импортировать |
@@ -106,6 +109,7 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
   | `internal/spokeclient` | stdlib + `internal/model`, `internal/provider` |
   | `internal/reconcile` | stdlib + `internal/model`, `internal/provider` |
   | `internal/tasks` | stdlib + `internal/model` |
+  | `internal/stats` | stdlib + `internal/model` + `github.com/jackc/pgx/v5/stdlib` (только в `postgres.go`) |
   | `internal/testutil` | stdlib + внутренние пакеты |
 
   `go.mod`/`go.sum` — зона интегратора: feature-ветки их не меняют, новая зависимость
@@ -142,6 +146,7 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 | `internal/provider/k8s_registry.go` | резолв кредов реестра из `imagePullSecrets` workload'ов: `.dockerconfigjson`/`.dockercfg`, матчинг хоста по правилам distribution, кэш Secret (5 мин / 1 мин на ошибку), индекс image → secret'ы из снапшота |
 | `internal/reconcile/` | политика авто-прогрева: очередь, приоритеты (failed > missing, prod > staging > infra), лимиты, backoff |
 | `internal/tasks/` | hub-история pull-задач: upsert по cluster+id, фильтр по состоянию, пагинация, ограничение ёмкости (активные не вытесняются), персистентность JSONL (атомная компакция, битые строки пропускаются) |
+| `internal/stats/` | опциональная статистика в PostgreSQL (ADR-002): срез по кластерам, diff присутствия образов на нодах, события сборщика мусора, перепулы с лагом «удалён → перетянут», лог pull-задач, samples нод; `Collector` (чистый diff), `Postgres` (SQL), `Run` (цикл hub'а, best effort) |
 | `internal/testutil/` | фейковый spoke/hub, golden-снапшот v2, контрактные тесты |
 | `cmd/prepuller/agent.go` | `runAgent()`: флаги агента, запуск HTTP/JSON сервера, graceful shutdown |
 | `.github/workflows/ci.yaml` | **Единственный** CI на GitHub: гейты `test` (gofmt, vet, test, build linux/amd64+arm64, гейт зависимостей ADR-001, `govulncheck`) и `helm` (lint/template), затем `image` (buildx amd64+arm64, публикация в GHCR на `GITHUB_TOKEN`, теги `sha-*`/latest/версия, `needs: [test, helm]`) и `chart` (OCI-чарт, только с релизного тега `v*` и `needs: [test, helm, image]`) |
@@ -402,9 +407,15 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
   `TestSnapshotHandlerEmitsArrays`).
 - **Чарт 0.6.0: `hub.workloadSelector`/`spoke.workloadSelector` по умолчанию `prepull=true`.**
   Это поведенческое (ломающее) изменение: без метки workload'ы не видны и не прогреваются.
-  Снять ограничение — `--set hub.workloadSelector=`. Overlay'и дополнительно ставят
-  `nodeLabelSelector: "!node-role.kubernetes.io/control-plane"` и больше не дают агенту
-  toleration control-plane.
+  Снять ограничение — `--set hub.workloadSelector=`.
+- **Чарт 0.9.x: область действия нод и `mock` заданы дефолтами чарта.**
+  `hub.nodeLabelSelector` и `spoke.nodeLabelSelector` по умолчанию
+  `!node-role.kubernetes.io/control-plane` (агенты — только на воркерах): без этого
+  control-plane ноды всю жизнь висели в UI как offline-слоты, а снапшот — `partial`.
+  Overlay'и оставляют значение явно только как напоминание. `spoke.mock` по умолчанию
+  `false`: раскатка не поднимает демо-данные; `true` — только витрина/UI-разработка.
+  Helm-гейт CI проверяет, что дефолтный рендер несёт оба селектора и нигде нет `-mock`.
+  Нужен control-plane — `agent.tolerations` **и** пустой селектор.
 - **Ломающие изменения values 0.4.0 → 0.5.0**: мониторинг переехал в раздел
   компонента, чьи серии он покрывает — `serviceMonitor.*` → `hub.serviceMonitor.*`,
   `prometheusRule.*` → `hub.prometheusRule.*`, `agent.serviceMonitor.*` →
@@ -496,7 +507,10 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
   архитектура, в `docs/architecture.md`.
 - [ ] Новые эндпоинты и middleware покрыты тестами; UI-путь проверен вручную
   (`-mock`, логин, pull, переключение кластера).
-- [ ] Не добавлено внешних зависимостей вне границ ADR-001 и шагов сборки фронтенда.
+- [ ] Не добавлено внешних зависимостей вне границ ADR-001/ADR-002 и шагов сборки фронтенда.
+- [ ] Статистика (если тронута): `go test ./internal/stats/` зелёный без реальной БД,
+  `helm template --set hub.stats.enabled=true --set hub.stats.dsn=...` содержит env/флаги,
+  а `hub.stats.enabled=true` без DSN падает на рендере.
 
 ## 10. Документация
 
@@ -505,8 +519,9 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 - Техническая — `docs/architecture.md`: топология, компоненты, auth-потоки, модель данных,
   состояния, pull-путь, метрики, план Stage 2–3.
 - Архитектурные решения — `docs/adr/`: `0001-dependencies.md` (Accepted: grpc+cri-api
-  в агенте, client-go в K8s-провайдере, GOPROXY-зеркало вместо vendor).
-  Новая зависимость без ADR не принимается.
+  в агенте, client-go в K8s-провайдере, GOPROXY-зеркало вместо vendor) и
+  `0002-postgres-statistics.md` (Accepted: `pgx/v5` только в `internal/stats` для
+  опциональной статистики). Новая зависимость без ADR не принимается.
 - Схемы — только Mermaid в markdown (рендерится в Gitea/GitHub/Obsidian); PNG-вставки
   допустимы только для главной схемы в README (см. исключение ниже) и должны
   пересобираться из JSON, а не рисоваться вручную. Меняя код, проверяйте, что диаграммы

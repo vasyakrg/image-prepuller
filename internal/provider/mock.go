@@ -583,10 +583,20 @@ func (m *MockProvider) TriggerPull(_ context.Context, req model.PullRequest) (mo
 	return out, nil
 }
 
+// TriggerWorkloadPull starts a pull for every image of one workload on every
+// node, mirroring K8sProvider: nodes whose agent is down are not skipped, they
+// get a visible failed task. A direct TriggerPull on such a node stays an error
+// (Provider invariant 4); only the operator-initiated workload warm-up records
+// the failure as a task, because skipping it would turn Pull All into a silent
+// no-op exactly when the operator wants to see which nodes are unreachable.
 func (m *MockProvider) TriggerWorkloadPull(ctx context.Context, req model.WorkloadPullRequest) (int, error) {
 	m.mu.RLock()
 	var images []string
-	var onlineNodes []string
+	type nodeState struct {
+		name   string
+		online bool
+	}
+	nodes := make([]nodeState, 0, len(m.nodes))
 	found := false
 	for _, w := range m.workloads {
 		if w.namespace == req.Namespace && strings.EqualFold(w.kind, req.Kind) && w.name == req.Name {
@@ -598,22 +608,28 @@ func (m *MockProvider) TriggerWorkloadPull(ctx context.Context, req model.Worklo
 		}
 	}
 	for _, n := range m.nodes {
-		if n.ready && n.agentUp {
-			onlineNodes = append(onlineNodes, n.name)
-		}
+		nodes = append(nodes, nodeState{name: n.name, online: n.ready && n.agentUp})
 	}
 	m.mu.RUnlock()
 
 	if !found {
 		return 0, fmt.Errorf("workload %s/%s/%s not found", req.Namespace, req.Kind, req.Name)
 	}
+	if len(images) == 0 {
+		return 0, fmt.Errorf("workload %s/%s/%s has no images", req.Namespace, req.Kind, req.Name)
+	}
 
 	triggered := 0
 	for _, img := range images {
-		for _, node := range onlineNodes {
+		for _, node := range nodes {
+			if !node.online {
+				m.failOfflineWorkloadTask(img, node.name, req.Actor, triggerOrDefault(req.Trigger))
+				triggered++
+				continue
+			}
 			if _, err := m.TriggerPull(ctx, model.PullRequest{
 				Image:   img,
-				Node:    node,
+				Node:    node.name,
 				Actor:   req.Actor,
 				Trigger: triggerOrDefault(req.Trigger),
 			}); err == nil {
@@ -622,6 +638,32 @@ func (m *MockProvider) TriggerWorkloadPull(ctx context.Context, req model.Worklo
 		}
 	}
 	return triggered, nil
+}
+
+// failOfflineWorkloadTask records a terminal failed task for a node without a
+// live agent (MockProvider parity with the K8sProvider task lifecycle).
+func (m *MockProvider) failOfflineWorkloadTask(image, node, actor string, trigger model.PullTrigger) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now()
+	m.taskSeq++
+	m.tasks = append(m.tasks, &model.PullTask{
+		ID:         fmt.Sprintf("task-%d", m.taskSeq),
+		Cluster:    m.clusterName,
+		Image:      image,
+		Node:       node,
+		State:      model.TaskFailed,
+		Attempt:    1,
+		Trigger:    trigger,
+		Actor:      actor,
+		CreatedAt:  now,
+		StartedAt:  &now,
+		FinishedAt: &now,
+		Error:      fmt.Sprintf("node %q is offline / agent unreachable", node),
+	})
+	m.pullCounts[fmt.Sprintf("%s|%s|error", image, node)]++
+	m.trimLocked()
 }
 
 func (m *MockProvider) CancelPull(_ context.Context, taskID string) error {

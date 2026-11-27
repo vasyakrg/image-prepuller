@@ -19,6 +19,7 @@ import (
 	"github.com/local/image-prepuller/internal/provider"
 	"github.com/local/image-prepuller/internal/reconcile"
 	"github.com/local/image-prepuller/internal/spokeclient"
+	"github.com/local/image-prepuller/internal/stats"
 	"github.com/local/image-prepuller/internal/tasks"
 	"github.com/local/image-prepuller/internal/web"
 )
@@ -54,6 +55,11 @@ func runController(args []string) {
 	hubSync := fs.Duration("hub-sync-interval", hubSyncIntervalFromEnv(), "Spoke only: how often the outbound spoke pushes cluster state to the hub")
 	pullHistoryFile := fs.String("pull-history-file", os.Getenv("PREPULLER_PULL_HISTORY_FILE"), "Hub only: JSONL file keeping a bounded pull-task history across restarts (empty = memory only). Point it at a writable volume, e.g. /var/lib/prepuller/pull-tasks.jsonl")
 	pullHistoryLimit := fs.Int("pull-history-limit", pullHistoryLimitFromEnv(), "Hub only: maximum number of pull tasks kept in the history (default 2000, PREPULLER_PULL_HISTORY_LIMIT)")
+	statsDSN := fs.String("stats-dsn", os.Getenv("PREPULLER_STATS_DSN"), "Hub only: PostgreSQL DSN of the statistics pipeline (image lifetimes, collector activity, re-pulls, pull-task log). Empty disables it")
+	statsInterval := fs.Duration("stats-interval", durationFromEnv("PREPULLER_STATS_INTERVAL", 30*time.Second), "Hub only: how often every cluster is sampled for the statistics pipeline")
+	statsTimeout := fs.Duration("stats-timeout", durationFromEnv("PREPULLER_STATS_TIMEOUT", 15*time.Second), "Hub only: per-cluster snapshot timeout of one statistics sample")
+	statsRetention := fs.Duration("stats-retention", durationFromEnv("PREPULLER_STATS_RETENTION", 90*24*time.Hour), "Hub only: how long statistics rows are kept (older rows are pruned)")
+	statsPrune := fs.Duration("stats-prune-interval", durationFromEnv("PREPULLER_STATS_PRUNE_INTERVAL", 24*time.Hour), "Hub only: how often the statistics retention prune runs")
 	_ = fs.Parse(args)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -230,6 +236,16 @@ func runController(args []string) {
 	}
 	serverOpts = append(serverOpts, web.WithTaskHistory(taskHistory))
 
+	// Optional PostgreSQL statistics pipeline: image lifetimes on nodes, the
+	// image collector's cleanups, re-pull frequency/lag and the pull-task log.
+	// Disabled without a DSN; the hub never blocks on it (best effort).
+	startStatistics(ctx, reg, *statsDSN, stats.Config{
+		Interval:        *statsInterval,
+		SnapshotTimeout: *statsTimeout,
+		Retention:       *statsRetention,
+		PruneInterval:   *statsPrune,
+	})
+
 	webSrv, err := web.NewServer(reg, authMgr, serverOpts...)
 	if err != nil {
 		log.Fatalf("init web server: %v", err)
@@ -322,6 +338,85 @@ func pullHistoryLimitFromEnv() int {
 		return fallback
 	}
 	return n
+}
+
+// startStatistics runs the optional PostgreSQL statistics pipeline: every
+// cluster registered on the hub is sampled on an interval, diffed into image
+// presence intervals, GC events, re-pulls and a pull-task log, and written to
+// the database. No DSN means no statistics and no extra goroutine.
+//
+// The hub must not depend on the database: a failed connect is retried with
+// backoff, a failed write is logged and retried by the next sample (the
+// collector only commits a diff after a successful write), and a write outage
+// never blocks the UI, the metrics scrape or a pull.
+func startStatistics(ctx context.Context, reg *provider.Registry, dsn string, cfg stats.Config) {
+	dsn = strings.TrimSpace(dsn)
+	if dsn == "" {
+		return
+	}
+	ids := reg.AllIDs()
+	clusters := make([]stats.Cluster, 0, len(ids))
+	for _, id := range ids {
+		entry, ok := reg.Get(id)
+		if !ok {
+			continue
+		}
+		clusters = append(clusters, stats.Cluster{ID: id, Snapshot: entry.Provider.Snapshot})
+	}
+	if len(clusters) == 0 {
+		log.Printf("statistics: no clusters registered, pipeline not started")
+		return
+	}
+	go func() {
+		backoff := time.Second
+		for {
+			if ctx.Err() != nil {
+				return
+			}
+			store, err := stats.OpenPostgres(ctx, dsn)
+			if err != nil {
+				log.Printf("statistics: PostgreSQL unavailable (%v), retrying in %s", err, backoff)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(backoff):
+				}
+				if backoff < time.Minute {
+					backoff *= 2
+				}
+				continue
+			}
+			backoff = time.Second
+			log.Printf("statistics: writing to PostgreSQL every %s, retention %s, clusters: %s",
+				cfg.Interval, cfg.Retention, strings.Join(ids, ","))
+			// Run owns the store: it closes it when the context is canceled.
+			stats.Run(ctx, cfg, clusters, store, log.Printf)
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("statistics: writer stopped, reconnecting")
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+		}
+	}()
+}
+
+// durationFromEnv resolves a positive duration from an environment variable,
+// falling back to the built-in default with a warning on a malformed value.
+func durationFromEnv(name string, fallback time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		log.Printf("%s=%q is not a positive duration, using %s", name, raw, fallback)
+		return fallback
+	}
+	return d
 }
 
 // managedCluster is one entry of PREPULLER_MANAGED_CLUSTERS.

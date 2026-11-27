@@ -191,6 +191,31 @@ jobs:
           grep -q -- '-node-selector=!node-role.kubernetes.io/control-plane' /tmp/hub-cluster.yaml
           grep -q -- '-workload-selector=prepull=true' /tmp/managed-cluster.yaml
           grep -q -- '-node-selector=!node-role.kubernetes.io/control-plane' /tmp/managed-cluster.yaml
+          # The scope defaults must hold without any overlay: control-plane nodes
+          # are out of scope on the hub and on the spoke (agents run on workers),
+          # and nothing may run with -mock (a rollout would show demo data).
+          grep -q -- '-node-selector=!node-role.kubernetes.io/control-plane' /tmp/default.yaml
+          grep -q -- '-node-selector=!node-role.kubernetes.io/control-plane' /tmp/full.yaml
+          ! grep -q -- '-mock' /tmp/default.yaml || { echo "default render passes -mock"; exit 1; }
+          ! grep -q -- '-mock' /tmp/full.yaml || { echo "full render passes -mock"; exit 1; }
+          ! grep -q -- '-mock' /tmp/hub-cluster.yaml || { echo "hub overlay passes -mock"; exit 1; }
+          ! grep -q -- '-mock' /tmp/managed-cluster.yaml || { echo "managed overlay passes -mock"; exit 1; }
+          # The PostgreSQL statistics pipeline is opt-in: off by default (no env,
+          # no flags, no connection) and explicit when enabled. Enabling it
+          # without a DSN must fail the render with a clear message.
+          ! grep -q 'PREPULLER_STATS_DSN' /tmp/default.yaml || { echo "stats pipeline enabled by default"; exit 1; }
+          helm template ci deploy/helm/image-prepuller \
+            --set hub.stats.enabled=true \
+            --set hub.stats.dsn=postgres://prepuller:ci@db.example.com:5432/prepuller \
+            > /tmp/stats.yaml
+          grep -q 'PREPULLER_STATS_DSN' /tmp/stats.yaml
+          grep -q -- '-stats-interval=30s' /tmp/stats.yaml
+          grep -q -- '-stats-retention=2160h' /tmp/stats.yaml
+          if helm template ci deploy/helm/image-prepuller --set hub.stats.enabled=true \
+            > /tmp/stats-invalid.log 2>&1; then
+            echo "expected helm template to fail for hub.stats.enabled without a DSN"; exit 1
+          fi
+          grep -q 'hub.stats.enabled=true requires' /tmp/stats-invalid.log
           # An empty selector must render no flag at all (manage everything).
           helm template ci deploy/helm/image-prepuller --set hub.workloadSelector= \
             --set hub.nodeLabelSelector= > /tmp/unscoped.yaml
@@ -217,7 +242,7 @@ jobs:
             || python3 -m pip install --quiet --break-system-packages pyyaml
           python3 - <<'PY'
           import yaml
-          for path in ("/tmp/default.yaml", "/tmp/full.yaml", "/tmp/agent-only.yaml", "/tmp/hub-only.yaml", "/tmp/hub-cluster.yaml", "/tmp/managed-cluster.yaml", "/tmp/spoke-outbound.yaml"):
+          for path in ("/tmp/default.yaml", "/tmp/full.yaml", "/tmp/agent-only.yaml", "/tmp/hub-only.yaml", "/tmp/hub-cluster.yaml", "/tmp/managed-cluster.yaml", "/tmp/spoke-outbound.yaml", "/tmp/stats.yaml"):
               with open(path) as fh:
                   docs = [d for d in yaml.safe_load_all(fh) if d]
               if not docs:

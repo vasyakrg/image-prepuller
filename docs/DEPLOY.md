@@ -98,9 +98,11 @@ Secret. Ключи в Secret:
 | — | `PREPULLER_REMOTE_CLUSTERS` | hub | Direct-режим: опциональный список spoke `name=url=token,...`; hub должен уметь достучаться до URL. |
 | `managed-clusters` | `PREPULLER_MANAGED_CLUSTERS` | hub | Outbound-режим: список управляемых кластеров `name=token,...` (токен = `cluster-token` релиза этого spoke). Значение берётся из `hub.managedClusters`; ключ читается с `optional: true`, поэтому старый `existingSecret` без него не ломает hub. Malformed-запись или дубликат имени — hub не стартует. |
 | — | `PREPULLER_WORKLOAD_SELECTOR` | hub + spoke | Kubernetes label selector workload'ов в области действия (в чарте `hub.workloadSelector` / `spoke.workloadSelector`, по умолчанию `prepull=true`). Пусто — все workload'ы. |
-| — | `PREPULLER_NODE_SELECTOR` | hub + spoke | Kubernetes label selector нод в области действия (в чарте `hub.nodeLabelSelector` / `spoke.nodeLabelSelector`). Пусто — все ноды. |
+| — | `PREPULLER_NODE_SELECTOR` | hub + spoke | Kubernetes label selector нод в области действия (в чарте `hub.nodeLabelSelector` / `spoke.nodeLabelSelector`, по умолчанию `!node-role.kubernetes.io/control-plane` — агенты на воркерах). Пусто — все ноды (нужны `agent.tolerations` для control-plane taint). |
 | — | `PREPULLER_LOGIN_ATTEMPTS_PER_MINUTE` | hub | Опциональный rate-limit логина (по умолчанию 5/мин); проверяется hub. |
 | — | `PREPULLER_LOGIN_BLOCK` | hub | Опциональная длительность блокировки после превышения попыток (Go duration, например `5m`). |
+| — | `PREPULLER_STATS_DSN` | hub | DSN внешней PostgreSQL для статистики (`hub.stats`). Значение НЕ из этого Secret: чарт берёт его из `hub.stats.existingSecret` (ключ `hub.stats.secretKey`, по умолчанию `stats-dsn`) или из `hub.stats.dsn`. Пусто — статистика выключена. DSN содержит пароль и никогда не пишется в лог. |
+| — | `PREPULLER_STATS_INTERVAL` / `_TIMEOUT` / `_RETENTION` / `_PRUNE_INTERVAL` | hub | Только при включённой статистике: период среза (30s), таймаут снапшота кластера (15s), срок хранения (2160h), период прунинга (24h). |
 | — | `PREPULLER_NODE_NAME` | agent | Имя ноды; DaemonSet ставит его из `spec.nodeName`. |
 | — | `PREPULLER_CRI_SOCKET` | agent | Путь к сокету CRI, по умолчанию `/run/containerd/containerd.sock`. |
 
@@ -859,13 +861,16 @@ helm upgrade --install prepuller deploy/helm/image-prepuller \
   снапшота (14.7);
 - ```hub.workloadSelector``` / ```hub.nodeLabelSelector``` — область действия:
   по умолчанию только workload'ы с ```prepull=true``` и только воркер-ноды
-  (control-plane исключён, поэтому его «нет агента» не превращается в offline-слоты);
+  (это дефолт чарта: ```!node-role.kubernetes.io/control-plane```; control-plane
+  исключён, поэтому его «нет агента» не превращается в offline-слоты);
   агенты ставятся на воркеры, toleration для control-plane не нужна;
 - ```hub.tolerations``` — та же toleration для hub: если в кластере нет
   untainted worker-нод (небольшой Talos), без неё под hub'а останется Pending;
 - ```agent.pull.*``` оставлены на дефолтах;
 - ```hub.ingress.*``` — хост, класс, issuer cert-manager;
-- ```agent.metrics.enabled=true``` — Service метрик на ```:9444``` (14.8).
+- ```agent.metrics.enabled=true``` — Service метрик на ```:9444``` (14.8);
+- ```hub.stats.*``` — выключено; включается, когда нужна история работы с образами
+  в PostgreSQL (14.12).
 
 Опубликованный OCI-чарт работает с тем же overlay:
 
@@ -1148,3 +1153,61 @@ LoadBalancer/Ingress и зарегистрируйте его в `hub.remoteClus
   `source` = `history`, если история включена, и `snapshot`, если нет. Бейдж в меню
   обновляется каждые 2 s и считает активные задачи плюс завершённые за последние 30 s —
   поэтому короткий pull виден, даже если снапшот (5 s) его не поймал.
+
+### 14.12 Статистика в PostgreSQL (образы, сборщик мусора, перепулы)
+
+Нужно понимать, как часто сборщик мусора вычищает образы на нодах, сколько живёт образ,
+как часто агенты тянут его заново и какой лаг между удалением и перепулом. Метрики этого
+не сохраняют (они показывают только «сейчас»), поэтому hub умеет писать историю во внешнюю
+PostgreSQL. По умолчанию **выключено** и на работу hub'а не влияет (best effort).
+
+1. Создайте базу и пользователя (пример для managed PostgreSQL):
+
+   ```sql
+   CREATE DATABASE prepuller;
+   CREATE USER prepuller WITH PASSWORD '<password>';
+   GRANT ALL PRIVILEGES ON DATABASE prepuller TO prepuller;
+   \c prepuller
+   GRANT ALL ON SCHEMA public TO prepuller;  -- нужен CREATE TABLE
+   ```
+
+2. Положите DSN в Secret (не в values: там пароль):
+
+   ```bash
+   kubectl -n prepuller create secret generic prepuller-pg \
+     --from-literal=stats-dsn='postgres://prepuller:<password>@db.example.com:5432/prepuller?sslmode=require'
+   ```
+
+3. Включите в релизе и обновите hub:
+
+   ```yaml
+   hub:
+     stats:
+       enabled: true
+       existingSecret: prepuller-pg   # ключ stats-dsn
+       interval: 30s                  # как часто снимается срез
+       retention: 2160h               # 90 дней
+   ```
+
+4. Проверка: в логе hub'а `statistics: writing to PostgreSQL every 30s, retention 2160h`,
+   а в базе появляются строки:
+
+   ```bash
+   kubectl -n prepuller logs deploy/prepuller-image-prepuller | grep statistics
+   psql "$DSN" -c 'select cluster, node, count(*) from prepuller_node_samples group by 1,2 order by 1,2;'
+   psql "$DSN" -c 'select node, occurred_at, removed_count, removed_bytes from prepuller_gc_events order by occurred_at desc limit 10;'
+   psql "$DSN" -c 'select image, removed_at, finished_at, lag_seconds from prepuller_repulls order by finished_at desc limit 10;'
+   ```
+
+Таблицы (`prepuller_image_presence`, `prepuller_gc_events`, `prepuller_repulls`,
+`prepuller_tasks`, `prepuller_node_samples`) и готовые SQL-запросы — в
+[README](../README.md#статистика-в-postgresql-опционально). Схема создаётся при первом
+подключении.
+
+- **БД недоступна — hub не падает.** В лог уходит `statistics: PostgreSQL unavailable (...),
+  retrying in ...` с backoff до минуты; срез не коммитится, следующий тик повторит тот же
+  diff. Пароль DSN в лог не попадает.
+- **Срез — это diff снапшотов, а не поток CRI.** Удаление, замеченное между двумя срезами,
+  относится к окну `window_seconds`: при `interval: 30s` точность «когда собрал GC» — до 30 s.
+- **Выключить** — `hub.stats.enabled=false` (или пустой `PREPULLER_STATS_DSN`).
+

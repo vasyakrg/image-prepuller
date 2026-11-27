@@ -114,9 +114,13 @@
   }
 
   let toastTimer = null;
-  function showToast(msg) {
+  // kind "error" paints the toast red (inline, no stylesheet change) for the
+  // state-changing actions that report "nothing happened".
+  function showToast(msg, kind = "info") {
     const el = $("toast");
     el.textContent = msg;
+    el.style.borderColor = kind === "error" ? "var(--red)" : "";
+    el.style.color = kind === "error" ? "var(--red)" : "";
     el.classList.remove("hidden");
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => el.classList.add("hidden"), 3000);
@@ -511,10 +515,18 @@
             method: "POST",
             body: JSON.stringify({ cluster: state.activeCluster, namespace: btn.dataset.ns, kind: btn.dataset.kind, name: btn.dataset.name }),
           });
-          showToast(`Запущен pull на ${res.triggered} слотах`);
+          const triggered = Number(res.triggered) || 0;
+          if (triggered === 0) {
+            showToast("Прогрев не запущен: ни одной задачи не создано", "error");
+          } else {
+            showToast(`Прогрев запущен: ${triggered} задач`);
+          }
+          // Tasks are created asynchronously; refresh them right away instead of
+          // waiting for the next 2 s task poll tick, so Pull All shows results.
+          await Promise.all([refreshTaskPage({ silent: true }), pollTaskBadge()]);
           await refresh();
         } catch (err) {
-          showToast(`Ошибка: ${err.message}`);
+          showToast(`Ошибка: ${err.message}`, "error");
         }
       });
     });

@@ -12,12 +12,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	kubefake "k8s.io/client-go/kubernetes/fake"
+	clienttesting "k8s.io/client-go/testing"
 
 	"github.com/local/image-prepuller/internal/model"
 )
@@ -828,18 +830,58 @@ func TestAgentTriggerPullIdempotentAndCancel(t *testing.T) {
 	}
 }
 
+// waitNodeTasksInState waits until the provider holds at least want tasks for
+// node in the given terminal state.
+func waitNodeTasksInState(t *testing.T, provider *K8sProvider, node string, want int, state model.TaskState) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got := 0
+		for _, task := range provider.agent.tasksSnapshot() {
+			if task.Node == node && task.State == state {
+				got++
+			}
+		}
+		if got >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("node %s has %d tasks in %q, want at least %d", node, got, state, want)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func countNodeTasks(provider *K8sProvider, node string) int {
+	count := 0
+	for _, task := range provider.agent.tasksSnapshot() {
+		if task.Node == node {
+			count++
+		}
+	}
+	return count
+}
+
 func TestAgentTriggerWorkloadPull(t *testing.T) {
-	agent := &fakeAgent{imageFS: agentImageFS{UsedBytes: agentTestGB, CapacityBytes: 100 * agentTestGB}}
+	agent := &fakeAgent{
+		imageFS:  agentImageFS{UsedBytes: agentTestGB, CapacityBytes: 100 * agentTestGB},
+		pullWait: make(chan struct{}),
+	}
 	server := startFakeAgent(t, agent)
 	provider := newAgentProvider(t, server, []runtime.Object{
 		testNodeWithIP("worker-01", "127.0.0.1", true),
-		testNode("worker-02", true), // no InternalIP -> agent unreachable
+		testNodeWithIP("worker-02", "127.0.0.1", true),
+		testNode("worker-03", true), // no InternalIP -> agent unreachable
 		testDeployment("prod", "app", 1,
 			[]corev1.Container{
 				testContainer("app", "ghcr.io/acme/app:1.0.0", corev1.PullIfNotPresent),
 				testContainer("sidecar", "ghcr.io/acme/sidecar:2.0.0", corev1.PullIfNotPresent),
 			}, nil),
+		testDeployment("prod", "empty", 1, nil, nil),
 	})
+	// Release the blocked live pulls on every exit path, otherwise httptest's
+	// server cleanup waits for the handlers and the test hangs on failure.
+	t.Cleanup(func() { close(agent.pullWait) })
 
 	triggered, err := provider.TriggerWorkloadPull(context.Background(), model.WorkloadPullRequest{
 		Namespace: "prod", Kind: "Deployment", Name: "app", Actor: "carol", Trigger: model.TriggerManual,
@@ -847,25 +889,208 @@ func TestAgentTriggerWorkloadPull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TriggerWorkloadPull: %v", err)
 	}
-	// 2 images x 1 node with a live agent: TriggerWorkloadPull counts starts, and
-	// the pulls themselves run asynchronously.
-	if triggered != 2 {
-		t.Fatalf("triggered = %d, want 2", triggered)
+	// 2 images x 3 nodes in scope: the node without a live agent is no longer
+	// skipped, it gets its own task too. The pulls run asynchronously.
+	if triggered != 6 {
+		t.Fatalf("triggered = %d, want 6 (2 images x 3 nodes)", triggered)
 	}
+
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, pullCalls := agent.stats(); pullCalls >= 2 {
+		if _, pullCalls := agent.stats(); pullCalls >= 4 {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if _, pullCalls := agent.stats(); pullCalls != 2 {
-		t.Fatalf("agent pull calls = %d, want 2", pullCalls)
+	if _, pullCalls := agent.stats(); pullCalls != 4 {
+		t.Fatalf("agent pull calls = %d, want 4 (both live nodes)", pullCalls)
+	}
+
+	// The offline node's tasks fail with the agent-unavailable cause instead of
+	// being dropped from Pull All.
+	waitNodeTasksInState(t, provider, "worker-03", 2, model.TaskFailed)
+	for _, task := range provider.agent.tasksSnapshot() {
+		if task.Node == "worker-03" && !strings.Contains(task.Error, ErrAgentUnavailable.Error()) {
+			t.Fatalf("offline task error = %q, want ErrAgentUnavailable", task.Error)
+		}
+	}
+
+	// Idempotent second call: the running tasks on both live nodes are reported
+	// again as triggered, without starting another agent pull.
+	triggeredAgain, err := provider.TriggerWorkloadPull(context.Background(), model.WorkloadPullRequest{
+		Namespace: "prod", Kind: "Deployment", Name: "app", Actor: "carol", Trigger: model.TriggerManual,
+	})
+	if err != nil {
+		t.Fatalf("second TriggerWorkloadPull: %v", err)
+	}
+	if triggeredAgain != 6 {
+		t.Fatalf("second triggered = %d, want 6", triggeredAgain)
+	}
+	if _, pullCalls := agent.stats(); pullCalls != 4 {
+		t.Fatalf("second call started duplicate pulls: %d, want 4 total", pullCalls)
+	}
+	for _, node := range []string{"worker-01", "worker-02"} {
+		if got := countNodeTasks(provider, node); got != 2 {
+			t.Fatalf("live node %s tasks = %d, want 2 (idempotent)", node, got)
+		}
+	}
+
+	// A listed workload without images is an explicit error, never "triggered 0".
+	if _, err := provider.TriggerWorkloadPull(context.Background(), model.WorkloadPullRequest{
+		Namespace: "prod", Kind: "Deployment", Name: "empty",
+	}); err == nil || !strings.Contains(err.Error(), "has no images") {
+		t.Fatalf("empty workload error = %v, want has no images", err)
 	}
 	if _, err := provider.TriggerWorkloadPull(context.Background(), model.WorkloadPullRequest{
 		Namespace: "prod", Kind: "Deployment", Name: "missing",
 	}); err == nil {
 		t.Fatalf("unknown workload must return an error")
+	}
+}
+
+// TestAgentTriggerWorkloadPullUsesCachedSnapshot verifies Pull All does not pay
+// for a cold snapshot on every click: the outbound spoke executes the command
+// under a 5 s round-trip budget, while a fresh build polls node agents one by one.
+func TestAgentTriggerWorkloadPullUsesCachedSnapshot(t *testing.T) {
+	agent := &fakeAgent{
+		imageFS:  agentImageFS{UsedBytes: agentTestGB, CapacityBytes: 100 * agentTestGB},
+		pullWait: make(chan struct{}),
+	}
+	server := startFakeAgent(t, agent)
+	cs := kubefake.NewSimpleClientset(
+		testNodeWithIP("worker-01", "127.0.0.1", true),
+		testDeployment("prod", "app", 1,
+			[]corev1.Container{testContainer("app", "ghcr.io/acme/app:1.0.0", corev1.PullIfNotPresent)}, nil),
+	)
+	var listCalls atomic.Int64
+	cs.PrependReactor("list", "*", func(clienttesting.Action) (bool, runtime.Object, error) {
+		listCalls.Add(1)
+		return false, nil, nil
+	})
+	now := time.Date(2026, 11, 27, 10, 0, 0, 0, time.UTC)
+	provider := NewK8sProviderWithClientset("test-cluster", cs,
+		WithAgentPort(agentPort(t, server)),
+		WithAgentScheme("http"),
+		withClock(func() time.Time { return now }),
+	)
+	t.Cleanup(func() { close(agent.pullWait) })
+
+	req := model.WorkloadPullRequest{
+		Namespace: "prod", Kind: "Deployment", Name: "app", Actor: "carol", Trigger: model.TriggerManual,
+	}
+	// No cached snapshot yet: the first Pull All builds one (deployments +
+	// statefulsets + daemonsets + nodes = 4 list calls).
+	if triggered, err := provider.TriggerWorkloadPull(context.Background(), req); err != nil || triggered != 1 {
+		t.Fatalf("first TriggerWorkloadPull = %d, %v; want 1, nil", triggered, err)
+	}
+	if got := listCalls.Load(); got != 4 {
+		t.Fatalf("cold Pull All list calls = %d, want 4", got)
+	}
+	if snapshots, _ := agent.stats(); snapshots != 1 {
+		t.Fatalf("cold Pull All agent snapshots = %d, want 1", snapshots)
+	}
+
+	// Past the TTL the cached snapshot is still reused: no cluster re-list, no
+	// sequential node-agent poll.
+	now = now.Add(DefaultSnapshotTTL + time.Second)
+	if triggered, err := provider.TriggerWorkloadPull(context.Background(), req); err != nil || triggered != 1 {
+		t.Fatalf("cached TriggerWorkloadPull = %d, %v; want 1, nil", triggered, err)
+	}
+	if got := listCalls.Load(); got != 4 {
+		t.Fatalf("cached Pull All re-listed the cluster: %d list calls, want 4", got)
+	}
+	if snapshots, _ := agent.stats(); snapshots != 1 {
+		t.Fatalf("cached Pull All re-polled the node agents: %d snapshots, want 1", snapshots)
+	}
+}
+
+// TestMockTriggerWorkloadPullCoversEveryNode keeps demo mode honest: Pull All
+// must create a task for every image on every node, including the mock's offline
+// node (talos-worker-04), where the task ends failed instead of being skipped.
+func TestMockTriggerWorkloadPullCoversEveryNode(t *testing.T) {
+	m := NewMockProvider("demo")
+	req := model.WorkloadPullRequest{
+		Namespace: "prod", Kind: "Deployment", Name: "api-gateway", Actor: "carol", Trigger: model.TriggerManual,
+	}
+
+	// prod/api-gateway has 2 images, the mock has 4 nodes -> 8 tasks. Exactly
+	// the 2 tasks on the offline node are terminal failures.
+	triggered, err := m.TriggerWorkloadPull(context.Background(), req)
+	if err != nil {
+		t.Fatalf("TriggerWorkloadPull: %v", err)
+	}
+	if triggered != 8 {
+		t.Fatalf("triggered = %d, want 8 (2 images x 4 nodes)", triggered)
+	}
+
+	tasks := m.Snapshot(context.Background()).Tasks
+	if len(tasks) != 8 {
+		t.Fatalf("tasks = %d, want 8: %+v", len(tasks), tasks)
+	}
+	perNode := make(map[string]int)
+	offlineFailed := 0
+	for _, task := range tasks {
+		perNode[task.Node]++
+		if task.Node != "talos-worker-04" {
+			if task.State != model.TaskRunning && task.State != model.TaskQueued {
+				t.Fatalf("online task on %s = %q, want running/queued", task.Node, task.State)
+			}
+			continue
+		}
+		if task.State != model.TaskFailed {
+			t.Fatalf("offline task = %+v, want failed", task)
+		}
+		if !strings.Contains(task.Error, "offline") {
+			t.Fatalf("offline task error = %q, want an offline/agent-unreachable cause", task.Error)
+		}
+		offlineFailed++
+	}
+	if offlineFailed != 2 || perNode["talos-worker-04"] != 2 {
+		t.Fatalf("offline node tasks = %d (per node %v), want 2", offlineFailed, perNode)
+	}
+	for _, node := range []string{"talos-worker-01", "talos-worker-02", "talos-worker-03"} {
+		if perNode[node] != 2 {
+			t.Fatalf("node %s tasks = %d, want 2", node, perNode[node])
+		}
+	}
+
+	// Idempotent second call: active online tasks are reused and counted again.
+	triggeredAgain, err := m.TriggerWorkloadPull(context.Background(), req)
+	if err != nil {
+		t.Fatalf("second TriggerWorkloadPull: %v", err)
+	}
+	if triggeredAgain != 8 {
+		t.Fatalf("second triggered = %d, want 8", triggeredAgain)
+	}
+	activeOnNode := func(node string) int {
+		count := 0
+		for _, task := range m.Snapshot(context.Background()).Tasks {
+			if task.Node == node && task.State.Active() {
+				count++
+			}
+		}
+		return count
+	}
+	if got := activeOnNode("talos-worker-01"); got != 2 {
+		t.Fatalf("online node active tasks = %d, want 2 (idempotent)", got)
+	}
+
+	// A direct pull on an offline node stays an error (Provider invariant 4);
+	// only Pull All materialises it as a failed task.
+	if _, err := m.TriggerPull(context.Background(), model.PullRequest{
+		Image: "ghcr.io/acme/api-gateway:1.14.2", Node: "talos-worker-04",
+	}); err == nil {
+		t.Fatalf("TriggerPull on offline node = nil error, want offline error")
+	}
+
+	// A workload without images is an explicit error, not a silent zero.
+	m.mu.Lock()
+	m.workloads = append(m.workloads, mockWorkloadDef{namespace: "prod", kind: "Deployment", name: "empty"})
+	m.mu.Unlock()
+	if _, err := m.TriggerWorkloadPull(context.Background(), model.WorkloadPullRequest{
+		Namespace: "prod", Kind: "Deployment", Name: "empty",
+	}); err == nil || !strings.Contains(err.Error(), "has no images") {
+		t.Fatalf("empty workload error = %v, want has no images", err)
 	}
 }
 

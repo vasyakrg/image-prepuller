@@ -116,6 +116,29 @@ hub:
     # /var/lib/prepuller, so the claim must be writable by uid/gid 65532 (the
     # distroless nonroot image). Leave empty to use an emptyDir (best effort).
     existingClaim: ""
+  # Optional PostgreSQL statistics pipeline (docs/adr/0002-postgres-statistics.md):
+  # every cluster is sampled on an interval and the hub writes image lifetimes on
+  # nodes, image-collector (GC) activity, re-pull frequency and removal -> re-pull
+  # lag, plus a log of every executed pull task, into an external database.
+  # Disabled by default: no DSN -> no goroutine, no connection, no volume. The hub
+  # never blocks on it (a write outage is logged and retried by the next sample),
+  # and the DSN (it carries a password) is never logged.
+  stats:
+    enabled: false
+    # DSN, e.g. postgres://prepuller:<password>@db.example.com:5432/prepuller?sslmode=require
+    # Prefer existingSecret in production so the password stays out of values.
+    dsn: ""
+    # Secret holding the DSN; the chart reads hub.stats.secretKey from it.
+    existingSecret: ""
+    secretKey: stats-dsn
+    # How often each cluster is sampled (PREPULLER_STATS_INTERVAL).
+    interval: 30s
+    # Per-cluster snapshot timeout of one sample (PREPULLER_STATS_TIMEOUT).
+    snapshotTimeout: 15s
+    # Rows older than this are pruned (PREPULLER_STATS_RETENTION).
+    retention: 2160h
+    # How often the retention prune runs (PREPULLER_STATS_PRUNE_INTERVAL).
+    pruneInterval: 24h
   # Optional login rate-limit overrides (PREPULLER_LOGIN_ATTEMPTS_PER_MINUTE /
   # PREPULLER_LOGIN_BLOCK). Empty = internal/auth defaults.
   loginRateLimit:
@@ -140,12 +163,14 @@ hub:
   # the product warms only what is explicitly opted in. Empty string = every
   # workload. Example: "prepull=true".
   workloadSelector: "prepull=true"
-  # Kubernetes label selector of the nodes in scope ("" = every node). When the
-  # agent DaemonSet runs on workers only, exclude control-plane nodes here and
-  # their missing agents stop showing up as offline slots/warnings:
-  # "!node-role.kubernetes.io/control-plane". Nodes outside the scope are not
-  # shown, not counted in coverage and never pulled to.
-  nodeLabelSelector: ""
+  # Kubernetes label selector of the nodes in scope ("" = every node). The
+  # chart default excludes control-plane nodes because the agent DaemonSet runs
+  # on workers only (it does not tolerate the control-plane taint): with an empty
+  # selector their missing agents showed up as offline slots and kept the
+  # snapshot permanently partial. Nodes outside the scope are not shown, not
+  # counted in coverage and never pulled to. Set "" to include control-plane
+  # nodes (together with agent.tolerations) or a cluster-specific selector.
+  nodeLabelSelector: "!node-role.kubernetes.io/control-plane"
   service:
     type: ClusterIP
     httpPort: 8080
@@ -231,7 +256,10 @@ spoke:
   # Headless backend for one managed cluster. Deploy one release (or one
   # spoke.enabled release) per spoke cluster; the hub reaches it over HTTPS.
   enabled: false
-  mock: true
+  # false -> the live K8sProvider + node agents (production). true runs the
+  # in-memory demo data (-mock) and must never be the default: a rollout would
+  # show fake clusters, workloads and pulls instead of the real cluster state.
+  mock: false
   clusterName: talos-prod-kz
   replicaCount: 1
   # Outbound ("pull") mode: the spoke dials the hub ingress instead of being
@@ -245,9 +273,11 @@ spoke:
     # How often the spoke pushes cluster state to the hub.
     syncInterval: 3s
   # Workload/node scope of this spoke (same meaning as under hub: the spoke runs
-  # its own K8sProvider against the cluster it manages).
+  # its own K8sProvider against the cluster it manages). Control-plane nodes are
+  # out of scope by default for the same reason as on the hub: agents run on
+  # workers only. Set "" (and agent.tolerations) to cover them too.
   workloadSelector: "prepull=true"
-  nodeLabelSelector: ""
+  nodeLabelSelector: "!node-role.kubernetes.io/control-plane"
   service:
     type: ClusterIP
     httpPort: 8081

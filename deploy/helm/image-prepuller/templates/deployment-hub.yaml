@@ -1,4 +1,14 @@
 {{- if .Values.hub.enabled }}
+{{- /*
+  Optional statistics pipeline: the hub writes to an external PostgreSQL. A
+  missing DSN must fail the render instead of silently starting a disabled
+  pipeline, because "enabled" is an explicit operator decision.
+*/}}
+{{- if .Values.hub.stats.enabled }}
+{{- if and (not .Values.hub.stats.dsn) (not .Values.hub.stats.existingSecret) }}
+{{- fail "hub.stats.enabled=true requires hub.stats.dsn or hub.stats.existingSecret (with hub.stats.secretKey, default stats-dsn)" }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -57,6 +67,12 @@ spec:
             {{- with .Values.hub.nodeLabelSelector }}
             - {{ printf "-node-selector=%s" . | quote }}
             {{- end }}
+            {{- if .Values.hub.stats.enabled }}
+            - -stats-interval={{ .Values.hub.stats.interval }}
+            - -stats-timeout={{ .Values.hub.stats.snapshotTimeout }}
+            - -stats-retention={{ .Values.hub.stats.retention }}
+            - -stats-prune-interval={{ .Values.hub.stats.pruneInterval }}
+            {{- end }}
           env:
             - name: PREPULLER_AUTH_USER
               valueFrom:
@@ -107,6 +123,20 @@ spec:
                   name: {{ include "ip.secretName" . }}
                   key: managed-clusters
                   optional: true
+            {{- if .Values.hub.stats.enabled }}
+            {{- /* The DSN carries a database password: prefer existingSecret and
+                   never log the value (the app redacts it from errors). */}}
+            {{- if .Values.hub.stats.existingSecret }}
+            - name: PREPULLER_STATS_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.hub.stats.existingSecret }}
+                  key: {{ .Values.hub.stats.secretKey }}
+            {{- else }}
+            - name: PREPULLER_STATS_DSN
+              value: {{ .Values.hub.stats.dsn | quote }}
+            {{- end }}
+            {{- end }}
             {{- with .Values.hub.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

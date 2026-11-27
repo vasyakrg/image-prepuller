@@ -470,3 +470,49 @@ func TestSnapshotFeedsTaskHistory(t *testing.T) {
 		t.Fatalf("history after snapshot = %+v (total %d), want feed-1", got, total)
 	}
 }
+
+// TestWorkloadPullHandlerTriggersEveryNode keeps the POST /api/v1/workloads/pull
+// contract honest: the response is {"triggered": n} with n covering every node
+// in scope, and Pull All no longer hides offline nodes (MockProvider marks their
+// tasks failed, so they are visible in the task list right away).
+func TestWorkloadPullHandlerTriggersEveryNode(t *testing.T) {
+	mock := provider.NewMockProvider("demo")
+	srv, cookie := taskHistoryServer(t, "demo", mock, nil)
+
+	rec := doAuthed(srv, http.MethodPost, "/api/v1/workloads/pull",
+		`{"cluster":"demo","namespace":"prod","kind":"Deployment","name":"api-gateway"}`, cookie)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("workload pull = %d, want 202: %s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Triggered int `json:"triggered"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode workload pull response: %v (%s)", err, rec.Body.String())
+	}
+	// prod/api-gateway has 2 images and the mock has 4 nodes, one of them offline.
+	if response.Triggered != 8 {
+		t.Fatalf("triggered = %d, want 8 (2 images x 4 nodes)", response.Triggered)
+	}
+
+	failed := decodePullTasks(t, doAuthed(srv, http.MethodGet,
+		"/api/v1/pull-tasks?cluster=demo&state=failed", "", cookie))
+	if failed.Total != 2 {
+		t.Fatalf("failed tasks = %d, want 2 for the offline node: %+v", failed.Total, failed.Tasks)
+	}
+	for _, task := range failed.Tasks {
+		if task.Node != "talos-worker-04" || task.State != model.TaskFailed {
+			t.Fatalf("failed task = %+v, want talos-worker-04 failed", task)
+		}
+		if !strings.Contains(task.Error, "offline") {
+			t.Fatalf("failed task error = %q, want offline/agent-unreachable cause", task.Error)
+		}
+	}
+
+	// An unknown workload is still a 400 with the regular error envelope.
+	rec = doAuthed(srv, http.MethodPost, "/api/v1/workloads/pull",
+		`{"cluster":"demo","namespace":"prod","kind":"Deployment","name":"missing"}`, cookie)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"error"`) {
+		t.Fatalf("unknown workload = %d: %s, want 400 with error", rec.Code, rec.Body.String())
+	}
+}

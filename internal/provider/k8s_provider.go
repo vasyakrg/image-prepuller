@@ -79,6 +79,20 @@ type snapshotCache struct {
 	valid     bool
 }
 
+// cachedSnapshot returns the last built snapshot even after its TTL has expired.
+// TriggerWorkloadPull uses it for operator-initiated warm-ups: a cold build lists
+// the cluster and polls every node agent sequentially, which does not fit the 5 s
+// round trip of the outbound spoke command transport. Only an empty cache forces
+// a fresh Snapshot; SyncNow and a finished pull still invalidate the cache.
+func (p *K8sProvider) cachedSnapshot() (model.Snapshot, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.cache.valid {
+		return model.Snapshot{}, false
+	}
+	return p.cache.snapshot, true
+}
+
 // K8sOption customizes K8sProvider construction.
 type K8sOption func(*K8sProvider)
 
