@@ -613,6 +613,24 @@ func TestAgentTriggerPullDiskPaused(t *testing.T) {
 	}
 }
 
+func TestAgentPullTimeoutIsConfigurable(t *testing.T) {
+	// The agent never answers: only the provider-side pull deadline can end it.
+	agent := &fakeAgent{pullWait: make(chan struct{})}
+	server := startFakeAgent(t, agent)
+	provider := newAgentProvider(t, server, []runtime.Object{
+		testNodeWithIP("worker-01", "127.0.0.1", true),
+	}, WithAgentPullTimeout(20*time.Millisecond))
+
+	started := time.Now()
+	_, err := provider.TriggerPull(context.Background(), model.PullRequest{Image: "acme/app:1.0.0", Node: "worker-01"})
+	if !errors.Is(err, ErrAgentUnavailable) {
+		t.Fatalf("TriggerPull error = %v, want ErrAgentUnavailable (deadline exceeded)", err)
+	}
+	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
+		t.Fatalf("pull waited %s, want it bounded by the configured pull timeout", elapsed)
+	}
+}
+
 func TestAgentTriggerPullFailures(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -624,6 +642,7 @@ func TestAgentTriggerPullFailures(t *testing.T) {
 		{name: "cri failure", status: http.StatusBadGateway, errorBody: "cri pull failed: not found", wantErr: ErrAgentUnavailable, wantSubstr: "cri pull failed"},
 		{name: "unauthorized", status: http.StatusUnauthorized, errorBody: "unauthorized", wantErr: ErrAgentUnauthorized, wantSubstr: "401"},
 		{name: "server error", status: http.StatusInternalServerError, errorBody: "boom", wantErr: ErrAgentUnavailable, wantSubstr: "500"},
+		{name: "stalled pull", status: http.StatusGatewayTimeout, errorBody: "pull stalled: image filesystem stopped growing", wantErr: ErrAgentPullStalled, wantSubstr: "stalled"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

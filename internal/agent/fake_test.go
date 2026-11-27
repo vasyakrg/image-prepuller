@@ -27,6 +27,11 @@ type fakeCRI struct {
 	statusErr  error
 	pullErr    error
 	pulls      []string
+
+	// pullHook, when set, replaces the mock pull so a test can simulate a hung
+	// or stalled CRI call. fsHook does the same for ImageFS sampling.
+	pullHook func(ctx context.Context, image string) (string, error)
+	fsHook   func(ctx context.Context) (ImageFSStats, error)
 }
 
 func newFakeCRI() *fakeCRI { return &fakeCRI{MockBackend: NewMockBackend()} }
@@ -49,6 +54,9 @@ func (f *fakeCRI) PullImage(ctx context.Context, image string) (string, error) {
 	f.mu.Lock()
 	f.pulls = append(f.pulls, image)
 	f.mu.Unlock()
+	if f.pullHook != nil {
+		return f.pullHook(ctx, image)
+	}
 	if f.pullErr != nil {
 		return "", f.pullErr
 	}
@@ -56,6 +64,9 @@ func (f *fakeCRI) PullImage(ctx context.Context, image string) (string, error) {
 }
 
 func (f *fakeCRI) ImageFS(ctx context.Context) (ImageFSStats, error) {
+	if f.fsHook != nil {
+		return f.fsHook(ctx)
+	}
 	if f.fsErr != nil {
 		return ImageFSStats{}, f.fsErr
 	}
@@ -87,5 +98,8 @@ func testConfig() Config {
 		NodeName:       "talos-worker-01",
 		ListenAddr:     "127.0.0.1:0",
 		DiskPauseRatio: 0.78,
+		// The fixture images live on registry.internal, which does not resolve;
+		// tests that exercise the preflight probe opt back in explicitly.
+		DisableRegistryProbe: true,
 	}
 }

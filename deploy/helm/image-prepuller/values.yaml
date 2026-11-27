@@ -161,6 +161,21 @@ agent:
   # HTTP/JSON listen address of the agent (cmd/prepuller/agent.go -listen-addr).
   port: 9443
   diskPauseRatio: 0.78
+  # Pull hygiene: a pull into a dead registry must not hold an image x node slot
+  # for ten minutes (cmd/prepuller/agent.go, internal/agent/server.go).
+  pull:
+    # Bound on one whole CRI pull (backstop for genuinely slow downloads).
+    timeout: 10m
+    # Dial the registry before pulling so a black-holed registry fails in
+    # seconds instead of minutes. Disable when containerd pulls through a
+    # registry mirror or an HTTP proxy from its own config: the runtime can
+    # reach the image, a direct dial from the agent cannot.
+    registryProbe: true
+    registryProbeTimeout: 5s
+    # Cancel a pull that stops growing the image filesystem: the CRI pull API
+    # has no progress callback, so this is the only stall signal the agent has.
+    stallWatch: true
+    stallTimeout: 60s
   resources:
     requests:
       cpu: 20m

@@ -254,6 +254,21 @@ DaemonSet; spoke, ingress и NetworkPolicy — отдельными блокам
 | `-cri-socket` | `/run/containerd/containerd.sock` | Unix-сокет CRI |
 | `-token` | `""` | Bearer-токен для `/agent/v1/*`; пусто — без проверки |
 | `-disk-pause-ratio` | `0.78` | Порог ImageFS, после которого pull отклоняется с 409 |
+| `-pull-timeout` | `10m` | Потолок одного pull через CRI (страховка для действительно долгих загрузок) |
+| `-registry-probe` | `true` | Перед pull агент проверяет TCP-доступность реестра: мёртвый реестр отваливается за секунды, а не за 10 минут |
+| `-registry-probe-timeout` | `5s` | Таймаут preflight-пробы реестра |
+| `-pull-stall-watch` | `true` | Отменять pull, который перестал растить ImageFS (единственный сигнал прогресса, который даёт CRI) |
+| `-pull-stall-timeout` | `60s` | Окно без прогресса, после которого pull считается зависшим (ответ агенту — 504) |
+
+Pull-гигиена node-agent: мёртвый реестр (TCP-соединение висит) больше не занимает слот
+image×node на все 10 минут. Агент сначала делает TCP-пробу реестра (5 s) и отдаёт
+`502 registry unreachable`; если реестр соединение принимает, но данные не идут, watchdog
+следит за ростом ImageFS и через 60 s без прогресса отменяет pull, отдавая `504 pull
+stalled`. Hub превращает 504 в `provider.ErrAgentPullStalled` → HTTP 504 для UI, задача
+сразу переходит в `failed`. Если containerd тянет образы через **registry mirror** или
+**HTTP-прокси** (прокси задан в конфиге containerd, а не в окружении агента), пробу надо
+выключить (`-registry-probe=false`, Helm: `agent.pull.registryProbe=false`): containerd
+достаёт образ, а прямой dial из агента — нет.
 
 ## Переменные окружения
 

@@ -179,6 +179,7 @@ func TestPullErrorStatus(t *testing.T) {
 		{fmt.Errorf("pull: %w", provider.ErrAgentDiskPaused), http.StatusConflict},
 		{fmt.Errorf("pull: %w", provider.ErrAgentUnauthorized), http.StatusBadGateway},
 		{fmt.Errorf("pull: %w", provider.ErrAgentUnavailable), http.StatusBadGateway},
+		{fmt.Errorf("pull: %w", provider.ErrAgentPullStalled), http.StatusGatewayTimeout},
 		{fmt.Errorf("pull: %w", provider.ErrSpokeUnauthorized), http.StatusBadGateway},
 		{fmt.Errorf("pull: %w", provider.ErrSpokeUnavailable), http.StatusBadGateway},
 		{provider.ErrNotImplemented, http.StatusNotImplemented},
@@ -203,6 +204,7 @@ func TestSpokePullErrorStatuses(t *testing.T) {
 		{fmt.Errorf("agent: %w", provider.ErrAgentDiskPaused), http.StatusConflict},
 		{fmt.Errorf("agent: %w", provider.ErrAgentUnavailable), http.StatusBadGateway},
 		{fmt.Errorf("agent: %w", provider.ErrAgentUnauthorized), http.StatusBadGateway},
+		{fmt.Errorf("agent: %w", provider.ErrAgentPullStalled), http.StatusGatewayTimeout},
 	}
 	for _, tc := range cases {
 		mux := NewSpokeServer(errProvider{err: tc.err}, "")

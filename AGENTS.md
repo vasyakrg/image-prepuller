@@ -104,7 +104,7 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
 | `internal/web/server_spoke.go` | spoke-роутер `/internal/v1/*` (contract v2) |
 | `internal/web/static/` | UI: `index.html`, `app.js`, `styles.css` |
 | `internal/metrics/prometheus.go` | сборка `/metrics` по всем кластерам |
-| `internal/agent/` | node-agent: CRI-клиент (grpc+cri-api), инвентарь образов, disk-guard, HTTP/JSON API v1 |
+| `internal/agent/` | node-agent: CRI-клиент (grpc+cri-api), инвентарь образов, disk-guard, preflight-проба реестра и stall-watchdog pull (`registry.go`), HTTP/JSON API v1 |
 | `internal/provider/k8s_*.go` | `K8sProvider` на client-go: list Deployments/STS/DS и Node, слоты image×node, policy-warnings, TTL-кэш снапшота; транспорт к node-agent (snapshot + pull, HTTP/JSON v1, Bearer, таймауты) и `NewK8sProviderFromEnv` |
 | `internal/reconcile/` | политика авто-прогрева: очередь, приоритеты (failed > missing, prod > staging > infra), лимиты, backoff |
 | `internal/testutil/` | фейковый spoke/hub, golden-снапшот v2, контрактные тесты |
@@ -211,6 +211,19 @@ KEEP=1 bash hack/e2e-k3d.sh # оставить кластер для разбо�
   `errors.Is(err, provider.ErrAgentDiskPaused)`; недоступный агент — `502` (`ErrAgentUnavailable`).
   `k8s_nodes.go` опрашивает ноды последовательно, поэтому при массовом недоступе агентов
   снапшот тормозит до `WithAgentTimeout` (5 s) на ноду.
+- **Pull-гигиена агента: probe реестра + stall watchdog.** Pull синхронный, и CRI не даёт
+  прогресса, поэтому зависший реестр раньше держал слот до `DefaultAgentPullTimeout`
+  (10 min) и выглядел в UI как «медленная загрузка». Теперь агент сначала делает TCP-пробу
+  реестра (`Config.RegistryProbeTimeout`, 5 s; `-registry-probe=false` выключает — нужно при
+  pull через registry mirror или containerd-прокси: агент ходит напрямую, containerd — нет) и
+  отдаёт `502` с `ErrRegistryUnreachable`; затем, если pull идёт,
+  watchdog сэмплирует `ImageFS.UsedBytes` и через `PullStallTimeout` (60 s) без роста отменяет
+  pull и отдаёт `504` с `errPullStalled`. `DefaultPullTimeout` (10 min) остаётся страховкой для
+  честно долгих загрузок. Hub: 504 → `provider.ErrAgentPullStalled` → HTTP 504
+  (`pullErrorStatus`), задача сразу `failed`. Watchdog fail-open: если `ImageFS` не отвечает,
+  pull не валится. Сэмплирование `ImageFS` — единственный сигнал: не выключайте
+  `-pull-stall-watch`, не предложив другой; e2e проверяет отказ по мёртвому реестру
+  (`hack/e2e-k3d.sh` §9, < 60 s).
 - **`RemoteProvider.PullCounters()` ходит в `GET /internal/v1/counters`** (contract v2);
   при недоступном spoke возвращает `nil` — это по-прежнему значит «метрик нет», а не «ноль».
 - **Транспорт hub→spoke ретраит только идемпотентные state-changing вызовы** (pull, workload-pull, cancel, reconcile): 3 попытки, backoff 150 ms → 2 s, таймаут 5 s на попытку. `Snapshot`, `counters` и `health` ходят одним запросом, чтобы мёртвый spoke не тормозил UI и скрейп. `ErrSpokeUnavailable`/`ErrSpokeUnauthorized` → `502` (`pullErrorStatus`), `ErrTaskNotActive` → `409`.

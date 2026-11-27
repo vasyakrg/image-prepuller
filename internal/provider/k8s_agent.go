@@ -53,6 +53,9 @@ const (
 	// on :9443; TLS/mTLS terminates in front of the agent (WS-F).
 	DefaultAgentScheme = "http"
 	// DefaultAgentPullTimeout bounds one synchronous CRI pull through the agent.
+	// It is a backstop, not the stall detector: the agent itself fails a dead
+	// registry in seconds (registry probe) and cancels a pull that stops making
+	// progress after a minute (stall watchdog), see internal/agent/server.go.
 	DefaultAgentPullTimeout = 10 * time.Minute
 )
 
@@ -72,6 +75,11 @@ var (
 	// agent pull. There is no cancel endpoint on the agent wire contract yet, so
 	// the task keeps running to completion (or its timeout).
 	ErrCancelNotSupported = errors.New("cancel is not supported for synchronous node-agent pulls")
+	// ErrAgentPullStalled reports an agent 504: the pull timed out or stopped
+	// making progress and was cancelled by the agent. The node is healthy, the
+	// registry (or the layer download) is not, so the slot is released and the
+	// task fails fast instead of hanging until DefaultAgentPullTimeout.
+	ErrAgentPullStalled = errors.New("node agent pull stalled or timed out")
 )
 
 // Agent wire v1 response types (subset the hub needs).
@@ -127,10 +135,11 @@ type agentTransport struct {
 	clientset  kubernetes.Interface
 	httpClient *http.Client
 
-	port    int
-	scheme  string
-	token   string
-	timeout time.Duration
+	port        int
+	scheme      string
+	token       string
+	timeout     time.Duration
+	pullTimeout time.Duration
 
 	addrMu    sync.Mutex
 	addresses map[string]cachedNodeAddress
@@ -161,12 +170,13 @@ func newAgentTransport(clientset kubernetes.Interface) *agentTransport {
 				TLSHandshakeTimeout: 5 * time.Second,
 			},
 		},
-		port:      DefaultAgentPort,
-		scheme:    DefaultAgentScheme,
-		timeout:   DefaultAgentTimeout,
-		addresses: make(map[string]cachedNodeAddress),
-		tasks:     make(map[string]*model.PullTask),
-		active:    make(map[string]string),
+		port:        DefaultAgentPort,
+		scheme:      DefaultAgentScheme,
+		timeout:     DefaultAgentTimeout,
+		pullTimeout: DefaultAgentPullTimeout,
+		addresses:   make(map[string]cachedNodeAddress),
+		tasks:       make(map[string]*model.PullTask),
+		active:      make(map[string]string),
 	}
 }
 
@@ -197,6 +207,17 @@ func WithAgentTimeout(timeout time.Duration) K8sOption {
 	return func(p *K8sProvider) {
 		if p.agent != nil && timeout > 0 {
 			p.agent.timeout = timeout
+		}
+	}
+}
+
+// WithAgentPullTimeout bounds one synchronous pull through the agent (default
+// DefaultAgentPullTimeout). The agent fails a dead registry long before this
+// backstop; shorten it only when the hub must not hold a slot that long.
+func WithAgentPullTimeout(timeout time.Duration) K8sOption {
+	return func(p *K8sProvider) {
+		if p.agent != nil && timeout > 0 {
+			p.agent.pullTimeout = timeout
 		}
 	}
 }
@@ -525,10 +546,10 @@ func (p *K8sProvider) TriggerPull(ctx context.Context, req model.PullRequest) (m
 		return *existing, nil
 	}
 
-	pullCtx, cancel := context.WithTimeout(ctx, DefaultAgentPullTimeout)
+	pullCtx, cancel := context.WithTimeout(ctx, p.agent.pullTimeout)
 	defer cancel()
 
-	raw, err := p.agent.request(pullCtx, node, http.MethodPost, agentPullsPath, agentPullRequest{Image: image}, DefaultAgentPullTimeout)
+	raw, err := p.agent.request(pullCtx, node, http.MethodPost, agentPullsPath, agentPullRequest{Image: image}, p.agent.pullTimeout)
 	if err != nil {
 		p.agent.finishTask(task.ID, model.TaskFailed, err.Error())
 		p.agent.recordPull(image, node, "error")
@@ -700,6 +721,8 @@ func (a *agentTransport) request(ctx context.Context, node, method, path string,
 		return nil, fmt.Errorf("%w: node %q: http %d: %s", ErrAgentUnauthorized, node, resp.StatusCode, message)
 	case http.StatusConflict:
 		return nil, fmt.Errorf("%w: node %q: %s", ErrAgentDiskPaused, node, message)
+	case http.StatusGatewayTimeout:
+		return nil, fmt.Errorf("%w: node %q: %s", ErrAgentPullStalled, node, message)
 	default:
 		return nil, fmt.Errorf("%w: node %q: http %d: %s", ErrAgentUnavailable, node, resp.StatusCode, message)
 	}

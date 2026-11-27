@@ -22,6 +22,11 @@ func runAgent(args []string) {
 	diskPause := fs.Float64("disk-pause-ratio", 0.78, "Pause auto-prepull when ImageFS usage exceeds this ratio")
 	mock := fs.Bool("mock", false, "serve in-memory images instead of talking to containerd")
 	token := fs.String("token", envOr("PREPULLER_AGENT_TOKEN", ""), "Bearer token for the agent API (empty disables auth until WS-F)")
+	pullTimeout := fs.Duration("pull-timeout", agent.DefaultPullTimeout, "Bound on one whole CRI pull")
+	registryProbe := fs.Bool("registry-probe", true, "Dial the image registry before pulling; a dead registry then fails in seconds (disable when containerd pulls through a mirror)")
+	registryProbeTimeout := fs.Duration("registry-probe-timeout", agent.DefaultRegistryProbeTimeout, "Timeout of the registry preflight dial")
+	stallWatch := fs.Bool("pull-stall-watch", true, "Cancel a pull that stops growing the image filesystem")
+	pullStallTimeout := fs.Duration("pull-stall-timeout", agent.DefaultPullStallTimeout, "No-progress window before a pull is cancelled as stalled")
 	showVersion := fs.Bool("version", false, "print agent version and exit")
 	_ = fs.Parse(args)
 
@@ -37,6 +42,12 @@ func runAgent(args []string) {
 		DiskPauseRatio: *diskPause,
 		Mock:           *mock,
 		Token:          *token,
+
+		PullTimeout:           *pullTimeout,
+		RegistryProbeTimeout:  *registryProbeTimeout,
+		PullStallTimeout:      *pullStallTimeout,
+		DisableRegistryProbe:  !*registryProbe,
+		DisablePullStallWatch: !*stallWatch,
 	}
 	a, err := agent.New(cfg)
 	if err != nil {

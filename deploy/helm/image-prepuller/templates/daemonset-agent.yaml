@@ -45,6 +45,15 @@ spec:
             - -cri-socket={{ .Values.agent.criSocket }}
             - -listen-addr=:{{ .Values.agent.port }}
             - -disk-pause-ratio={{ .Values.agent.diskPauseRatio }}
+            - -pull-timeout={{ .Values.agent.pull.timeout }}
+            - -registry-probe-timeout={{ .Values.agent.pull.registryProbeTimeout }}
+            - -pull-stall-timeout={{ .Values.agent.pull.stallTimeout }}
+            {{- if not .Values.agent.pull.registryProbe }}
+            - -registry-probe=false
+            {{- end }}
+            {{- if not .Values.agent.pull.stallWatch }}
+            - -pull-stall-watch=false
+            {{- end }}
             {{- if .Values.agent.mock }}
             - -mock
             {{- end }}

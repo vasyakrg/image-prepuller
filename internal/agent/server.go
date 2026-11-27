@@ -29,7 +29,6 @@ const (
 	pullsPath       = "/agent/v1/pulls"
 	healthzPath     = "/healthz"
 	maxRequestBytes = 1 << 20
-	pullTimeout     = 10 * time.Minute
 	shutdownTimeout = 5 * time.Second
 )
 
@@ -71,7 +70,7 @@ func NewServer(cfg Config, cri CRI) (*Server, error) {
 	if cri == nil {
 		return nil, errors.New("agent: nil CRI backend")
 	}
-	s := &Server{cfg: cfg, cri: cri}
+	s := &Server{cfg: cfg.withDefaults(), cri: cri}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+healthzPath, s.handleHealth)
 	mux.HandleFunc("GET "+snapshotPath, s.withAuth(s.handleSnapshot))
@@ -174,11 +173,22 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pullCtx, cancel := context.WithTimeout(r.Context(), pullTimeout)
-	defer cancel()
-	imageRef, err := s.cri.PullImage(pullCtx, image)
+	// A dead registry must fail the pull fast instead of holding the slot for
+	// the whole PullTimeout; the probe answers reachability only.
+	if !s.cfg.DisableRegistryProbe {
+		if err := ProbeRegistry(r.Context(), image, s.cfg.RegistryProbeTimeout); err != nil {
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+	}
+
+	imageRef, err := s.pullImage(r.Context(), image)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		status := http.StatusBadGateway
+		if errors.Is(err, errPullStalled) || errors.Is(err, context.DeadlineExceeded) {
+			status = http.StatusGatewayTimeout
+		}
+		writeError(w, status, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, PullResult{
@@ -187,6 +197,100 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		ImageRef:   imageRef,
 		PulledAt:   time.Now().UTC(),
 	})
+}
+
+// errPullStalled reports a CRI pull that stopped growing the image filesystem
+// for Config.PullStallTimeout. The runtime is alive, the pull is not, so the
+// hub gets 504 instead of 502 and can tell it apart from a CRI failure.
+var errPullStalled = errors.New("pull stalled: image filesystem stopped growing")
+
+// stallCancelGrace bounds how long the handler waits for the runtime to unwind
+// a cancelled pull before it answers the hub anyway.
+const stallCancelGrace = 5 * time.Second
+
+type pullOutcome struct {
+	ref string
+	err error
+}
+
+// pullImage runs one CRI pull under the configured deadline and, unless the
+// stall watchdog is disabled, cancels it when the image filesystem stops
+// growing. The CRI pull API has no progress callback, so filesystem growth is
+// the only progress signal the agent can observe.
+func (s *Server) pullImage(ctx context.Context, image string) (string, error) {
+	pullCtx, cancel := context.WithTimeout(ctx, s.cfg.PullTimeout)
+	defer cancel()
+
+	done := make(chan pullOutcome, 1)
+	go func() {
+		ref, err := s.cri.PullImage(pullCtx, image)
+		done <- pullOutcome{ref: ref, err: err}
+	}()
+
+	if s.cfg.DisablePullStallWatch {
+		out := <-done
+		return out.ref, out.err
+	}
+	return s.watchPullProgress(ctx, cancel, done)
+}
+
+// watchPullProgress samples ImageFS usage while the pull runs and cancels it
+// once nothing has changed for the stall window. Sampling errors fail open: a
+// watchdog that cannot see the filesystem must never fail a healthy pull.
+// The signal is node-wide, so a parallel pull on the same node can mask a
+// stalled one; pulls are throttled per node by the reconciler and sharing the
+// image filesystem is exactly what the guard is about.
+func (s *Server) watchPullProgress(ctx context.Context, cancel context.CancelFunc, done <-chan pullOutcome) (string, error) {
+	stall := s.cfg.PullStallTimeout
+	interval := stallPollInterval
+	if quarter := stall / 4; quarter < interval {
+		interval = quarter
+	}
+	if interval <= 0 {
+		interval = 10 * time.Millisecond
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	used, sampled := s.imageFSUsed(ctx)
+	lastProgress := time.Now()
+	for {
+		select {
+		case out := <-done:
+			return out.ref, out.err
+		case <-ticker.C:
+			current, ok := s.imageFSUsed(ctx)
+			if !ok || !sampled {
+				used, sampled, lastProgress = current, ok, time.Now()
+				continue
+			}
+			if current != used {
+				used, lastProgress = current, time.Now()
+				continue
+			}
+			if time.Since(lastProgress) < stall {
+				continue
+			}
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(stallCancelGrace):
+			}
+			return "", fmt.Errorf("%w: no image filesystem growth for %s", errPullStalled, stall)
+		}
+	}
+}
+
+// imageFSUsed samples image filesystem usage for the stall watchdog. The second
+// return value is false when the runtime could not answer.
+func (s *Server) imageFSUsed(ctx context.Context) (int64, bool) {
+	fsCtx, cancel := context.WithTimeout(ctx, stallPollInterval)
+	defer cancel()
+	fs, err := s.cri.ImageFS(fsCtx)
+	if err != nil {
+		return 0, false
+	}
+	return fs.UsedBytes, true
 }
 
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {

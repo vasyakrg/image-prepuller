@@ -432,6 +432,14 @@ flowchart TD
    неизвестный id — `provider.ErrTaskNotFound` (hub отдаёт 404).
 5. `Pull All` не атомарен: возвращает счётчик успешно запущенных слотов, ошибки отдельных
    слотов проглатываются.
+6. **Зависший реестр не занимает слот.** В live-пути pull синхронный (hub → агент →
+   CRI `PullImage`), и CRI не даёт прогресса, поэтому агент ограничивает его сам:
+   preflight TCP-проба реестра (`-registry-probe-timeout`, 5 s) отдаёт
+   `502 registry unreachable`, а stall watchdog по отсутствию роста ImageFS
+   (`-pull-stall-timeout`, 60 s) — `504 pull stalled`. Hub превращает 504 в
+   `provider.ErrAgentPullStalled` (HTTP 504), задача сразу `failed`, слот
+   освобождается; `DefaultAgentPullTimeout` (10 min) остаётся страховкой для
+   действительно долгих загрузок. Подробности — AGENTS.md §8.
 
 ## 9. Метрики
 

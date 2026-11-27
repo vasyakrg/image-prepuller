@@ -305,6 +305,8 @@ func pullErrorStatus(err error) int {
 		return http.StatusConflict
 	case errors.Is(err, provider.ErrAgentUnauthorized):
 		return http.StatusBadGateway
+	case errors.Is(err, provider.ErrAgentPullStalled):
+		return http.StatusGatewayTimeout
 	case errors.Is(err, provider.ErrAgentUnavailable):
 		return http.StatusBadGateway
 	case errors.Is(err, provider.ErrSpokeUnauthorized):

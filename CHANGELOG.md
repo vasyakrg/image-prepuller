@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Pull в недоступный реестр больше не держит слот image×node до 10 минут. Node-agent
+  перед pull делает TCP-пробу реестра (`-registry-probe-timeout`, 5 s) и отдаёт
+  `502 registry unreachable` за секунды, а зависший посреди загрузки pull отменяет
+  stall watchdog по отсутствию роста ImageFS (`-pull-stall-timeout`, 60 s) с ответом
+  `504 pull stalled`. Hub различает это как `provider.ErrAgentPullStalled` → HTTP 504,
+  задача сразу переходит в `failed`; `-pull-timeout` (10 m) остаётся страховкой для
+  честно долгих загрузок, `WithAgentPullTimeout` позволяет укоротить её на стороне hub.
+  Пробу надо выключить (`-registry-probe=false`, Helm `agent.pull.registryProbe=false`),
+  если containerd тянет образы через registry mirror.
+- e2e: новый шаг 9 — pull в мёртвый реестр (TEST-NET-1 `192.0.2.1:5000`) обязан
+  завершиться ошибкой быстрее минуты.
+
 ### Security
 
 - Уязвимости в графе модулей (Dependabot: 5 алертов; `govulncheck`: 10 достижимых путей)

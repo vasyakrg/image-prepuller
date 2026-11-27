@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func newTestServer(t *testing.T, token string) (*Server, *fakeCRI) {
@@ -235,5 +238,114 @@ func TestServeGracefulShutdown(t *testing.T) {
 func TestNewServerRejectsNilCRI(t *testing.T) {
 	if _, err := NewServer(testConfig(), nil); err == nil {
 		t.Fatal("NewServer(nil CRI) = nil error")
+	}
+}
+
+func TestPullFailsFastOnDeadRegistry(t *testing.T) {
+	stubRegistryDial(t, func(ctx context.Context, _, _ string) (net.Conn, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	srv, f := newTestServer(t, "")
+	srv.cfg.DisableRegistryProbe = false
+	srv.cfg.RegistryProbeTimeout = 50 * time.Millisecond
+
+	started := time.Now()
+	rec := doRequest(t, srv.Handler(), http.MethodPost, pullsPath, `{"image":"192.0.2.1:5000/dead:1"}`, "")
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "registry unreachable") {
+		t.Fatalf("error body = %s", rec.Body.String())
+	}
+	if calls := f.pullCalls(); len(calls) != 0 {
+		t.Fatalf("CRI was asked to pull into a dead registry: %v", calls)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("dead registry pull took %s, want it bounded by the probe timeout", elapsed)
+	}
+}
+
+func TestPullRegistryProbeCanBeDisabled(t *testing.T) {
+	stubRegistryDial(t, func(context.Context, string, string) (net.Conn, error) {
+		return nil, errors.New("probe must not run")
+	})
+	srv, f := newTestServer(t, "")
+	srv.cfg.DisableRegistryProbe = true
+
+	rec := doRequest(t, srv.Handler(), http.MethodPost, pullsPath, `{"image":"registry.internal/new:1.0.0"}`, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if calls := f.pullCalls(); len(calls) != 1 {
+		t.Fatalf("CRI pull calls = %v", calls)
+	}
+}
+
+func TestPullStallWatchdogCancelsStalledPull(t *testing.T) {
+	srv, f := newTestServer(t, "")
+	srv.cfg.PullStallTimeout = 100 * time.Millisecond
+	srv.cfg.PullTimeout = 10 * time.Second
+	// The pull never finishes on its own and the image filesystem never grows:
+	// a registry that accepts connections and then stalls.
+	f.pullHook = func(ctx context.Context, _ string) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+
+	started := time.Now()
+	rec := doRequest(t, srv.Handler(), http.MethodPost, pullsPath, `{"image":"registry.internal/stuck:1.0.0"}`, "")
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status = %d, want 504: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "stalled") {
+		t.Fatalf("error body = %s", rec.Body.String())
+	}
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("stalled pull was cancelled after %s, want it near the stall window", elapsed)
+	}
+}
+
+func TestPullStallWatchdogKeepsProgressingPull(t *testing.T) {
+	srv, f := newTestServer(t, "")
+	srv.cfg.PullStallTimeout = 100 * time.Millisecond
+	srv.cfg.PullTimeout = 10 * time.Second
+	// The pull takes longer than the stall window but keeps growing the image
+	// filesystem, so the watchdog must leave it alone.
+	var mu sync.Mutex
+	used := int64(1)
+	f.fsHook = func(context.Context) (ImageFSStats, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		used += 1 << 20
+		return ImageFSStats{UsedBytes: used}, nil
+	}
+	f.pullHook = func(ctx context.Context, image string) (string, error) {
+		select {
+		case <-time.After(300 * time.Millisecond):
+			return "sha256:" + image, nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+
+	rec := doRequest(t, srv.Handler(), http.MethodPost, pullsPath, `{"image":"registry.internal/slow:1.0.0"}`, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPullTimeoutWithoutStallWatch(t *testing.T) {
+	srv, f := newTestServer(t, "")
+	srv.cfg.DisablePullStallWatch = true
+	srv.cfg.PullTimeout = 100 * time.Millisecond
+	f.pullHook = func(ctx context.Context, _ string) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+
+	rec := doRequest(t, srv.Handler(), http.MethodPost, pullsPath, `{"image":"registry.internal/hang:1.0.0"}`, "")
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status = %d, want 504: %s", rec.Code, rec.Body.String())
 	}
 }

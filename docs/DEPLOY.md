@@ -301,6 +301,25 @@ security groups if the network is not private. On k3s/k3d the CRI socket lives a
 `--set agent.criSocket=/run/k3s/containerd/containerd.sock`; the default
 `/run/containerd/containerd.sock` is right for kubeadm/Docker/containerd nodes.
 
+### Pull hygiene
+
+A pull into a dead registry used to hold an image x node slot for the whole
+`DefaultAgentPullTimeout` (10 min) and looked exactly like a slow download. The
+agent now bounds it in two steps (values under `agent.pull`):
+
+| Value | Default | Effect |
+| --- | --- | --- |
+| `agent.pull.registryProbe` | `true` | TCP-dial the registry before pulling; a black-holed registry fails in seconds with `502 registry unreachable` |
+| `agent.pull.registryProbeTimeout` | `5s` | Probe timeout |
+| `agent.pull.stallWatch` | `true` | Cancel a pull that stops growing the image filesystem (CRI has no progress callback) |
+| `agent.pull.stallTimeout` | `60s` | No-progress window before the pull is cancelled with `504 pull stalled` |
+| `agent.pull.timeout` | `10m` | Backstop for a genuinely slow download |
+
+Turn the probe off (`--set agent.pull.registryProbe=false`) when containerd pulls
+through a **registry mirror** or a **proxy configured in containerd**: the runtime can
+reach the image, while a direct dial from the agent cannot. The hub maps both answers onto failed pull tasks and
+returns `502`/`504` to the UI, so the slot is released instead of hanging.
+
 The agent API is protected by the `agent-token` Secret key
 (`PREPULLER_AGENT_TOKEN`); empty disables auth. The hub must be given the same
 token when its K8sProvider client is wired in. Check the agent directly:

@@ -17,9 +17,10 @@
 #      cachedImageCount>0, syncStatus=ok, partial=false;
 #   3. policy violations для :latest+Always;
 #   4. авто-прогрев ставит pull-задачи;
-#   5. потеря агента на ноде → offline-слот, partial=true, hub продолжает работать;
-#   6. возврат агента → полное восстановление;
-#   7. метрики Stage 2/3 на /metrics.
+#   5. pull в мёртвый реестр отвергается быстрее минуты (probe + stall watchdog);
+#   6. потеря агента на ноде → offline-слот, partial=true, hub продолжает работать;
+#   7. возврат агента → полное восстановление;
+#   8. метрики Stage 2/3 на /metrics.
 set -euo pipefail
 
 CLUSTER="${E2E_CLUSTER:-prepuller-e2e}"
@@ -29,8 +30,8 @@ IMAGE="${E2E_IMAGE:-image-prepuller:e2e}"
 IMAGE_REPO="${E2E_IMAGE_REPO:-image-prepuller}"
 IMAGE_TAG="${E2E_IMAGE_TAG:-e2e}"
 CLUSTER_ID="${E2E_CLUSTER_ID:-talos-prod-eu}"
-PORT="${E2E_PORT:-18080}"
-METRICS_PORT="${E2E_METRICS_PORT:-19090}"
+PORT="${E2E_PORT:-}"
+METRICS_PORT="${E2E_METRICS_PORT:-}"
 KEEP="${KEEP:-0}"
 
 TMP="$(mktemp -d)"
@@ -40,8 +41,8 @@ TMP="$(mktemp -d)"
 export KUBECONFIG="$TMP/kubeconfig"
 : > "$KUBECONFIG"
 COOKIE_JAR="$TMP/cookies.txt"
-BASE="http://127.0.0.1:$PORT"
-METRICS="http://127.0.0.1:$METRICS_PORT/metrics"
+BASE=""
+METRICS=""
 PF_PID=""
 STARTED_AT=$SECONDS
 
@@ -65,6 +66,19 @@ cleanup() {
 trap cleanup EXIT
 
 require() { command -v "$1" >/dev/null 2>&1 || fail "нет $1 в PATH"; }
+
+# port_in_use <port> — занят ли TCP-порт на loopback. На хосте разработчика порт
+# 18080 может держать посторонний сервис; тогда port-forward не поднимается, а
+# curl уходит в чужой процесс (однажды так и вышло: чужой сервис отвечал 200 на
+# /healthz, и сценарий проверял не тот сервер).
+port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+
+# pick_free_port <port> — первый свободный порт, начиная с указанного.
+pick_free_port() {
+  local p=$1
+  while port_in_use "$p"; do p=$((p + 1)); done
+  printf '%s' "$p"
+}
 
 # --- помощники проверок -------------------------------------------------------
 
@@ -162,9 +176,14 @@ kubectl -n "$NAMESPACE" rollout status "ds/$RELEASE-image-prepuller-agent" --tim
 ok "hub и агенты в состоянии Ready"
 
 log "5. port-forward и авторизация"
+[ -n "$PORT" ] || PORT=$(pick_free_port 18080)
+[ -n "$METRICS_PORT" ] || METRICS_PORT=$(pick_free_port 19090)
+BASE="http://127.0.0.1:$PORT"
+METRICS="http://127.0.0.1:$METRICS_PORT/metrics"
 kubectl -n "$NAMESPACE" port-forward "svc/$RELEASE-image-prepuller" "$PORT:8080" "$METRICS_PORT:9090" >/dev/null 2>&1 &
 PF_PID=$!
 wait_http "$BASE/healthz" 60 || fail "hub не ответил на /healthz"
+kill -0 "$PF_PID" 2>/dev/null || fail "port-forward на $PORT не поднялся (порт занят? задайте E2E_PORT)"
 ok "hub отвечает на $BASE"
 
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/clusters")
@@ -206,7 +225,26 @@ done
 ok "pull-задачи есть: $(printf '%s' "$tasks" | jq -r '[.[] | .state] | group_by(.) | map("\(.[0])=\(length)") | join(", ")')"
 note "при недоступном реестре задача завершится failed — это ожидаемый сигнал, а не ошибка сценария"
 
-log "9. деградация: убираем агента с одной ноды"
+log "9. pull в мёртвый реестр: отказ быстрее минуты"
+node=$(snapshot | jq -r '.nodes[] | select(.agentUp == true) | .name' | head -1)
+[ -n "$node" ] || fail "нет ноды с живым агентом для проверки мёртвого реестра"
+# registry.invalid — TLD из RFC 2606: DNS не разрешается детерминированно в любом
+# окружении. Ошибка обязана прийти от preflight-пробы агента ("registry unreachable"),
+# а не от CRI: иначе pull снова живёт до DefaultAgentPullTimeout (10 минут).
+# Сам чёрный ход (TCP-соединение висит) проверяется юнит-тестами с подменённым
+# диалаером — в e2e такой адрес воспроизвести нельзя.
+resp=$(curl -sS -m 120 -o "$TMP/deadpull.json" -w '%{http_code} %{time_total}' \
+  -b "$COOKIE_JAR" -X POST "$BASE/api/v1/pull" -H 'Content-Type: application/json' \
+  -d "{\"cluster\":\"$CLUSTER_ID\",\"image\":\"registry.invalid/dead:1\",\"node\":\"$node\"}") \
+  || fail "POST /api/v1/pull для мёртвого реестра не отработал"
+code=${resp%% *}; elapsed=${resp##* }
+[ "$code" = "502" ] || fail "pull в мёртвый реестр вернул $code, ожидался 502: $(cat "$TMP/deadpull.json")"
+grep -q 'registry unreachable' "$TMP/deadpull.json" \
+  || fail "502 пришёл не от preflight-пробы агента: $(cat "$TMP/deadpull.json")"
+awk -v t="$elapsed" 'BEGIN{exit !(t < 60)}' || fail "pull в мёртвый реестр висел ${elapsed}s — больше минуты"
+ok "мёртвый реестр отвергнут за ${elapsed}s пробой агента: $(jq -r '.error' "$TMP/deadpull.json" | cut -c1-90)"
+
+log "10. деградация: убираем агента с одной ноды"
 kubectl -n "$NAMESPACE" patch ds "$RELEASE-image-prepuller-agent" --type=json -p \
   '[{"op":"add","path":"/spec/template/spec/affinity","value":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"kubernetes.io/hostname","operator":"NotIn","values":["k3d-'"$CLUSTER"'-agent-0"]}]}]}}}}]' >/dev/null
 wait_snapshot 240 '[.nodes[] | select(.agentUp == false)] | length >= 1' "нода без агента стала offline"
@@ -217,14 +255,14 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" "$BASE/api/v1/sna
 ok "hub продолжает отвечать (200) без одного агента"
 assert_snapshot '[.workloads[].images[].nodes[] | select(.state == "offline")] | length >= 1' "слоты потерянной ноды помечены offline"
 
-log "10. восстановление"
+log "11. восстановление"
 kubectl -n "$NAMESPACE" patch ds "$RELEASE-image-prepuller-agent" --type=json \
   -p '[{"op":"remove","path":"/spec/template/spec/affinity"}]' >/dev/null
 kubectl -n "$NAMESPACE" rollout status "ds/$RELEASE-image-prepuller-agent" --timeout=300s >/dev/null
 wait_snapshot 300 '.syncStatus == "ok" and .partial == false' "после возврата агента syncStatus=ok, partial=false"
 assert_snapshot '[.nodes[] | select(.agentUp == true)] | length == 3' "все агенты снова отвечают"
 
-log "11. метрики"
+log "12. метрики"
 curl -fsS "$METRICS" -o "$TMP/metrics.txt" || fail "метрики недоступны на $METRICS"
 missing=''
 for series in prepuller_build_info prepuller_cluster_up prepuller_cluster_sync_partial \
